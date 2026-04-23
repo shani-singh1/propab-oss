@@ -13,6 +13,7 @@ from propab.sandbox_profiles import effective_sandbox_timeout_sec
 from propab.db import create_engine, create_redis, create_session_factory
 from propab.events import EventEmitter
 from propab.llm import LLMClient
+from propab.tool_selection import select_tool_and_params
 from propab.tools.registry import ToolRegistry
 from propab.types import EventType
 from services.worker.domain_router import route_domain
@@ -114,17 +115,12 @@ async def run_sub_agent_async(payload: dict) -> dict:
             "timeout_sec": sandbox_timeout_sec,
             "domain": domain,
         }
-        first_spec = specs[0] if specs else None
-        if first_spec:
-            tool_name = first_spec["name"]
-            example = first_spec.get("example") or {}
-            params = example.get("params")
-            if not params:
-                tool_name = "json_extract"
-                params = {"data": {"hypothesis_rank": hypothesis.get("rank"), "label": "probe"}, "key": "label"}
-        else:
-            tool_name = "json_extract"
-            params = {"data": {"hypothesis_rank": hypothesis.get("rank"), "label": "probe"}, "key": "label"}
+        hyp_text = str(hypothesis.get("text", ""))
+        tool_name, params = select_tool_and_params(
+            specs,
+            hypothesis_text=hyp_text,
+            hypothesis=hypothesis,
+        )
 
         rank = hypothesis.get("rank")
         sandbox_code = (
@@ -364,15 +360,15 @@ async def run_sub_agent_async(payload: dict) -> dict:
             )
             step_index += 1
 
-        tool_hit = result is not None and result.success and result.output and result.output.get("exists")
+        tool_hit = result is not None and result.success
         verdict = "confirmed" if tool_hit or sandbox_ok else "inconclusive"
-        confidence = 0.58 if verdict == "confirmed" else 0.35
+        confidence = 0.62 if verdict == "confirmed" else 0.35
         evidence = (
-            "Tool probe and/or sandbox probe succeeded."
+            "Tool step completed successfully and/or sandbox probe succeeded."
             if verdict == "confirmed"
-            else "Tool and sandbox did not both confirm the probe."
+            else "Tool step failed or returned no success, and sandbox did not confirm."
         )
-        key_finding = "Experiment probes completed." if verdict == "confirmed" else None
+        key_finding = "Primary tool executed without error." if tool_hit else ("Sandbox probe completed." if sandbox_ok else None)
 
         await _update_hypothesis(
             session_factory,
