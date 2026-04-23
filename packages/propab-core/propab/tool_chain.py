@@ -20,6 +20,7 @@ _ACCEPTS_MODEL_ID = frozenset(
         "lr_range_test",
         "gradient_noise_scale",
         "compare_optimizers",
+        "hessian_analysis",
     }
 )
 

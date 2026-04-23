@@ -19,3 +19,8 @@ def test_registry_discovers_core_tools() -> None:
     assert "gradient_noise_scale" in names
     assert "reproduce_result" in names
     assert "plot_training_curves" in names
+    assert "compare_attention_variants" in names
+    assert "hyperparameter_sweep" in names
+    assert "compare_implementations" in names
+    assert "hessian_analysis" in names
+    assert "literature_baseline_compare" in names

@@ -22,3 +22,15 @@ jobs:
 
       - name: Run tests
         run: pytest tests/ -q --tb=short
+
+  compose-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Docker Compose file
+        run: docker compose -f docker-compose.yml config -q
+
+      - name: Build API image
+        run: docker compose -f docker-compose.yml build api
