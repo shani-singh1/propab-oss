@@ -6,25 +6,47 @@ import re
 from propab.llm import LLMClient
 
 DOMAIN_ROUTING_PROMPT = """
-Given this hypothesis, return the single most relevant domain.
+Given this hypothesis, return the single most relevant domain for Propab v1 (DL / algorithms / ML focus).
 
 Hypothesis: {hypothesis_text}
 
-Domains:
+Domains (choose exactly one name from this list):
 - deep_learning: neural networks, transformers, training, attention, PyTorch workflows
-- algorithm_optimization: gradient methods, complexity, benchmarking, convergence
-- ml_research: statistical tests, bootstrap CIs, experiment grids, FLOPs analysis
-- computational_biology: DNA/RNA/protein, genomics, CRISPR, cell biology
-- chemistry: molecular simulation, reaction prediction, spectroscopy
-- physics: mechanics, electromagnetism, quantum, thermodynamics
-- mathematics: algebra, calculus, linear algebra, number theory, topology
-- statistics: hypothesis testing, regression, Bayesian analysis, experimental design
-- ml_modeling: training models, evaluation, feature engineering, architecture search
-- data_analysis: EDA, visualization, aggregation, cleaning
-- general_computation: anything else — code execution, data fetching, parsing
+- algorithm_optimization: gradient methods, complexity, benchmarking, convergence, loss surfaces
+- ml_research: statistical tests, bootstrap CIs, experiment grids, FLOPs / reproducibility analysis
+- mathematics: formal math, symbolic computation, linear algebra proofs
+- statistics: classical stats, regression, inference (not deep nets)
+- data_analysis: EDA, aggregation, cleaning, tabular summaries
+- general_computation: anything else — sandboxed code, parsing, glue logic
 
 Return JSON only: {{"domain": "domain_name", "reason": "one sentence"}}
 """
+
+# v1 routing: DL / ALGO / ML first; coerce legacy or out-of-list labels.
+_ALLOWED = frozenset(
+    {
+        "deep_learning",
+        "algorithm_optimization",
+        "ml_research",
+        "mathematics",
+        "statistics",
+        "data_analysis",
+        "general_computation",
+    },
+)
+_LEGACY_TO_PRIMARY: dict[str, str] = {
+    "ml_modeling": "deep_learning",
+    "computational_biology": "general_computation",
+    "chemistry": "general_computation",
+    "physics": "general_computation",
+}
+
+
+def coerce_routed_domain(raw: str) -> str:
+    d = (raw or "").strip().lower().replace("-", "_")
+    if d in _ALLOWED:
+        return d
+    return _LEGACY_TO_PRIMARY.get(d, "general_computation")
 
 
 def _extract_json(text: str) -> dict | None:
@@ -58,6 +80,6 @@ async def route_domain(
         hypothesis_id=hypothesis_id,
     )
     data = _extract_json(raw) or {}
-    domain = str(data.get("domain", "general_computation")).strip() or "general_computation"
+    domain = coerce_routed_domain(str(data.get("domain", "general_computation")))
     reason = str(data.get("reason", "Default domain after routing.")).strip()
     return domain, reason
