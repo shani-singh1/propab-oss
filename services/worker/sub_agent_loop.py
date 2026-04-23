@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from propab.config import settings
+from propab.sandbox_profiles import effective_sandbox_timeout_sec
 from propab.db import create_engine, create_redis, create_session_factory
 from propab.events import EventEmitter
 from propab.llm import LLMClient
@@ -90,6 +91,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
             session_id=session_id,
             hypothesis_id=hypothesis_id,
         )
+        sandbox_timeout_sec = effective_sandbox_timeout_sec(domain, settings.sandbox_timeout_sec)
 
         await emitter.emit(
             session_id=session_id,
@@ -132,7 +134,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
             session_id=session_id,
             event_type=EventType.AGENT_PLAN_CREATED,
             step=f"experiment.{hypothesis_id}.plan",
-            payload={"plan": plan, "domain": domain},
+            payload={"plan": plan, "domain": domain, "sandbox_timeout_sec": sandbox_timeout_sec},
             hypothesis_id=hypothesis_id,
         )
 
@@ -169,7 +171,8 @@ async def run_sub_agent_async(payload: dict) -> dict:
                         step=f"experiment.{hypothesis_id}.step_{step_index}",
                         payload={
                             "memory_mb": settings.sandbox_memory_mb,
-                            "timeout_sec": settings.sandbox_timeout_sec,
+                            "timeout_sec": sandbox_timeout_sec,
+                            "domain": domain,
                             "attempt": attempt + 1,
                             "max_attempts": max_attempts,
                         },
@@ -178,7 +181,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
                     sandbox_out = await asyncio.to_thread(
                         run_sandboxed_python,
                         code,
-                        timeout_sec=settings.sandbox_timeout_sec,
+                        timeout_sec=sandbox_timeout_sec,
                         memory_mb=settings.sandbox_memory_mb,
                     )
                     parsed = sandbox_out.get("parsed") if isinstance(sandbox_out, dict) else None
@@ -243,7 +246,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
                             "error_json": json.dumps(sandbox_out) if not sandbox_out.get("ok") else "null",
                             "duration_ms": duration_ms,
                             "memory_mb": settings.sandbox_memory_mb,
-                            "timeout_sec": settings.sandbox_timeout_sec,
+                            "timeout_sec": sandbox_timeout_sec,
                         },
                     )
                     await session.commit()

@@ -10,6 +10,6 @@ COPY packages ./packages
 COPY services ./services
 COPY migrations ./migrations
 
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir -e ".[dl]"
 
 CMD ["celery", "-A", "services.worker.celery_app", "worker", "--loglevel=info", "--concurrency=2"]

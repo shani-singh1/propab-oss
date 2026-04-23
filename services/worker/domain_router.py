@@ -11,6 +11,9 @@ Given this hypothesis, return the single most relevant domain.
 Hypothesis: {hypothesis_text}
 
 Domains:
+- deep_learning: neural networks, transformers, training, attention, PyTorch workflows
+- algorithm_optimization: gradient methods, complexity, benchmarking, convergence
+- ml_research: statistical tests, bootstrap CIs, experiment grids, FLOPs analysis
 - computational_biology: DNA/RNA/protein, genomics, CRISPR, cell biology
 - chemistry: molecular simulation, reaction prediction, spectroscopy
 - physics: mechanics, electromagnetism, quantum, thermodynamics

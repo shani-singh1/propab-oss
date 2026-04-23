@@ -137,6 +137,10 @@ async def run_research_loop(
                 session_id=session_id,
                 session_factory=session_factory,
                 emitter=emitter,
+                llm=llm,
+                question=parsed.text,
+                prior=prior.to_dict(),
+                synthesis={"short_circuit": True, "short_answer": short_answer},
             )
             await _update_session(session_factory, session_id, status="completed", stage="completed")
             await emitter.emit(
@@ -300,10 +304,28 @@ async def run_research_loop(
         )
 
         await _update_session(session_factory, session_id, stage="paper")
+        synthesis_payload = {
+            "ledger": ledger,
+            "hypotheses": [h.to_dict() for _, h in hypothesis_rows],
+            "experiment_results": [
+                {
+                    "hypothesis_id": r.get("hypothesis_id"),
+                    "verdict": r.get("verdict"),
+                    "confidence": r.get("confidence"),
+                    "key_finding": (r.get("key_finding") or "")[:800],
+                    "evidence_summary": (r.get("evidence_summary") or "")[:1200],
+                }
+                for r in experiment_results
+            ],
+        }
         paper_payload = await write_paper_minimal(
             session_id=session_id,
             session_factory=session_factory,
             emitter=emitter,
+            llm=llm,
+            question=parsed.text,
+            prior=prior.to_dict(),
+            synthesis=synthesis_payload,
         )
 
         await _update_session(session_factory, session_id, status="completed", stage="completed")

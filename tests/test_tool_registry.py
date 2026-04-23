@@ -8,3 +8,6 @@ def test_registry_discovers_core_tools() -> None:
     assert "vector_dot" in names
     assert "category_counts" in names
     assert "numeric_summary" in names
+    assert "statistical_significance" in names
+    assert "run_experiment_grid" in names
+    assert "compare_gradient_methods" in names

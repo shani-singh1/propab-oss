@@ -1130,6 +1130,26 @@ volumes:
 | `SANDBOX_TIMEOUT_SEC` | `30` | No | Max CPU time for sandboxed code |
 | `SANDBOX_MEMORY_MB` | `512` | No | Max memory for sandboxed code |
 
+### Per-Domain Sandbox Timeout Profiles
+
+The `SANDBOX_TIMEOUT_SEC` environment variable sets the global default.
+ML and optimization domains override this with higher limits to accommodate
+real training loops. Override any domain timeout via environment variable.
+
+| Domain | Default timeout | Rationale |
+|---|---|---|
+| `general_computation` | 30s | Simple ops — long runtime implies infinite loop |
+| `mathematics` | 60s | Symbolic computation can be slow |
+| `statistics` | 60s | Bootstrap resampling on large data |
+| `data_analysis` | 60s | Large dataset processing |
+| `ml_research` | 120s | Statistical tests, grid experiments |
+| `algorithm_optimization` | 180s | Benchmarking across input sizes |
+| `deep_learning` | 300s | Training loops — 5min enables real experiments |
+
+Environment variable override example:
+`SANDBOX_TIMEOUT_DEEP_LEARNING=600` — doubles the deep learning timeout.
+Global `SANDBOX_TIMEOUT_SEC` applies to any domain not listed above.
+
 ### 13.3 Setup
 
 ```bash

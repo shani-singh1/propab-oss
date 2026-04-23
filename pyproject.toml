@@ -23,6 +23,9 @@ dependencies = [
   "qdrant-client>=1.12.0",
   "minio>=7.2.0",
   "docker>=7.1.0",
+  "numpy>=1.26.0",
+  "jinja2>=3.1.0",
+  "scipy>=1.11.0",
 ]
 
 [project.optional-dependencies]
@@ -35,6 +38,10 @@ dev = [
 rerank = [
   "sentence-transformers>=3.0.1",
 ]
+dl = [
+  "torch>=2.2.0",
+  "torchvision>=0.17.0",
+]
 
 [tool.setuptools]
 packages = [
@@ -44,6 +51,9 @@ packages = [
   "propab.tools.mathematics",
   "propab.tools.statistics",
   "propab.tools.data_analysis",
+  "propab.tools.deep_learning",
+  "propab.tools.algorithm_optimization",
+  "propab.tools.ml_research",
   "services",
   "services.api",
   "services.api.app",
@@ -59,9 +69,15 @@ propab = "packages/propab-core/propab"
 "propab.tools.mathematics" = "packages/propab-core/propab/tools/mathematics"
 "propab.tools.statistics" = "packages/propab-core/propab/tools/statistics"
 "propab.tools.data_analysis" = "packages/propab-core/propab/tools/data_analysis"
+"propab.tools.deep_learning" = "packages/propab-core/propab/tools/deep_learning"
+"propab.tools.algorithm_optimization" = "packages/propab-core/propab/tools/algorithm_optimization"
+"propab.tools.ml_research" = "packages/propab-core/propab/tools/ml_research"
 "services" = "services"
 "services.api" = "services/api"
 "services.api.app" = "services/api/app"
 "services.api.app.routes" = "services/api/app/routes"
 "services.orchestrator" = "services/orchestrator"
 "services.worker" = "services/worker"
+
+[tool.setuptools.package-data]
+propab = ["templates/*.j2"]
