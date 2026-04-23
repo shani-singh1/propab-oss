@@ -1,31 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 
+from propab.config import settings
 from propab.events import EventEmitter
 from propab.llm import LLMClient
 from propab.types import EventType
+from services.orchestrator.hypothesis_ranking import apply_architecture_ranking
 from services.orchestrator.intake import ParsedQuestion
-from services.orchestrator.schemas import Prior
-
-
-@dataclass(slots=True)
-class RankedHypothesis:
-    id: str
-    text: str
-    test_methodology: str
-    scores: dict[str, float]
-    rank: int
-
-    def to_dict(self) -> dict:
-        return {
-            "id": self.id,
-            "text": self.text,
-            "test_methodology": self.test_methodology,
-            "scores": self.scores,
-            "rank": self.rank,
-        }
+from services.orchestrator.schemas import Prior, RankedHypothesis
 
 
 def _build_hypothesis_prompt(parsed: ParsedQuestion, prior: Prior, max_hypotheses: int) -> str:
@@ -55,6 +38,8 @@ async def generate_ranked_hypotheses(
     llm: LLMClient,
     session_id: str,
     emitter: EventEmitter,
+    *,
+    use_llm_ranking: bool = True,
 ) -> list[RankedHypothesis]:
     prompt = _build_hypothesis_prompt(parsed, prior, max_hypotheses)
     raw = await llm.call(prompt=prompt, purpose="hypothesis_generation", session_id=session_id)
@@ -103,5 +88,14 @@ async def generate_ranked_hypotheses(
                 },
                 rank=rank,
             )
+        )
+
+    if use_llm_ranking and settings.openai_api_key.strip():
+        hypotheses = await apply_architecture_ranking(
+            hypotheses=hypotheses,
+            prior=prior,
+            question=parsed.text,
+            llm=llm,
+            session_id=session_id,
         )
     return hypotheses

@@ -19,7 +19,7 @@ docker compose up
 |------|--------|---------------|
 | **1** — Foundation | Compose, Postgres **+ Alembic**, events, SSE, arXiv/PDF, chunk/Qdrant, BM25, citations, TTL | **Closed for this slice**: Alembic at repo root; Postgres still auto-applies `migrations/001_initial.sql` on first Docker boot; run `alembic upgrade head` with `DATABASE_URL_SYNC` for revision tracking. Orchestrator **stub** exposes `/health` on port **8010** (full loop still runs in the API until a later split). |
 | **2** — Retrieval + prior | Query expansion, hybrid + RRF, cross-encoder, prior, short-circuit, literature tests | **Mostly done**: optional **cross-encoder** via `pip install -e ".[rerank]"` and `RERANKER_ENABLED=true`; RRF unit test in `tests/test_retrieval_rrf.py`. |
-| **3** — Agent core | Loop, hypotheses, Celery, tools, sandbox, 40 tools | **Partial** (no 40-tool pack yet). |
+| **3** — Agent core | Loop, hypotheses, Celery, tools, sandbox, 40 tools | **In progress**: §6.2-style **hypothesis ranking** (embedding novelty + LLM testability/impact/scope), **incremental** Celery result collection, **4** registered tools with tests (40-tool pack still open). |
 | **4** — Output + frontend | Full paper sections + Jinja, inspector UX | **Partial** (methods trace + minimal LaTeX; frontend submit/SSE/session JSON). |
 | **5** | Ollama, datasets, grounding | Backlog. |
 

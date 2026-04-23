@@ -21,3 +21,23 @@ class Prior:
             "dead_ends": self.dead_ends,
             "key_papers": self.key_papers,
         }
+
+
+@dataclass(slots=True)
+class RankedHypothesis:
+    """Hypothesis with §6.2 ranking dimensions."""
+
+    id: str
+    text: str
+    test_methodology: str
+    scores: dict[str, float]
+    rank: int
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "text": self.text,
+            "test_methodology": self.test_methodology,
+            "scores": self.scores,
+            "rank": self.rank,
+        }

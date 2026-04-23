@@ -41,6 +41,9 @@ packages = [
   "propab",
   "propab.tools",
   "propab.tools.general_computation",
+  "propab.tools.mathematics",
+  "propab.tools.statistics",
+  "propab.tools.data_analysis",
   "services",
   "services.api",
   "services.api.app",
@@ -53,6 +56,9 @@ packages = [
 propab = "packages/propab-core/propab"
 "propab.tools" = "packages/propab-core/propab/tools"
 "propab.tools.general_computation" = "packages/propab-core/propab/tools/general_computation"
+"propab.tools.mathematics" = "packages/propab-core/propab/tools/mathematics"
+"propab.tools.statistics" = "packages/propab-core/propab/tools/statistics"
+"propab.tools.data_analysis" = "packages/propab-core/propab/tools/data_analysis"
 "services" = "services"
 "services.api" = "services/api"
 "services.api.app" = "services/api/app"
