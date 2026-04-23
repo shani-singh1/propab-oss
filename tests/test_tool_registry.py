@@ -11,3 +11,5 @@ def test_registry_discovers_core_tools() -> None:
     assert "statistical_significance" in names
     assert "run_experiment_grid" in names
     assert "compare_gradient_methods" in names
+    assert "scaling_law_fit" in names
+    assert "numerical_stability_test" in names
