@@ -10,8 +10,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from propab.config import settings
 from propab.db import create_engine, create_redis, create_session_factory
 from propab.events import EventEmitter
+from propab.llm import LLMClient
 from propab.tools.registry import ToolRegistry
 from propab.types import EventType
+from services.worker.domain_router import route_domain
 
 
 async def _update_hypothesis(
@@ -52,12 +54,18 @@ async def run_sub_agent_async(payload: dict) -> dict:
     session_id: str = payload["session_id"]
     hypothesis_id: str = payload["hypothesis_id"]
     hypothesis: dict = payload["hypothesis"]
-    domain: str = payload.get("domain", "general_computation")
 
     engine = create_engine(settings.database_url)
     session_factory = create_session_factory(engine)
     redis = await create_redis(settings.redis_url)
     emitter = EventEmitter(source="worker", redis=redis, session_factory=session_factory)
+    llm = LLMClient(
+        provider=settings.llm_provider,
+        model=settings.llm_model,
+        api_key=settings.openai_api_key,
+        emitter=emitter,
+        session_factory=session_factory,
+    )
     registry = ToolRegistry()
     trace_pointer = str(uuid4())
     started = time.perf_counter()
@@ -74,20 +82,10 @@ async def run_sub_agent_async(payload: dict) -> dict:
             hypothesis_id=hypothesis_id,
         )
 
-        plan = {
-            "steps": [
-                {
-                    "type": "tool",
-                    "tool": "json_extract",
-                    "params": {"data": {"hypothesis_rank": hypothesis.get("rank"), "label": "probe"}, "key": "label"},
-                }
-            ]
-        }
-        await emitter.emit(
+        domain, domain_reason = await route_domain(
+            hypothesis_text=str(hypothesis.get("text", "")),
+            llm=llm,
             session_id=session_id,
-            event_type=EventType.AGENT_PLAN_CREATED,
-            step=f"experiment.{hypothesis_id}.plan",
-            payload={"plan": plan},
             hypothesis_id=hypothesis_id,
         )
 
@@ -95,7 +93,31 @@ async def run_sub_agent_async(payload: dict) -> dict:
             session_id=session_id,
             event_type=EventType.TOOL_SELECTED,
             step=f"experiment.{hypothesis_id}.domain",
-            payload={"domain": domain, "reason": "Default domain for bootstrap tool execution."},
+            payload={"domain": domain, "reason": domain_reason},
+            hypothesis_id=hypothesis_id,
+        )
+
+        specs = registry.get_cluster(domain)
+        if not specs:
+            specs = registry.get_cluster("general_computation")
+        first_spec = specs[0] if specs else None
+        if first_spec:
+            tool_name = first_spec["name"]
+            example = first_spec.get("example") or {}
+            params = example.get("params")
+            if not params:
+                tool_name = "json_extract"
+                params = {"data": {"hypothesis_rank": hypothesis.get("rank"), "label": "probe"}, "key": "label"}
+        else:
+            tool_name = "json_extract"
+            params = {"data": {"hypothesis_rank": hypothesis.get("rank"), "label": "probe"}, "key": "label"}
+
+        plan = {"steps": [{"type": "tool", "tool": tool_name, "params": params}]}
+        await emitter.emit(
+            session_id=session_id,
+            event_type=EventType.AGENT_PLAN_CREATED,
+            step=f"experiment.{hypothesis_id}.plan",
+            payload={"plan": plan, "domain": domain},
             hypothesis_id=hypothesis_id,
         )
 
