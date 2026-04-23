@@ -56,3 +56,36 @@ def put_bytes(*, object_name: str, data: bytes, content_type: str) -> str | None
 
 def put_text_file(*, object_name: str, text: str, content_type: str = "text/plain; charset=utf-8") -> str | None:
     return put_bytes(object_name=object_name, data=text.encode("utf-8"), content_type=content_type)
+
+
+def presigned_get_object(*, object_name: str, expires_hours: int = 168) -> str | None:
+    """Presigned GET URL for an existing object (no upload)."""
+    client = get_minio_client()
+    if client is None:
+        return None
+    from propab.config import settings
+
+    bucket = settings.minio_bucket
+    try:
+        return client.presigned_get_object(bucket, object_name, expires=timedelta(hours=expires_hours))
+    except S3Error:
+        return None
+
+
+def get_object_bytes(*, object_name: str) -> bytes | None:
+    """Download object body from MinIO (for embedding binaries in LaTeX build)."""
+    client = get_minio_client()
+    if client is None:
+        return None
+    from propab.config import settings
+
+    bucket = settings.minio_bucket
+    try:
+        resp = client.get_object(bucket, object_name)
+        try:
+            return resp.read()
+        finally:
+            resp.close()
+            resp.release_conn()
+    except S3Error:
+        return None
