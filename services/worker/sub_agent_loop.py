@@ -28,6 +28,7 @@ async def _update_hypothesis(
     confidence: float | None = None,
     evidence_summary: str | None = None,
     key_finding: str | None = None,
+    tool_trace_id: str | None = None,
 ) -> None:
     fields: list[str] = ["status = :status"]
     params: dict = {"id": hypothesis_id, "status": status}
@@ -43,6 +44,9 @@ async def _update_hypothesis(
     if key_finding is not None:
         fields.append("key_finding = :key_finding")
         params["key_finding"] = key_finding
+    if tool_trace_id is not None:
+        fields.append("tool_trace_id = :tool_trace_id")
+        params["tool_trace_id"] = tool_trace_id
     query = text(f"UPDATE hypotheses SET {', '.join(fields)} WHERE id = :id")
     async with session_factory() as session:
         await session.execute(query, params)
@@ -104,6 +108,12 @@ async def run_sub_agent_async(payload: dict) -> dict:
         specs = registry.get_cluster(domain)
         if not specs:
             specs = registry.get_cluster("general_computation")
+        available_tools = [str(s["name"]) for s in specs]
+        resource_limits = {
+            "memory_mb": settings.sandbox_memory_mb,
+            "timeout_sec": sandbox_timeout_sec,
+            "domain": domain,
+        }
         first_spec = specs[0] if specs else None
         if first_spec:
             tool_name = first_spec["name"]
@@ -128,13 +138,21 @@ async def run_sub_agent_async(payload: dict) -> dict:
             "steps": [
                 {"type": "tool", "tool": tool_name, "params": params},
                 {"type": "code", "code": sandbox_code},
-            ]
+            ],
+            "available_tools": available_tools,
+            "resource_limits": resource_limits,
         }
         await emitter.emit(
             session_id=session_id,
             event_type=EventType.AGENT_PLAN_CREATED,
             step=f"experiment.{hypothesis_id}.plan",
-            payload={"plan": plan, "domain": domain, "sandbox_timeout_sec": sandbox_timeout_sec},
+            payload={
+                "plan": plan,
+                "domain": domain,
+                "sandbox_timeout_sec": sandbox_timeout_sec,
+                "available_tools": available_tools,
+                "resource_limits": resource_limits,
+            },
             hypothesis_id=hypothesis_id,
         )
 
@@ -364,6 +382,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
             confidence=confidence,
             evidence_summary=evidence,
             key_finding=key_finding,
+            tool_trace_id=trace_pointer,
         )
 
         await emitter.emit(
@@ -401,6 +420,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
             confidence=0.0,
             evidence_summary=str(exc),
             key_finding=None,
+            tool_trace_id=trace_pointer,
         )
         await emitter.emit(
             session_id=session_id,
