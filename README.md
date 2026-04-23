@@ -33,6 +33,8 @@ alembic upgrade head
 
 **CI:** GitHub Actions runs `pytest` on push and pull requests (`.github/workflows/ci.yml`).
 
+**Still open (see `ARCHITECTURE.md` §16 and `TOOLS.md`):** full ~40-tool matrix and P2/P3 packs; LLM-based intake domain; sub-agent multi-step plans and tool-chaining; orchestrator split from API; Docker Compose CI smoke; Ollama, dataset plugins, claim-grounding (§15).
+
 ---
 
 ## What it does
