@@ -83,6 +83,7 @@ async def synthesize_prior_from_papers(
     question: str,
     papers: list[dict[str, Any]],
     emitter: EventEmitter,
+    retrieval_chunks: list[dict[str, Any]] | None = None,
 ) -> Prior:
     """
     LLM prior builder aligned to ARCHITECTURE §5.4 (structured Prior JSON).
@@ -103,10 +104,19 @@ async def synthesize_prior_from_papers(
             }
         )
 
+    retrieval = retrieval_chunks or []
+    retrieval_preview = [
+        {"paper_id": c.get("paper_id"), "chunk_index": c.get("chunk_index"), "text": (c.get("text") or "")[:2500]}
+        for c in retrieval[:20]
+    ]
+
     prompt = f"""You are a research prior builder.
 
 Research question:
 {question}
+
+Top retrieval chunks (hybrid BM25 + dense, RRF) (JSON):
+{json.dumps(retrieval_preview, ensure_ascii=False)}
 
 Paper snippets (JSON):
 {json.dumps(snippets, ensure_ascii=False)}

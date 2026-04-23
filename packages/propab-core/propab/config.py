@@ -7,6 +7,17 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     llm_provider: str = "openai"
     llm_model: str = "gpt-4o"
+    embed_model: str = "text-embedding-3-small"
+    qdrant_url: str = ""
+    qdrant_collection: str = "propab_chunks"
+    propab_data_dir: str = "./data"
+    minio_endpoint: str = ""
+    minio_access_key: str = ""
+    minio_secret_key: str = ""
+    minio_bucket: str = "propab"
+    minio_secure: bool = False
+    sandbox_timeout_sec: int = 30
+    sandbox_memory_mb: int = 512
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 

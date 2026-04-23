@@ -15,6 +15,7 @@ from propab.llm import LLMClient
 from propab.types import EventType
 from services.orchestrator.intake import ParsedQuestion
 from services.orchestrator.prior_builder import synthesize_prior_from_papers
+from services.orchestrator.retrieval import run_hybrid_retrieval
 from services.orchestrator.schemas import Prior
 
 
@@ -257,10 +258,19 @@ async def build_prior(
 
     await _enrich_papers_with_pdf(papers, session_id=session_id, emitter=emitter, session_factory=session_factory)
 
+    retrieval_chunks = await run_hybrid_retrieval(
+        session_id=session_id,
+        question=parsed.text,
+        papers=papers,
+        llm=llm,
+        emitter=emitter,
+    )
+
     return await synthesize_prior_from_papers(
         llm=llm,
         session_id=session_id,
         question=parsed.text,
         papers=papers,
         emitter=emitter,
+        retrieval_chunks=retrieval_chunks,
     )
