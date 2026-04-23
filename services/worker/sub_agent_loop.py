@@ -159,46 +159,65 @@ async def run_sub_agent_async(payload: dict) -> dict:
                     payload={"code": code},
                     hypothesis_id=hypothesis_id,
                 )
-                await emitter.emit(
-                    session_id=session_id,
-                    event_type=EventType.CODE_SUBMITTED,
-                    step=f"experiment.{hypothesis_id}.step_{step_index}",
-                    payload={"memory_mb": settings.sandbox_memory_mb, "timeout_sec": settings.sandbox_timeout_sec},
-                    hypothesis_id=hypothesis_id,
-                )
-                sandbox_out = await asyncio.to_thread(
-                    run_sandboxed_python,
-                    code,
-                    timeout_sec=settings.sandbox_timeout_sec,
-                    memory_mb=settings.sandbox_memory_mb,
-                )
-                duration_ms = int((time.perf_counter() - step_started) * 1000)
-                parsed = sandbox_out.get("parsed") if isinstance(sandbox_out, dict) else None
-                sandbox_ok = bool(
-                    sandbox_out.get("ok")
-                    and isinstance(parsed, dict)
-                    and parsed.get("sandbox") == "ok"
-                )
-                if sandbox_out.get("ok"):
+                max_attempts = max(1, int(settings.sandbox_code_max_retries))
+                sandbox_out: dict = {}
+                parsed = None
+                for attempt in range(max_attempts):
                     await emitter.emit(
                         session_id=session_id,
-                        event_type=EventType.CODE_RESULT,
+                        event_type=EventType.CODE_SUBMITTED,
                         step=f"experiment.{hypothesis_id}.step_{step_index}",
-                        payload={"stdout_json": parsed, "stdout": sandbox_out.get("stdout")},
+                        payload={
+                            "memory_mb": settings.sandbox_memory_mb,
+                            "timeout_sec": settings.sandbox_timeout_sec,
+                            "attempt": attempt + 1,
+                            "max_attempts": max_attempts,
+                        },
                         hypothesis_id=hypothesis_id,
                     )
-                else:
-                    err_type = sandbox_out.get("error_type", "code_error")
+                    sandbox_out = await asyncio.to_thread(
+                        run_sandboxed_python,
+                        code,
+                        timeout_sec=settings.sandbox_timeout_sec,
+                        memory_mb=settings.sandbox_memory_mb,
+                    )
+                    parsed = sandbox_out.get("parsed") if isinstance(sandbox_out, dict) else None
+                    ok_run = bool(
+                        sandbox_out.get("ok")
+                        and isinstance(parsed, dict)
+                        and parsed.get("sandbox") == "ok"
+                    )
+                    if ok_run:
+                        sandbox_ok = True
+                        await emitter.emit(
+                            session_id=session_id,
+                            event_type=EventType.CODE_RESULT,
+                            step=f"experiment.{hypothesis_id}.step_{step_index}",
+                            payload={
+                                "stdout_json": parsed,
+                                "stdout": sandbox_out.get("stdout"),
+                                "attempt": attempt + 1,
+                            },
+                            hypothesis_id=hypothesis_id,
+                        )
+                        break
                     is_timeout = "timeout" in str(sandbox_out.get("message", "")).lower()
                     ev = EventType.CODE_TIMEOUT if is_timeout else EventType.CODE_ERROR
                     await emitter.emit(
                         session_id=session_id,
                         event_type=ev,
                         step=f"experiment.{hypothesis_id}.step_{step_index}",
-                        payload={"error": sandbox_out, "retry": 0},
+                        payload={
+                            "error": sandbox_out,
+                            "retry": attempt + 1,
+                            "max_attempts": max_attempts,
+                        },
                         hypothesis_id=hypothesis_id,
                     )
+                else:
+                    sandbox_ok = False
 
+                duration_ms = int((time.perf_counter() - step_started) * 1000)
                 async with session_factory() as session:
                     await session.execute(
                         text(
@@ -219,7 +238,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
                             "id": step_id,
                             "hypothesis_id": hypothesis_id,
                             "step_index": step_index,
-                            "input_json": json.dumps({"code": code}),
+                            "input_json": json.dumps({"code": code, "max_attempts": max_attempts}),
                             "output_json": json.dumps({"parsed": parsed, "stdout": sandbox_out.get("stdout")}),
                             "error_json": json.dumps(sandbox_out) if not sandbox_out.get("ok") else "null",
                             "duration_ms": duration_ms,

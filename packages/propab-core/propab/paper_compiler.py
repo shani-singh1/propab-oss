@@ -7,6 +7,37 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 
+def _latex_escape(s: str) -> str:
+    """Escape minimal LaTeX special characters in user/tool-derived text."""
+    if not s:
+        return ""
+    out: list[str] = []
+    for ch in s:
+        if ch == "\\":
+            out.append(r"\textbackslash{}")
+        elif ch == "&":
+            out.append(r"\&")
+        elif ch == "%":
+            out.append(r"\%")
+        elif ch == "$":
+            out.append(r"\$")
+        elif ch == "#":
+            out.append(r"\#")
+        elif ch == "_":
+            out.append(r"\_")
+        elif ch == "{":
+            out.append(r"\{")
+        elif ch == "}":
+            out.append(r"\}")
+        elif ch == "~":
+            out.append(r"\textasciitilde{}")
+        elif ch == "^":
+            out.append(r"\textasciicircum{}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def _format_params(params: Any) -> str:
     if params is None:
         return "{}"
@@ -39,11 +70,11 @@ async def compile_methods_section(session_factory: async_sessionmaker, hypothesi
         step_type = row["step_type"]
         if step_type == "tool_call":
             input_data = row["input_json"] or {}
-            tool_name = input_data.get("tool", "unknown_tool")
+            tool_name = _latex_escape(str(input_data.get("tool", "unknown_tool")))
             params = input_data.get("params")
             duration_ms = row["duration_ms"] or 0
             lines.append(
-                f"Tool \\texttt{{{tool_name}}} was called with parameters {_format_params(params)}. "
+                f"Tool \\texttt{{{tool_name}}} was called with parameters {_latex_escape(_format_params(params))}. "
                 f"Execution completed in {duration_ms}ms."
             )
         elif step_type == "code_exec":
@@ -55,7 +86,7 @@ async def compile_methods_section(session_factory: async_sessionmaker, hypothesi
                 f"Code is available in the experiment trace for this hypothesis."
             )
         elif step_type == "llm_reasoning":
-            summary = row["summary"] or "intermediate evaluation"
+            summary = _latex_escape(str(row["summary"] or "intermediate evaluation"))
             lines.append(f"The agent evaluated intermediate results and \\textit{{{summary}}}.")
     return "\n".join(lines) if lines else "No automated experiment steps were recorded for this hypothesis."
 
@@ -82,9 +113,10 @@ async def compile_session_methods_latex(session_factory: async_sessionmaker, ses
         hid = str(hyp["id"])
         body = await compile_methods_section(session_factory, hid)
         label = f"h{hyp['rank']}"
+        hyp_text = _latex_escape(str(hyp["text"] or ""))
         section = (
             f"\\subsection{{Hypothesis {label}}}\\label{{subsec:{hid}}}\n"
-            f"\\textit{{{hyp['text']}}}\\\\\n"
+            f"\\textit{{{hyp_text}}}\\\\\n"
             f"{body}\n"
         )
         sections.append(section)

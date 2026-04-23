@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     minio_secure: bool = False
     sandbox_timeout_sec: int = 30
     sandbox_memory_mb: int = 512
+    sandbox_code_max_retries: int = 3
+    literature_answer_similarity: float = 0.92
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 

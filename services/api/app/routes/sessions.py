@@ -32,6 +32,36 @@ async def get_session_state(
     return dict(row)
 
 
+@router.get("/{session_id}/events")
+async def get_session_events(
+    session_id: str,
+    session_factory: async_sessionmaker = Depends(get_session_factory),
+) -> dict:
+    async with session_factory() as session:
+        exists = (
+            await session.execute(
+                text("SELECT id FROM research_sessions WHERE id = :session_id"),
+                {"session_id": session_id},
+            )
+        ).scalar_one_or_none()
+        if exists is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, event_type, source, step, hypothesis_id, parent_event_id, payload_json, created_at
+                    FROM events
+                    WHERE session_id = :session_id
+                    ORDER BY created_at ASC
+                    """
+                ),
+                {"session_id": session_id},
+            )
+        ).mappings().all()
+    return {"session_id": session_id, "events": [dict(row) for row in rows]}
+
+
 @router.get("/{session_id}/prior")
 async def get_session_prior(
     session_id: str,

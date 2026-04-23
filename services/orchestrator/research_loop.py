@@ -12,6 +12,7 @@ from propab.config import settings
 from propab.events import EventEmitter
 from propab.llm import LLMClient
 from propab.types import EventType
+from services.orchestrator.answer_gate import evaluate_literature_short_circuit
 from services.orchestrator.hypotheses import RankedHypothesis, generate_ranked_hypotheses
 from services.orchestrator.intake import parse_question
 from services.orchestrator.literature import build_prior
@@ -99,6 +100,13 @@ async def run_research_loop(
             step="intake.parse",
             payload={"domain": parsed.domain, "sub_questions": parsed.sub_questions},
         )
+        if len(parsed.sub_questions) > 1:
+            await emitter.emit(
+                session_id=session_id,
+                event_type=EventType.INTAKE_DECOMPOSED,
+                step="intake.decompose",
+                payload={"sub_questions": parsed.sub_questions},
+            )
 
         await _update_session(session_factory, session_id, stage="literature")
         prior = await build_prior(
@@ -116,6 +124,34 @@ async def run_research_loop(
             step="literature.prior_build",
             payload={"prior": prior.to_dict()},
         )
+
+        short_answer = await evaluate_literature_short_circuit(
+            question=parsed.text,
+            prior=prior,
+            session_id=session_id,
+            emitter=emitter,
+        )
+        if short_answer is not None:
+            await _update_session(session_factory, session_id, stage="paper")
+            paper_payload = await write_paper_minimal(
+                session_id=session_id,
+                session_factory=session_factory,
+                emitter=emitter,
+            )
+            await _update_session(session_factory, session_id, status="completed", stage="completed")
+            await emitter.emit(
+                session_id=session_id,
+                event_type=EventType.SESSION_COMPLETED,
+                step="session.complete",
+                payload={
+                    "paper": paper_payload,
+                    "breakthroughs": [],
+                    "dead_ends": [],
+                    "existing_answer": short_answer,
+                    "note": "Literature short-circuit: question matched an established fact in the prior.",
+                },
+            )
+            return
 
         await _update_session(session_factory, session_id, stage="hypothesis")
         hypotheses = await generate_ranked_hypotheses(
@@ -164,6 +200,7 @@ async def run_research_loop(
 
             experiment_results = await asyncio.to_thread(_run_group)
 
+        ledger: dict[str, list[str]] = {"confirmed": [], "refuted": [], "inconclusive": []}
         for result in experiment_results:
             await emitter.emit(
                 session_id=session_id,
@@ -172,6 +209,21 @@ async def run_research_loop(
                 payload={"result": result},
                 hypothesis_id=result.get("hypothesis_id"),
             )
+            hid = result.get("hypothesis_id")
+            if hid and result.get("verdict") == "confirmed":
+                ledger["confirmed"].append(str(hid))
+            elif hid and result.get("verdict") == "refuted":
+                ledger["refuted"].append(str(hid))
+            elif hid:
+                ledger["inconclusive"].append(str(hid))
+
+            await emitter.emit(
+                session_id=session_id,
+                event_type=EventType.SYNTH_LEDGER_UPDATED,
+                step="synthesis.ledger",
+                payload={"ledger": dict(ledger), "last_result_hypothesis_id": hid},
+            )
+
             if result.get("verdict") == "confirmed" and float(result.get("confidence") or 0) > 0.85:
                 await emitter.emit(
                     session_id=session_id,
@@ -189,18 +241,12 @@ async def run_research_loop(
                     hypothesis_id=result.get("hypothesis_id"),
                 )
 
-        ledger = {
-            "confirmed": [r["hypothesis_id"] for r in experiment_results if r.get("verdict") == "confirmed"],
-            "refuted": [r["hypothesis_id"] for r in experiment_results if r.get("verdict") == "refuted"],
-            "inconclusive": [r["hypothesis_id"] for r in experiment_results if r.get("verdict") == "inconclusive"],
-        }
-
         await _update_session(session_factory, session_id, stage="synthesis")
         await emitter.emit(
             session_id=session_id,
             event_type=EventType.SYNTH_LEDGER_UPDATED,
             step="synthesis.ledger",
-            payload={"final_ledger": ledger},
+            payload={"final_ledger": dict(ledger)},
         )
 
         await _update_session(session_factory, session_id, stage="paper")

@@ -20,6 +20,7 @@ class EventType(str, Enum):
     LIT_PAPER_INDEXED = "literature.paper_indexed"
     LIT_RETRIEVAL_QUERY = "literature.retrieval_query"
     LIT_RETRIEVAL_RESULTS = "literature.retrieval_results"
+    LIT_RETRIEVAL_RERANKED = "literature.retrieval_reranked"
     LIT_PRIOR_BUILT = "literature.prior_built"
     LIT_ANSWER_FOUND = "literature.answer_found"
     HYPO_GENERATED = "hypothesis.generated"

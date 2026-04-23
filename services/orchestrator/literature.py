@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 import json
+import re
 from typing import Any
 from xml.etree import ElementTree
 
@@ -39,6 +40,84 @@ def _parse_arxiv_feed(xml_text: str) -> list[dict[str, Any]]:
             }
         )
     return papers
+
+
+def _extract_arxiv_ids_from_text(text: str, limit: int = 80) -> list[str]:
+    if not text:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in re.finditer(r"arxiv:?\s*v?(\d{4})\.(\d{4,5})(v\d+)?", text, re.IGNORECASE):
+        aid = f"{m.group(1)}.{m.group(2)}{m.group(3) or ''}"
+        if aid not in seen:
+            seen.add(aid)
+            out.append(aid)
+        if len(out) >= limit:
+            break
+    for m in re.finditer(r"\b(\d{4})\.(\d{4,5})(v\d+)?\b", text):
+        aid = f"{m.group(1)}.{m.group(2)}{m.group(3) or ''}"
+        if aid not in seen and len(m.group(1)) == 4:
+            seen.add(aid)
+            out.append(aid)
+        if len(out) >= limit:
+            break
+    return out
+
+
+async def _persist_paper_citations(
+    session_factory: async_sessionmaker,
+    source_paper_id: str,
+    cited_ids: list[str],
+) -> None:
+    cited_ids = [c for c in cited_ids if c and c != source_paper_id]
+    if not cited_ids:
+        return
+    async with session_factory() as session:
+        for cid in cited_ids:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO paper_citations (source_paper_id, cited_paper_id)
+                    VALUES (:source, :cited)
+                    ON CONFLICT DO NOTHING
+                    """
+                ),
+                {"source": source_paper_id, "cited": cid},
+            )
+        await session.commit()
+
+
+async def _fetch_semantic_scholar(query: str, max_results: int = 5) -> list[dict[str, Any]]:
+    url = "https://api.semanticscholar.org/graph/v1/paper/search"
+    params = {"query": query, "limit": max_results, "fields": "paperId,title,abstract,externalIds,authors"}
+    async with httpx.AsyncClient(timeout=25) as client:
+        response = await client.get(url, params=params)
+        response.raise_for_status()
+        payload = response.json()
+    papers: list[dict[str, Any]] = []
+    for item in payload.get("data") or []:
+        ext = item.get("externalIds") or {}
+        arxiv_id = ext.get("ArXiv")
+        pid = str(item.get("paperId", ""))
+        if arxiv_id:
+            paper_id = str(arxiv_id)
+            pdf_url = f"https://arxiv.org/pdf/{paper_id}.pdf"
+        else:
+            paper_id = f"semantic_scholar:{pid}" if pid else ""
+            pdf_url = None
+        authors_raw = item.get("authors") or []
+        names = [a.get("name", "") for a in authors_raw if isinstance(a, dict)]
+        papers.append(
+            {
+                "id": paper_id,
+                "title": item.get("title") or "",
+                "abstract": item.get("abstract") or "",
+                "authors": [n for n in names if n],
+                "pdf_url": pdf_url,
+                "sections_json": None,
+            }
+        )
+    return [p for p in papers if p.get("id")]
 
 
 async def _fetch_arxiv(query: str, max_results: int = 5) -> list[dict[str, Any]]:
@@ -204,6 +283,9 @@ async def _enrich_papers_with_pdf(
                     step="literature.index",
                     payload={"arxiv_id": paper["id"], "source": "pdf_text"},
                 )
+                body_text = sections_json.get("body") or ""
+                cited = _extract_arxiv_ids_from_text(body_text)
+                await _persist_paper_citations(session_factory, paper["id"], cited)
             except Exception as exc:
                 await emitter.emit(
                     session_id=session_id,
@@ -241,6 +323,8 @@ async def build_prior(
             )
     else:
         papers = await _fetch_arxiv(parsed.text)
+        if not papers:
+            papers = await _fetch_semantic_scholar(parsed.text)
         await _upsert_papers(session_factory, papers)
         for paper in papers:
             await emitter.emit(
@@ -264,6 +348,7 @@ async def build_prior(
         papers=papers,
         llm=llm,
         emitter=emitter,
+        session_factory=session_factory,
     )
 
     return await synthesize_prior_from_papers(
