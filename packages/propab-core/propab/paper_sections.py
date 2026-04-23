@@ -18,7 +18,11 @@ def render_paper_tex(
     abstract: str,
     introduction: str,
     methods_tex: str,
+    results_tex: str,
+    figures_tex: str,
     discussion: str,
+    conclusion: str,
+    references_tex: str,
 ) -> str:
     from jinja2 import Environment, FileSystemLoader
 
@@ -29,7 +33,11 @@ def render_paper_tex(
         abstract=abstract,
         introduction=introduction,
         methods_tex=methods_tex,
+        results_tex=results_tex,
+        figures_tex=figures_tex,
         discussion=discussion,
+        conclusion=conclusion,
+        references_tex=references_tex,
     )
 
 
@@ -44,7 +52,10 @@ def _fallback_from_context(question: str, prior: dict[str, Any], synthesis: dict
                 "This report documents a literature-aligned answer produced without full hypothesis testing."
             ),
             "discussion": _latex_escape(
-                "See abstract for the established finding; methods section records trace metadata when available."
+                "The short-circuit path skipped multi-hypothesis experiments; see abstract and prior literature."
+            ),
+            "conclusion": _latex_escape(
+                "Established literature supports the stated answer; reproduce with full experiments if stakes are high."
             ),
         }
     kpapers = prior.get("key_papers") or []
@@ -62,12 +73,17 @@ def _fallback_from_context(question: str, prior: dict[str, Any], synthesis: dict
         f"Automated experiments concluded with ledger "
         f"(confirmed={len(ledger.get('confirmed', []))}, refuted={len(ledger.get('refuted', []))}, "
         f"inconclusive={len(ledger.get('inconclusive', []))}). "
-        "Limitations include sandboxed execution and synthetic proxies where noted in tool outputs."
+        "Limitations include sandboxed execution and tool proxies where noted in outputs."
+    )
+    concl_plain = (
+        "Primary takeaways depend on hypotheses marked confirmed in the results section; "
+        "inconclusive rows indicate insufficient signal or tooling limits."
     )
     return {
         "abstract": _latex_escape(question[:1500]),
         "introduction": _latex_escape(intro_plain),
         "discussion": _latex_escape(disc_plain),
+        "conclusion": _latex_escape(concl_plain),
     }
 
 
@@ -102,11 +118,13 @@ async def generate_prose_sections(
 
     abstract = await one("paper.abstract", "Write the abstract summarizing problem, approach, and high-level outcome.")
     introduction = await one("paper.introduction", "Write the introduction: motivation, gap, and what was executed.")
-    discussion = await one("paper.discussion", "Write discussion: interpret experiment ledger, limitations, next steps.")
+    discussion = await one("paper.discussion", "Write discussion: interpret experiment ledger, limitations, rival explanations.")
+    conclusion = await one("paper.conclusion", "Write a tight conclusion: what was learned, what remains open, one recommendation.")
 
     fb = _fallback_from_context(question, prior, synthesis)
     return {
         "abstract": abstract or fb["abstract"],
         "introduction": introduction or fb["introduction"],
         "discussion": discussion or fb["discussion"],
+        "conclusion": conclusion or fb["conclusion"],
     }

@@ -3,6 +3,7 @@
 \usepackage{amsmath,amssymb}
 \usepackage{hyperref}
 \usepackage{graphicx}
+\usepackage{url}
 \hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue,citecolor=blue}
 
 \title{ {{- title -}} }
@@ -21,7 +22,19 @@
 
 {{ methods_tex }}
 
-\section{Results and discussion}
+{{ results_tex }}
+
+{% if figures_tex %}
+\section{Figures}
+{{ figures_tex }}
+{% endif %}
+
+\section{Discussion}
 {{ discussion }}
+
+\section{Conclusion}
+{{ conclusion }}
+
+{{ references_tex }}
 
 \end{document}
