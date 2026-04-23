@@ -13,3 +13,5 @@ def test_registry_discovers_core_tools() -> None:
     assert "compare_gradient_methods" in names
     assert "scaling_law_fit" in names
     assert "numerical_stability_test" in names
+    assert "activation_statistics" in names
+    assert "regularization_effect" in names
