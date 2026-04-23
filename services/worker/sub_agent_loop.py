@@ -13,6 +13,7 @@ from propab.sandbox_profiles import effective_sandbox_timeout_sec
 from propab.db import create_engine, create_redis, create_session_factory
 from propab.events import EventEmitter
 from propab.llm import LLMClient
+from propab.tool_chain import refine_next_tool_step
 from propab.tool_selection import select_tool_steps
 from propab.tools.registry import ToolRegistry
 from propab.types import EventType
@@ -131,9 +132,11 @@ async def run_sub_agent_async(payload: dict) -> dict:
             + "}))\n"
         )
 
+        plan_steps: list[dict] = [
+            {"type": "tool", "tool": tn, "params": dict(pr)} for tn, pr in tool_steps
+        ] + [{"type": "code", "code": sandbox_code}]
         plan = {
-            "steps": [{"type": "tool", "tool": tn, "params": pr} for tn, pr in tool_steps]
-            + [{"type": "code", "code": sandbox_code}],
+            "steps": plan_steps,
             "available_tools": available_tools,
             "resource_limits": resource_limits,
         }
@@ -151,10 +154,9 @@ async def run_sub_agent_async(payload: dict) -> dict:
             hypothesis_id=hypothesis_id,
         )
 
-        step_index = 0
         sandbox_ok = False
         any_tool_success = False
-        for step in plan["steps"]:
+        for step_index, step in enumerate(plan_steps):
             await emitter.emit(
                 session_id=session_id,
                 event_type=EventType.AGENT_STEP_STARTED,
@@ -295,6 +297,12 @@ async def run_sub_agent_async(payload: dict) -> dict:
                         payload={"tool": tool_name, "output": result.output},
                         hypothesis_id=hypothesis_id,
                     )
+                    if step_index + 1 < len(plan_steps):
+                        plan_steps[step_index + 1] = refine_next_tool_step(
+                            tool_name,
+                            result.output if isinstance(result.output, dict) else None,
+                            plan_steps[step_index + 1],
+                        )
                 else:
                     await emitter.emit(
                         session_id=session_id,
@@ -373,9 +381,8 @@ async def run_sub_agent_async(payload: dict) -> dict:
                         event_type=EventType.AGENT_STEP_FAILED,
                         step=f"experiment.{hypothesis_id}.step_{step_index}",
                         payload={"step": step, "non_fatal": True, "tool": tool_name},
-                        hypothesis_id=hypothesis_id,
-                    )
-            step_index += 1
+                    hypothesis_id=hypothesis_id,
+                )
 
         tool_hit = any_tool_success
         verdict = "confirmed" if tool_hit or sandbox_ok else "inconclusive"
