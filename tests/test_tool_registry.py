@@ -15,3 +15,7 @@ def test_registry_discovers_core_tools() -> None:
     assert "numerical_stability_test" in names
     assert "activation_statistics" in names
     assert "regularization_effect" in names
+    assert "lr_range_test" in names
+    assert "gradient_noise_scale" in names
+    assert "reproduce_result" in names
+    assert "plot_training_curves" in names
