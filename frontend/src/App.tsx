@@ -28,6 +28,99 @@ async function fetchJson<T>(path: string): Promise<T> {
 
 type Tab = "sse" | "session" | "prior" | "hypotheses" | "trace" | "llm" | "paper";
 
+type PaperApiResponse = {
+  session_id: string;
+  paper: {
+    pdf_url?: string | null;
+    tex_url?: string | null;
+    methods_latex?: string;
+    results_latex?: string;
+    full_tex_chars?: number;
+    figures_embedded?: number;
+  };
+};
+
+type LlmCallRow = {
+  id: string;
+  call_purpose: string | null;
+  model: string | null;
+  prompt_text: string;
+  response_text: string;
+  duration_ms: number | null;
+};
+
+function PaperDownloadLinks({ raw }: { raw: string }) {
+  try {
+    const data = JSON.parse(raw) as PaperApiResponse;
+    const p = data.paper;
+    if (!p) {
+      return <p className="muted">No paper payload in response.</p>;
+    }
+    return (
+      <div style={{ marginBottom: "1rem", display: "flex", flexWrap: "wrap", gap: "0.75rem", alignItems: "center" }}>
+        {p.pdf_url ? (
+          <a className="primary" href={p.pdf_url} target="_blank" rel="noreferrer">
+            Open PDF
+          </a>
+        ) : (
+          <span className="muted">PDF not available (pdflatex or MinIO).</span>
+        )}
+        {p.tex_url ? (
+          <a href={p.tex_url} target="_blank" rel="noreferrer">
+            Open main.tex
+          </a>
+        ) : null}
+        {typeof p.figures_embedded === "number" ? (
+          <span className="muted">
+            Figures embedded: {p.figures_embedded} · LaTeX chars: {p.full_tex_chars ?? "—"}
+          </span>
+        ) : null}
+      </div>
+    );
+  } catch {
+    return null;
+  }
+}
+
+function LlmCallInspector({ raw }: { raw: string }) {
+  try {
+    const data = JSON.parse(raw) as { llm_calls: LlmCallRow[] };
+    const rows = data.llm_calls ?? [];
+    if (rows.length === 0) {
+      return <p className="muted">No LLM rows for this session.</p>;
+    }
+    return (
+      <div style={{ marginBottom: "1rem", display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+        {rows.map((c) => (
+          <details key={c.id} className="card" style={{ padding: "0.5rem 0.75rem" }}>
+            <summary>
+              <strong>{c.call_purpose || "call"}</strong>
+              {c.model ? <span className="muted"> · {c.model}</span> : null}
+              {c.duration_ms != null ? <span className="muted"> · {c.duration_ms}ms</span> : null}
+            </summary>
+            <div style={{ marginTop: "0.5rem" }}>
+              <div className="muted" style={{ fontSize: "0.85rem" }}>
+                Prompt (preview)
+              </div>
+              <pre className="json-block" style={{ maxHeight: "12rem", overflow: "auto" }}>
+                {(c.prompt_text || "").slice(0, 8000)}
+              </pre>
+              <div className="muted" style={{ fontSize: "0.85rem" }}>
+                Response (preview)
+              </div>
+              <pre className="json-block" style={{ maxHeight: "12rem", overflow: "auto" }}>
+                {(c.response_text || "").slice(0, 8000)}
+              </pre>
+            </div>
+          </details>
+        ))}
+      </div>
+    );
+  } catch {
+    return null;
+  }
+}
+
 export function App() {
   const [question, setQuestion] = useState(
     "Does transformer attention efficiency degrade non-linearly with sequence length?",
@@ -137,7 +230,7 @@ export function App() {
                 ["hypotheses", "Hypotheses"],
                 ["trace", "Experiment trace"],
                 ["llm", "LLM calls"],
-                ["paper", "Paper URLs"],
+                ["paper", "Paper (PDF / TeX)"],
               ] as const
             ).map(([id, label]) => (
               <button
@@ -160,6 +253,8 @@ export function App() {
             ) : null}
           </div>
           {tab !== "sse" && dataError ? <p style={{ color: "#b91c1c" }}>{dataError}</p> : null}
+          {tab === "paper" && dataJson ? <PaperDownloadLinks raw={dataJson} /> : null}
+          {tab === "llm" && dataJson ? <LlmCallInspector raw={dataJson} /> : null}
           {tab !== "sse" && dataJson ? <pre className="json-block">{dataJson}</pre> : null}
           {tab !== "sse" && !dataJson && !dataError && !dataLoading ? (
             <p className="muted">Choose a tab and click Load (paper may 404 until the run finishes).</p>

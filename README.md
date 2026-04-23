@@ -19,11 +19,19 @@ docker compose up
 |------|--------|---------------|
 | **1** — Foundation | Compose, Postgres **+ Alembic**, events, SSE, arXiv/PDF, chunk/Qdrant, BM25, citations, TTL | **Closed for this slice**: Alembic at repo root; Postgres still auto-applies `migrations/001_initial.sql` on first Docker boot; run `alembic upgrade head` with `DATABASE_URL_SYNC` for revision tracking. Orchestrator **stub** exposes `/health` on port **8010** (full loop still runs in the API until a later split). |
 | **2** — Retrieval + prior | Query expansion, hybrid + RRF, cross-encoder, prior, short-circuit, literature tests | **Mostly done**: optional **cross-encoder** via `pip install -e ".[rerank]"` and `RERANKER_ENABLED=true`; RRF unit test in `tests/test_retrieval_rrf.py`. |
-| **3** — Agent core | Loop, hypotheses, Celery, tools, sandbox, 40 tools | **In progress**: §6.2-style **hypothesis ranking** (embedding novelty + LLM testability/impact/scope), **incremental** Celery result collection, **4** registered tools with tests (40-tool pack still open). |
-| **4** — Output + frontend | Full paper sections + Jinja, inspector UX | **Partial** (methods trace + minimal LaTeX; frontend submit/SSE/session JSON). |
+| **3** — Agent core | Loop, hypotheses, Celery, tools, sandbox, 40 tools | **In progress (DL/ALGO/ML v1)**: hypothesis ranking, Celery workers, **per-domain sandbox timeouts**, domain routing biased to `deep_learning` / `algorithm_optimization` / `ml_research` (+ math/stats/data/general), expanding **TOOLS.md** tool surface with tests (full 40-tool matrix still open). |
+| **4** — Output + frontend | Full paper sections + Jinja, inspector UX | **Progress**: deterministic **Methods** + **Results** + **References** + optional **Figures** (MinIO objects embedded into LaTeX build), LLM **abstract / intro / discussion / conclusion**, frontend **paper links** + **LLM call** JSON; run `alembic upgrade head` for schema updates such as `hypotheses.tool_trace_id`. |
 | **5** | Ollama, datasets, grounding | Backlog. |
 
 **Dev deps:** `pip install -e ".[dev]"` — Alembic, `psycopg`, pytest.
+
+**Schema:** After pulling, apply migrations with `DATABASE_URL_SYNC` from `.env` (sync driver for Alembic CLI):
+
+```bash
+alembic upgrade head
+```
+
+**CI:** GitHub Actions runs `pytest` on push and pull requests (`.github/workflows/ci.yml`).
 
 ---
 
