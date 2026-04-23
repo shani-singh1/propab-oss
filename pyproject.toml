@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "propab"
+version = "0.1.0"
+description = "Propab autonomous research system"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+  "httpx>=0.28.0",
+  "redis>=5.2.0",
+  "sqlalchemy>=2.0.36",
+  "asyncpg>=0.30.0",
+  "pydantic>=2.9.0",
+  "pydantic-settings>=2.6.0",
+  "python-dotenv>=1.0.1",
+]
+
+[tool.setuptools]
+packages = [
+  "propab",
+  "propab.tools",
+  "propab.tools.general_computation",
+  "services",
+  "services.api",
+  "services.api.app",
+  "services.api.app.routes",
+  "services.orchestrator",
+]
+
+[tool.setuptools.package-dir]
+propab = "packages/propab-core/propab"
+"propab.tools" = "packages/propab-core/propab/tools"
+"propab.tools.general_computation" = "packages/propab-core/propab/tools/general_computation"
+"services" = "services"
+"services.api" = "services/api"
+"services.api.app" = "services/api/app"
+"services.api.app.routes" = "services/api/app/routes"
+"services.orchestrator" = "services/orchestrator"
