@@ -9,6 +9,7 @@ import httpx
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from propab.config import settings
 from propab.events import EventEmitter
 from propab.types import EventType
 
@@ -68,7 +69,11 @@ class LLMClient:
         return response_text
 
     async def _call_provider(self, prompt: str) -> str:
-        if self.provider != "openai" or not self.api_key:
+        prov = (self.provider or "openai").strip().lower()
+        if prov == "ollama":
+            return await self._ollama_chat(prompt)
+
+        if prov != "openai" or not self.api_key:
             return json.dumps(
                 [
                     {
@@ -93,6 +98,24 @@ class LLMClient:
         response.raise_for_status()
         body = response.json()
         return body["choices"][0]["message"]["content"]
+
+    async def _ollama_chat(self, prompt: str) -> str:
+        base = (getattr(settings, "ollama_base_url", None) or "http://127.0.0.1:11434").rstrip("/")
+        url = f"{base}/api/chat"
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": False,
+        }
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(url, json=payload)
+        response.raise_for_status()
+        body = response.json()
+        msg = body.get("message") or {}
+        content = msg.get("content")
+        if isinstance(content, str) and content.strip():
+            return content
+        return json.dumps(body)[:8000]
 
     async def _persist_call(
         self,

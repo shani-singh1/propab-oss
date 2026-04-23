@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+import httpx
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from propab.config import settings
 from propab.events import EventEmitter
 from propab.types import EventType
 from services.api.app.deps import get_emitter, get_session_factory
@@ -65,15 +67,35 @@ async def create_research_session(
         payload={"question": request.question, "config": request.config.model_dump()},
     )
 
-    background_tasks.add_task(
-        run_research_loop,
-        session_id=session_id,
-        question=request.question,
-        max_hypotheses=request.config.max_hypotheses,
-        paper_ttl_days=request.config.paper_ttl_days,
-        emitter=emitter,
-        session_factory=session_factory,
-    )
+    orch = (settings.orchestrator_url or "").strip()
+    if orch:
+        body = {
+            "session_id": session_id,
+            "question": request.question,
+            "max_hypotheses": request.config.max_hypotheses,
+            "paper_ttl_days": request.config.paper_ttl_days,
+        }
+        headers: dict[str, str] = {}
+        if (settings.orchestrator_internal_token or "").strip():
+            headers["Authorization"] = f"Bearer {settings.orchestrator_internal_token.strip()}"
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                r = await client.post(f"{orch.rstrip('/')}/internal/research", json=body, headers=headers)
+            r.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=502, detail=f"Orchestrator error: {exc.response.text[:500]}") from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"Orchestrator unreachable: {exc}") from exc
+    else:
+        background_tasks.add_task(
+            run_research_loop,
+            session_id=session_id,
+            question=request.question,
+            max_hypotheses=request.config.max_hypotheses,
+            paper_ttl_days=request.config.paper_ttl_days,
+            emitter=emitter,
+            session_factory=session_factory,
+        )
 
     return ResearchResponse(
         session_id=session_id,

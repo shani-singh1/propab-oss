@@ -13,6 +13,7 @@ from propab.sandbox_profiles import effective_sandbox_timeout_sec
 from propab.db import create_engine, create_redis, create_session_factory
 from propab.events import EventEmitter
 from propab.llm import LLMClient
+from propab.sub_agent_plan import build_tool_plan_via_llm
 from propab.tool_chain import refine_next_tool_step
 from propab.tool_selection import select_tool_steps
 from propab.tools.registry import ToolRegistry
@@ -117,12 +118,33 @@ async def run_sub_agent_async(payload: dict) -> dict:
             "domain": domain,
         }
         hyp_text = str(hypothesis.get("text", ""))
+        plan_source = (settings.sub_agent_plan_source or "heuristic").strip().lower()
+        max_llm = max(1, min(int(settings.sub_agent_max_planned_steps), 12))
+        can_llm = settings.llm_provider.strip().lower() == "ollama" or bool(settings.openai_api_key.strip())
+
         tool_steps = select_tool_steps(
             specs,
             hypothesis_text=hyp_text,
             hypothesis=hypothesis,
             max_tools=2,
         )
+        plan_origin = "heuristic"
+        if plan_source in ("llm", "hybrid") and can_llm:
+            planned = await build_tool_plan_via_llm(
+                llm=llm,
+                session_id=session_id,
+                hypothesis_id=hypothesis_id,
+                hypothesis_text=hyp_text,
+                specs=specs,
+                max_steps=max_llm,
+                emitter=emitter,
+            )
+            use_llm_plan = planned is not None and (
+                plan_source == "llm" or (plan_source == "hybrid" and len(planned) >= 1)
+            )
+            if use_llm_plan and planned is not None:
+                tool_steps = planned
+                plan_origin = "llm"
 
         rank = hypothesis.get("rank")
         sandbox_code = (
@@ -139,6 +161,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
             "steps": plan_steps,
             "available_tools": available_tools,
             "resource_limits": resource_limits,
+            "plan_origin": plan_origin,
         }
         await emitter.emit(
             session_id=session_id,
@@ -150,6 +173,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
                 "sandbox_timeout_sec": sandbox_timeout_sec,
                 "available_tools": available_tools,
                 "resource_limits": resource_limits,
+                "plan_origin": plan_origin,
             },
             hypothesis_id=hypothesis_id,
         )
@@ -381,14 +405,15 @@ async def run_sub_agent_async(payload: dict) -> dict:
                         event_type=EventType.AGENT_STEP_FAILED,
                         step=f"experiment.{hypothesis_id}.step_{step_index}",
                         payload={"step": step, "non_fatal": True, "tool": tool_name},
-                    hypothesis_id=hypothesis_id,
-                )
+                        hypothesis_id=hypothesis_id,
+                    )
 
         tool_hit = any_tool_success
         verdict = "confirmed" if tool_hit or sandbox_ok else "inconclusive"
         confidence = 0.62 if verdict == "confirmed" else 0.35
+        n_tool_steps = len([s for s in plan_steps if s.get("type") == "tool"])
         evidence = (
-            f"Ran {len(tool_steps)} tool step(s); any_success={tool_hit}; sandbox_ok={sandbox_ok}."
+            f"Ran {n_tool_steps} tool step(s); plan_origin={plan_origin}; any_success={tool_hit}; sandbox_ok={sandbox_ok}."
             if verdict == "confirmed"
             else "All tool steps failed or returned no success, and sandbox did not confirm."
         )

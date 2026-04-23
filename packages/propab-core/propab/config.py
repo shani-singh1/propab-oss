@@ -7,6 +7,11 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     llm_provider: str = "openai"
     llm_model: str = "gpt-4o"
+    ollama_base_url: str = "http://127.0.0.1:11434"
+    orchestrator_url: str = ""
+    orchestrator_internal_token: str = ""
+    sub_agent_plan_source: str = "heuristic"
+    sub_agent_max_planned_steps: int = 4
     embed_model: str = "text-embedding-3-small"
     qdrant_url: str = ""
     qdrant_collection: str = "propab_chunks"

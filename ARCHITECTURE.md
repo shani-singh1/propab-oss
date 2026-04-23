@@ -1200,6 +1200,8 @@ These are known hard problems deliberately deferred from v1.
 | 5 | **Tool quality gate** | Community-contributed tools may be low quality or unsafe. | Submission requires: typed `TOOL_SPEC`, unit tests, sandbox execution proof, code review before registry merge. |
 | 6 | **Local model support** | v1 requires LLM API key. | Ollama integration via `LLM_PROVIDER=ollama`. The LLM client is already abstracted — only the client adapter needs writing. |
 
+**v0.2 scaffolding (partial):** Ollama chat is implemented in `propab/llm.py` (`OLLAMA_BASE_URL`). Curated dataset descriptors + `load_curated_dataset` tool (`propab/datasets.py`). Lexical claim grounding runs before final LaTeX assembly (`propab/claim_grounding.py`, event `paper.claim_grounding`). The API can delegate `run_research_loop` to `services/orchestrator/main.py` when `ORCHESTRATOR_URL` is set (compose wires this by default). LLM-authored experiment steps are opt-in via `SUB_AGENT_PLAN_SOURCE` (`heuristic` \| `llm` \| `hybrid`). Row #1, #4–#5 above remain open.
+
 ---
 
 ## 16. Build Roadmap
@@ -1270,8 +1272,9 @@ propab/
 │   │   │   └── sessions.py
 │   │   └── Dockerfile
 │   │
-│   ├── orchestrator/             # Main research loop
+│   ├── orchestrator/             # Main research loop (+ optional HTTP: main.py)
 │   │   ├── research_loop.py      # the explicit async state machine
+│   │   ├── main.py               # POST /internal/research when API delegates
 │   │   ├── intake.py
 │   │   ├── literature.py
 │   │   ├── hypotheses.py

@@ -9,6 +9,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from propab.claim_grounding import ground_session_claims
 from propab.events import EventEmitter
 from propab.llm import LLMClient
 from propab.paper_compiler import (
@@ -127,6 +128,25 @@ async def write_paper_minimal(
         prior=prior,
         synthesis=synthesis,
     )
+    try:
+        grounding = await ground_session_claims(session_factory, session_id, prose)
+    except Exception as exc:  # noqa: BLE001 — paper should still render
+        grounding = {"error": str(exc), "grounded": [], "ungrounded": []}
+    await emitter.emit(
+        session_id=session_id,
+        event_type=EventType.PAPER_CLAIM_GROUNDING,
+        step="paper.claim_grounding",
+        payload=grounding,
+    )
+    un = grounding.get("ungrounded") or []
+    if isinstance(un, list) and len(un) > 0:
+        prose = dict(prose)
+        prose["discussion"] = (
+            (prose.get("discussion") or "")
+            + r"\paragraph{Trace coverage.} Lexical grounding against stored \texttt{experiment\_steps} "
+            + f"flagged {len(un)} sentence(s) with weak overlap; treat qualitative claims in those themes as "
+            + "requiring manual verification against the trace."
+        )
     await emitter.emit(
         session_id=session_id,
         event_type=EventType.PAPER_SECTION_COMPLETED,

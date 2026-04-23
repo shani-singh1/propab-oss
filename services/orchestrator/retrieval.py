@@ -6,7 +6,7 @@ import math
 import re
 from typing import Any
 
-from rank_bm25 import RankBM25Okapi
+from rank_bm25 import BM25Okapi
 from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -164,7 +164,7 @@ def _rrf_merge(rankings: list[list[str]], k: int = 60) -> list[tuple[str, float]
     return _rrf_merge_impl(rankings, k=k)
 
 
-def _bm25_rank(bm25: RankBM25Okapi, corpus_ids: list[str], query: str, limit: int = 40) -> list[str]:
+def _bm25_rank(bm25: BM25Okapi, corpus_ids: list[str], query: str, limit: int = 40) -> list[str]:
     tokens = _tokenize(query)
     if not tokens:
         return []
@@ -208,7 +208,7 @@ async def run_hybrid_retrieval(
     corpus_texts = [t for _, _, t in loaded]
     corpus_ids = [f"{pid}|{idx}" for pid, idx, _ in loaded]
     tokenized = [_tokenize(t) or ["_"] for t in corpus_texts]
-    bm25 = RankBM25Okapi(tokenized)
+    bm25 = BM25Okapi(tokenized)
 
     queries = [expansion["original"], *expansion["rephrasings"]]
     bm25_rankings: list[list[str]] = []

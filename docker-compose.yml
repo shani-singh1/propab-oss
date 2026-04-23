@@ -17,6 +17,8 @@ services:
       - MINIO_SECURE=false
       - PROPAB_DATA_DIR=/data/propab
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ORCHESTRATOR_URL=http://orchestrator:8010
+      - ORCHESTRATOR_INTERNAL_TOKEN=${ORCHESTRATOR_INTERNAL_TOKEN:-}
     ports:
       - "8000:8000"
     volumes:
@@ -26,6 +28,7 @@ services:
       - redis
       - qdrant
       - minio
+      - orchestrator
 
   orchestrator:
     build:
@@ -33,9 +36,26 @@ services:
       dockerfile: services/orchestrator/Dockerfile
     ports:
       - "8010:8010"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://propab:propab@postgres:5432/propab
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - QDRANT_URL=http://qdrant:6333
+      - MINIO_ENDPOINT=http://minio:9000
+      - MINIO_ACCESS_KEY=propab
+      - MINIO_SECRET_KEY=propab_secret
+      - MINIO_BUCKET=propab
+      - MINIO_SECURE=false
+      - PROPAB_DATA_DIR=/data/propab
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ORCHESTRATOR_INTERNAL_TOKEN=${ORCHESTRATOR_INTERNAL_TOKEN:-}
+    volumes:
+      - propab_data:/data/propab
     depends_on:
       - postgres
       - redis
+      - qdrant
+      - minio
 
   worker:
     build:

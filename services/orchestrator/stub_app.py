@@ -1,8 +1,6 @@
 """
-Phase 1 orchestrator service stub (ARCHITECTURE.md §16, §17).
-
-The full `research_loop` still runs inside the API process today; this service
-exists so compose matches the documented service map and exposes a liveness URL.
+Legacy stub kept for reference. Production entrypoint is ``services.orchestrator.main:app``
+(Dockerfile CMD). Set ``ORCHESTRATOR_URL`` on the API to delegate ``run_research_loop`` here.
 """
 
 from __future__ import annotations

@@ -96,7 +96,10 @@ async def generate_prose_sections(
     synthesis: dict[str, Any] | None,
 ) -> dict[str, str]:
     prior = prior or {}
-    if llm is None or not getattr(llm, "api_key", None):
+    use_llm = llm is not None and (
+        str(getattr(llm, "provider", "") or "").lower() == "ollama" or bool(str(getattr(llm, "api_key", "") or "").strip())
+    )
+    if not use_llm:
         return _fallback_from_context(question, prior, synthesis)
 
     prior_blob = json.dumps(prior, ensure_ascii=False)[:6000]

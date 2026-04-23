@@ -54,6 +54,7 @@ class EventType(str, Enum):
     PAPER_SECTION_COMPLETED = "paper.section_completed"
     PAPER_LATEX_COMPILED = "paper.latex_compiled"
     PAPER_READY = "paper.ready"
+    PAPER_CLAIM_GROUNDING = "paper.claim_grounding"
 
 
 @dataclass(slots=True)
