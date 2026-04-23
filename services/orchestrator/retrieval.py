@@ -4,7 +4,6 @@ import asyncio
 import json
 import math
 import re
-from collections import defaultdict
 from typing import Any
 
 from rank_bm25 import RankBM25Okapi
@@ -18,6 +17,7 @@ from propab.llm import LLMClient
 from propab.qdrant_io import search_chunks, upsert_chunks
 from propab.types import EventType
 from services.orchestrator.bm25_sqlite import read_session_chunks, write_session_chunks
+from services.orchestrator.rrf_util import rrf_merge as _rrf_merge_impl
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -161,11 +161,7 @@ Use exactly 3 rephrasings and up to 5 concepts.
 
 
 def _rrf_merge(rankings: list[list[str]], k: int = 60) -> list[tuple[str, float]]:
-    scores: dict[str, float] = defaultdict(float)
-    for ranked in rankings:
-        for rank, cid in enumerate(ranked, start=1):
-            scores[cid] += 1.0 / (k + rank)
-    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    return _rrf_merge_impl(rankings, k=k)
 
 
 def _bm25_rank(bm25: RankBM25Okapi, corpus_ids: list[str], query: str, limit: int = 40) -> list[str]:
@@ -267,8 +263,32 @@ async def run_hybrid_retrieval(
     pool_ids = [cid for cid, _ in merged[:pool_size]]
     top_ids: list[str]
 
-    if settings.openai_api_key.strip() and len(pool_ids) >= 1:
-        pool_rows = [id_to_chunk[cid] for cid in pool_ids if cid in id_to_chunk]
+    pool_rows = [id_to_chunk[cid] for cid in pool_ids if cid in id_to_chunk]
+
+    ce_ordered: list[str] | None = None
+    if settings.reranker_enabled and pool_rows:
+        from propab.rerank_ce import cross_encoder_rerank_chunk_ids
+
+        ce_ordered = await asyncio.to_thread(
+            cross_encoder_rerank_chunk_ids,
+            question,
+            pool_rows,
+            settings.reranker_model,
+        )
+
+    if ce_ordered is not None and len(ce_ordered) > 0:
+        top_ids = ce_ordered[:20]
+        await emitter.emit(
+            session_id=session_id,
+            event_type=EventType.LIT_RETRIEVAL_RERANKED,
+            step="literature.retrieval",
+            payload={
+                "method": "cross_encoder",
+                "model": settings.reranker_model,
+                "pool_size": len(pool_rows),
+            },
+        )
+    elif settings.openai_api_key.strip() and len(pool_ids) >= 1 and pool_rows:
         texts_for_pool = [question[:8000]] + [t[:8000] for _pid, _idx, t in pool_rows]
         try:
             pvecs = await embed_texts(
@@ -294,7 +314,7 @@ async def run_hybrid_retrieval(
                     "method": "embedding_cosine",
                     "model": settings.embed_model,
                     "pool_size": len(pool_rows),
-                    "note": "Cross-encoder reranker (v2); embedding cosine used as CPU-light stand-in.",
+                    "note": "Embedding cosine rerank; set RERANKER_ENABLED=true with pip install 'propab[rerank]' for cross-encoder.",
                 },
             )
         else:

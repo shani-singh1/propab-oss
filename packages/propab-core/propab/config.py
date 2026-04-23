@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     sandbox_memory_mb: int = 512
     sandbox_code_max_retries: int = 3
     literature_answer_similarity: float = 0.92
+    reranker_enabled: bool = False
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 

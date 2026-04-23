@@ -10,7 +10,20 @@ cd propab-oss
 cp .env.example .env        # add OPENAI_API_KEY
 docker compose up
 # → http://localhost:3000
+# → http://localhost:8010/health  (orchestrator stub, Phase 1 service map)
 ```
+
+### Roadmap phases (`ARCHITECTURE.md` §16)
+
+| Phase | Scope | Repo status |
+|------|--------|---------------|
+| **1** — Foundation | Compose, Postgres **+ Alembic**, events, SSE, arXiv/PDF, chunk/Qdrant, BM25, citations, TTL | **Closed for this slice**: Alembic at repo root; Postgres still auto-applies `migrations/001_initial.sql` on first Docker boot; run `alembic upgrade head` with `DATABASE_URL_SYNC` for revision tracking. Orchestrator **stub** exposes `/health` on port **8010** (full loop still runs in the API until a later split). |
+| **2** — Retrieval + prior | Query expansion, hybrid + RRF, cross-encoder, prior, short-circuit, literature tests | **Mostly done**: optional **cross-encoder** via `pip install -e ".[rerank]"` and `RERANKER_ENABLED=true`; RRF unit test in `tests/test_retrieval_rrf.py`. |
+| **3** — Agent core | Loop, hypotheses, Celery, tools, sandbox, 40 tools | **Partial** (no 40-tool pack yet). |
+| **4** — Output + frontend | Full paper sections + Jinja, inspector UX | **Partial** (methods trace + minimal LaTeX; frontend submit/SSE/session JSON). |
+| **5** | Ollama, datasets, grounding | Backlog. |
+
+**Dev deps:** `pip install -e ".[dev]"` — Alembic, `psycopg`, pytest.
 
 ---
 
