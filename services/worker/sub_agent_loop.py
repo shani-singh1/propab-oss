@@ -72,7 +72,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
     llm = LLMClient(
         provider=settings.llm_provider,
         model=settings.llm_model,
-        api_key=settings.openai_api_key,
+        api_key=settings.llm_api_secret,
         emitter=emitter,
         session_factory=session_factory,
     )
@@ -120,7 +120,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
         hyp_text = str(hypothesis.get("text", ""))
         plan_source = (settings.sub_agent_plan_source or "heuristic").strip().lower()
         max_llm = max(1, min(int(settings.sub_agent_max_planned_steps), 12))
-        can_llm = settings.llm_provider.strip().lower() == "ollama" or bool(settings.openai_api_key.strip())
+        can_llm = settings.llm_provider.strip().lower() == "ollama" or bool(settings.llm_api_secret.strip())
 
         tool_steps = select_tool_steps(
             specs,

@@ -17,6 +17,7 @@ services:
       - MINIO_SECURE=false
       - PROPAB_DATA_DIR=/data/propab
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - ORCHESTRATOR_URL=http://orchestrator:8010
       - ORCHESTRATOR_INTERNAL_TOKEN=${ORCHESTRATOR_INTERNAL_TOKEN:-}
     ports:
@@ -48,6 +49,7 @@ services:
       - MINIO_SECURE=false
       - PROPAB_DATA_DIR=/data/propab
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - ORCHESTRATOR_INTERNAL_TOKEN=${ORCHESTRATOR_INTERNAL_TOKEN:-}
     volumes:
       - propab_data:/data/propab
@@ -73,6 +75,7 @@ services:
       - MINIO_SECURE=false
       - PROPAB_DATA_DIR=/data/propab
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
     volumes:
       - propab_data:/data/propab
       - /var/run/docker.sock:/var/run/docker.sock

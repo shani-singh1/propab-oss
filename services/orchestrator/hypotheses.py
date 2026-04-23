@@ -91,7 +91,7 @@ async def generate_ranked_hypotheses(
         )
 
     if use_llm_ranking and (
-        settings.llm_provider.strip().lower() == "ollama" or settings.openai_api_key.strip()
+        settings.llm_provider.strip().lower() == "ollama" or settings.llm_api_secret.strip()
     ):
         hypotheses = await apply_architecture_ranking(
             hypotheses=hypotheses,

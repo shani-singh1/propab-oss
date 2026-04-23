@@ -1385,6 +1385,8 @@ class LLMClient:
             # anthropic client call
         elif self.provider == "ollama":
             # ollama client call
+        elif self.provider == "gemini":
+            # Google Generative Language API (generateContent)
 ```
 
 Every LLM call in the system goes through this client. No direct API calls anywhere else. Every prompt is stored. Every response is stored. Every call emits two events.

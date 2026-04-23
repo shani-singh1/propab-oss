@@ -97,7 +97,8 @@ async def generate_prose_sections(
 ) -> dict[str, str]:
     prior = prior or {}
     use_llm = llm is not None and (
-        str(getattr(llm, "provider", "") or "").lower() == "ollama" or bool(str(getattr(llm, "api_key", "") or "").strip())
+        str(getattr(llm, "provider", "") or "").lower() in ("ollama", "gemini")
+        or bool(str(getattr(llm, "api_key", "") or "").strip())
     )
     if not use_llm:
         return _fallback_from_context(question, prior, synthesis)

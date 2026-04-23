@@ -1,3 +1,4 @@
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -5,6 +6,11 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://propab:propab@localhost:5432/propab"
     redis_url: str = "redis://localhost:6379/0"
     openai_api_key: str = ""
+    google_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+        description="Google AI Studio / Gemini API key when LLM_PROVIDER=gemini",
+    )
     llm_provider: str = "openai"
     llm_model: str = "gpt-4o"
     ollama_base_url: str = "http://127.0.0.1:11434"
@@ -34,7 +40,18 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
+
+    @property
+    def llm_api_secret(self) -> str:
+        """API secret passed into ``LLMClient`` (OpenAI, Gemini, or empty for Ollama)."""
+        p = (self.llm_provider or "").strip().lower()
+        if p == "gemini":
+            return (self.google_api_key or "").strip()
+        if p == "ollama":
+            return ""
+        return (self.openai_api_key or "").strip()
 
 
 settings = Settings()

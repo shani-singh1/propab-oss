@@ -86,7 +86,7 @@ async def run_research_loop(
     llm = LLMClient(
         provider=settings.llm_provider,
         model=settings.llm_model,
-        api_key=settings.openai_api_key,
+        api_key=settings.llm_api_secret,
         emitter=emitter,
         session_factory=session_factory,
     )
