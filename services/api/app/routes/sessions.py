@@ -89,7 +89,7 @@ async def get_session_hypotheses(
             await session.execute(
                 text(
                     """
-                    SELECT id, text, test_methodology, scores_json, rank, status, verdict, confidence, evidence_summary, key_finding, created_at
+                    SELECT id, text, test_methodology, scores_json, rank, status, verdict, confidence, evidence_summary, key_finding, tool_trace_id, created_at
                     FROM hypotheses
                     WHERE session_id = :session_id
                     ORDER BY rank ASC
