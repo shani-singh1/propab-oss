@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.32.0",
+  "celery[redis]>=5.4.0",
   "httpx>=0.28.0",
   "redis>=5.2.0",
   "sqlalchemy>=2.0.36",
@@ -29,6 +30,7 @@ packages = [
   "services.api.app",
   "services.api.app.routes",
   "services.orchestrator",
+  "services.worker",
 ]
 
 [tool.setuptools.package-dir]
@@ -40,3 +42,4 @@ propab = "packages/propab-core/propab"
 "services.api.app" = "services/api/app"
 "services.api.app.routes" = "services/api/app/routes"
 "services.orchestrator" = "services/orchestrator"
+"services.worker" = "services/worker"

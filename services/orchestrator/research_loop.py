@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from uuid import uuid4
+from uuid import UUID, uuid5
 
+from celery import group
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -10,9 +12,16 @@ from propab.config import settings
 from propab.events import EventEmitter
 from propab.llm import LLMClient
 from propab.types import EventType
-from services.orchestrator.hypotheses import generate_ranked_hypotheses
+from services.orchestrator.hypotheses import RankedHypothesis, generate_ranked_hypotheses
 from services.orchestrator.intake import parse_question
 from services.orchestrator.literature import build_prior
+from services.worker.tasks import run_sub_agent_task
+
+_HYPOTHESIS_ID_NAMESPACE = UUID("8b4fd0f5-6c2a-40e2-a4da-4d8c1f2e0b1c")
+
+
+def _hypothesis_row_id(session_id: str, logical_id: str) -> str:
+    return str(uuid5(_HYPOTHESIS_ID_NAMESPACE, f"{session_id}:{logical_id}"))
 
 
 async def _update_session(session_factory: async_sessionmaker, session_id: str, **fields: str) -> None:
@@ -24,9 +33,15 @@ async def _update_session(session_factory: async_sessionmaker, session_id: str, 
         await session.commit()
 
 
-async def _insert_hypothesis_rows(session_factory: async_sessionmaker, session_id: str, hypotheses: list) -> None:
+async def _insert_hypothesis_rows(
+    session_factory: async_sessionmaker,
+    session_id: str,
+    hypotheses: list[RankedHypothesis],
+) -> list[tuple[str, RankedHypothesis]]:
+    inserted: list[tuple[str, RankedHypothesis]] = []
     async with session_factory() as session:
         for hypothesis in hypotheses:
+            row_id = _hypothesis_row_id(session_id, hypothesis.id)
             await session.execute(
                 text(
                     """
@@ -39,20 +54,22 @@ async def _insert_hypothesis_rows(session_factory: async_sessionmaker, session_i
                     """
                 ),
                 {
-                    "id": str(uuid4()),
+                    "id": row_id,
                     "session_id": session_id,
                     "text": hypothesis.text,
                     "test_methodology": hypothesis.test_methodology,
                     "scores_json": json.dumps(hypothesis.scores),
                     "rank": hypothesis.rank,
-                    "status": "completed",
-                    "verdict": "inconclusive",
-                    "confidence": 0.25,
-                    "evidence_summary": "Bootstrap run without experiment worker execution.",
+                    "status": "pending",
+                    "verdict": None,
+                    "confidence": None,
+                    "evidence_summary": None,
                     "key_finding": None,
                 },
             )
+            inserted.append((row_id, hypothesis))
         await session.commit()
+    return inserted
 
 
 async def run_research_loop(
@@ -106,7 +123,7 @@ async def run_research_loop(
             llm=llm,
             session_id=session_id,
         )
-        await _insert_hypothesis_rows(session_factory, session_id, hypotheses)
+        hypothesis_rows = await _insert_hypothesis_rows(session_factory, session_id, hypotheses)
         await emitter.emit(
             session_id=session_id,
             event_type=EventType.HYPO_RANKED,
@@ -114,12 +131,73 @@ async def run_research_loop(
             payload={"hypotheses": [h.to_dict() for h in hypotheses]},
         )
 
+        await _update_session(session_factory, session_id, stage="experiment")
+        signatures = []
+        for row_id, hypothesis in hypothesis_rows:
+            await emitter.emit(
+                session_id=session_id,
+                event_type=EventType.HYPO_DISPATCHED,
+                step="hypothesis.dispatch",
+                payload={"hypothesis_id": row_id, "rank": hypothesis.rank},
+                hypothesis_id=row_id,
+            )
+            signatures.append(
+                run_sub_agent_task.s(
+                    {
+                        "session_id": session_id,
+                        "hypothesis_id": row_id,
+                        "hypothesis": hypothesis.to_dict(),
+                        "prior": prior.to_dict(),
+                        "domain": parsed.domain,
+                    }
+                )
+            )
+
+        experiment_results: list[dict] = []
+        if signatures:
+
+            def _run_group() -> list[dict]:
+                return group(signatures).apply_async().get(timeout=600)
+
+            experiment_results = await asyncio.to_thread(_run_group)
+
+        for result in experiment_results:
+            await emitter.emit(
+                session_id=session_id,
+                event_type=EventType.SYNTH_RESULT_RECEIVED,
+                step="synthesis.result",
+                payload={"result": result},
+                hypothesis_id=result.get("hypothesis_id"),
+            )
+            if result.get("verdict") == "confirmed" and float(result.get("confidence") or 0) > 0.85:
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.SYNTH_BREAKTHROUGH,
+                    step="synthesis.breakthrough",
+                    payload={"finding": result.get("key_finding")},
+                    hypothesis_id=result.get("hypothesis_id"),
+                )
+            if result.get("verdict") == "refuted":
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.SYNTH_DEAD_END,
+                    step="synthesis.dead_end",
+                    payload={"hypothesis": result.get("hypothesis_id")},
+                    hypothesis_id=result.get("hypothesis_id"),
+                )
+
+        ledger = {
+            "confirmed": [r["hypothesis_id"] for r in experiment_results if r.get("verdict") == "confirmed"],
+            "refuted": [r["hypothesis_id"] for r in experiment_results if r.get("verdict") == "refuted"],
+            "inconclusive": [r["hypothesis_id"] for r in experiment_results if r.get("verdict") == "inconclusive"],
+        }
+
         await _update_session(session_factory, session_id, stage="synthesis")
         await emitter.emit(
             session_id=session_id,
             event_type=EventType.SYNTH_LEDGER_UPDATED,
             step="synthesis.ledger",
-            payload={"final_ledger": {"confirmed": [], "refuted": [], "inconclusive": [h.id for h in hypotheses]}},
+            payload={"final_ledger": ledger},
         )
 
         await _update_session(session_factory, session_id, status="completed", stage="completed")

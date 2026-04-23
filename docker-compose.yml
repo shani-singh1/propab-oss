@@ -12,8 +12,25 @@ services:
     environment:
       - DATABASE_URL=postgresql+asyncpg://propab:propab@postgres:5432/propab
       - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
     ports:
       - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+
+  worker:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: >
+      sh -c "pip install -e . &&
+             celery -A services.worker.celery_app worker --loglevel=info --concurrency=2"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://propab:propab@postgres:5432/propab
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
     depends_on:
       - postgres
       - redis
