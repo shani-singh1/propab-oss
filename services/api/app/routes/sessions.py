@@ -94,6 +94,31 @@ async def get_session_trace(
     return {"session_id": session_id, "trace": [dict(row) for row in rows]}
 
 
+@router.get("/{session_id}/paper")
+async def get_session_paper(
+    session_id: str,
+    session_factory: async_sessionmaker = Depends(get_session_factory),
+) -> dict:
+    async with session_factory() as session:
+        row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT payload_json
+                    FROM events
+                    WHERE session_id = :session_id AND event_type = :event_type
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """
+                ),
+                {"session_id": session_id, "event_type": "paper.ready"},
+            )
+        ).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Paper not ready or session not found")
+    return {"session_id": session_id, "paper": row["payload_json"]}
+
+
 @router.get("/{session_id}/llm-calls")
 async def get_session_llm_calls(
     session_id: str,

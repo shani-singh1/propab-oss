@@ -15,6 +15,7 @@ from propab.types import EventType
 from services.orchestrator.hypotheses import RankedHypothesis, generate_ranked_hypotheses
 from services.orchestrator.intake import parse_question
 from services.orchestrator.literature import build_prior
+from services.orchestrator.paper import write_paper_minimal
 from services.worker.tasks import run_sub_agent_task
 
 _HYPOTHESIS_ID_NAMESPACE = UUID("8b4fd0f5-6c2a-40e2-a4da-4d8c1f2e0b1c")
@@ -200,12 +201,24 @@ async def run_research_loop(
             payload={"final_ledger": ledger},
         )
 
+        await _update_session(session_factory, session_id, stage="paper")
+        paper_payload = await write_paper_minimal(
+            session_id=session_id,
+            session_factory=session_factory,
+            emitter=emitter,
+        )
+
         await _update_session(session_factory, session_id, status="completed", stage="completed")
         await emitter.emit(
             session_id=session_id,
             event_type=EventType.SESSION_COMPLETED,
             step="session.complete",
-            payload={"breakthroughs": [], "dead_ends": [], "note": "Orchestrator foundation stages completed."},
+            payload={
+                "paper": paper_payload,
+                "breakthroughs": ledger["confirmed"],
+                "dead_ends": ledger["refuted"],
+                "note": "Session completed with deterministic methods compilation and paper-ready payload.",
+            },
         )
     except Exception as exc:
         await _update_session(session_factory, session_id, status="failed", stage="failed")
