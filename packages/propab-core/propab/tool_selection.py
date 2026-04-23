@@ -1,4 +1,4 @@
-"""Pick a tool from a domain cluster using hypothesis text overlap (no extra LLM call)."""
+"""Pick tool(s) from a domain cluster using hypothesis text overlap (no extra LLM call)."""
 
 from __future__ import annotations
 
@@ -24,9 +24,48 @@ def score_spec_relevance(hypothesis_text: str, spec: dict[str, Any]) -> float:
     ).lower()
     spec_toks = _tokens(blob)
     inter = len(hyp & spec_toks)
-    # Mild preference for shorter tool names (often core utilities) on ties
     name = str(spec.get("name", ""))
     return float(inter) + 0.01 / (1 + len(name))
+
+
+def _fallback_params(hypothesis: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    return (
+        "json_extract",
+        {"data": {"hypothesis_rank": hypothesis.get("rank"), "label": "probe"}, "key": "label"},
+    )
+
+
+def select_tool_steps(
+    specs: list[dict[str, Any]],
+    *,
+    hypothesis_text: str,
+    hypothesis: dict[str, Any],
+    max_tools: int = 2,
+) -> list[tuple[str, dict[str, Any]]]:
+    """
+    Up to ``max_tools`` distinct tools, in relevance order, each with non-empty ``example.params``.
+    """
+    if max_tools < 1:
+        return []
+    if not specs:
+        return [_fallback_params(hypothesis)][:max_tools]
+    ranked = sorted(specs, key=lambda s: score_spec_relevance(hypothesis_text, s), reverse=True)
+    out: list[tuple[str, dict[str, Any]]] = []
+    used: set[str] = set()
+    for spec in ranked:
+        if len(out) >= max_tools:
+            break
+        name = str(spec.get("name", ""))
+        if not name or name in used:
+            continue
+        params = (spec.get("example") or {}).get("params")
+        if not isinstance(params, dict) or not params:
+            continue
+        used.add(name)
+        out.append((name, params))
+    if not out:
+        return [_fallback_params(hypothesis)][:max_tools]
+    return out
 
 
 def select_tool_and_params(
@@ -35,20 +74,11 @@ def select_tool_and_params(
     hypothesis_text: str,
     hypothesis: dict[str, Any],
 ) -> tuple[str, dict[str, Any]]:
-    """
-    Prefer specs with non-empty TOOL_SPEC example.params, ranked by hypothesis relevance.
-    Fallback: ``json_extract`` probe (always valid).
-    """
-    fallback = (
-        "json_extract",
-        {"data": {"hypothesis_rank": hypothesis.get("rank"), "label": "probe"}, "key": "label"},
+    """Single best tool + params (backward compatible)."""
+    steps = select_tool_steps(
+        specs,
+        hypothesis_text=hypothesis_text,
+        hypothesis=hypothesis,
+        max_tools=1,
     )
-    if not specs:
-        return fallback
-    ranked = sorted(specs, key=lambda s: score_spec_relevance(hypothesis_text, s), reverse=True)
-    for spec in ranked[:12]:
-        example = spec.get("example") or {}
-        params = example.get("params")
-        if isinstance(params, dict) and params:
-            return str(spec["name"]), params
-    return fallback
+    return steps[0]

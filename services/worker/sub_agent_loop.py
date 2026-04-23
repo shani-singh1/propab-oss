@@ -13,7 +13,7 @@ from propab.sandbox_profiles import effective_sandbox_timeout_sec
 from propab.db import create_engine, create_redis, create_session_factory
 from propab.events import EventEmitter
 from propab.llm import LLMClient
-from propab.tool_selection import select_tool_and_params
+from propab.tool_selection import select_tool_steps
 from propab.tools.registry import ToolRegistry
 from propab.types import EventType
 from services.worker.domain_router import route_domain
@@ -56,8 +56,8 @@ async def _update_hypothesis(
 
 async def run_sub_agent_async(payload: dict) -> dict:
     """
-    Execute a minimal sub-agent trace: plan, one tool call, verdict.
-    Persists experiment_steps and tool_calls; emits full event stream.
+    Execute sub-agent trace: up to two ranked tool calls, sandbox probe, verdict.
+    Tool failures are non-fatal: later steps still run; verdict uses any successful tool or sandbox.
     """
     session_id: str = payload["session_id"]
     hypothesis_id: str = payload["hypothesis_id"]
@@ -116,10 +116,11 @@ async def run_sub_agent_async(payload: dict) -> dict:
             "domain": domain,
         }
         hyp_text = str(hypothesis.get("text", ""))
-        tool_name, params = select_tool_and_params(
+        tool_steps = select_tool_steps(
             specs,
             hypothesis_text=hyp_text,
             hypothesis=hypothesis,
+            max_tools=2,
         )
 
         rank = hypothesis.get("rank")
@@ -131,10 +132,8 @@ async def run_sub_agent_async(payload: dict) -> dict:
         )
 
         plan = {
-            "steps": [
-                {"type": "tool", "tool": tool_name, "params": params},
-                {"type": "code", "code": sandbox_code},
-            ],
+            "steps": [{"type": "tool", "tool": tn, "params": pr} for tn, pr in tool_steps]
+            + [{"type": "code", "code": sandbox_code}],
             "available_tools": available_tools,
             "resource_limits": resource_limits,
         }
@@ -154,6 +153,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
 
         step_index = 0
         sandbox_ok = False
+        any_tool_success = False
         for step in plan["steps"]:
             await emitter.emit(
                 session_id=session_id,
@@ -264,6 +264,13 @@ async def run_sub_agent_async(payload: dict) -> dict:
                         },
                     )
                     await session.commit()
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.AGENT_STEP_COMPLETED,
+                    step=f"experiment.{hypothesis_id}.step_{step_index}",
+                    payload={"step": step, "sandbox_ok": sandbox_ok},
+                    hypothesis_id=hypothesis_id,
+                )
             else:
                 tool_name = step["tool"]
                 params = step["params"]
@@ -280,6 +287,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
                 duration_ms = int((time.perf_counter() - step_started) * 1000)
 
                 if result.success:
+                    any_tool_success = True
                     await emitter.emit(
                         session_id=session_id,
                         event_type=EventType.TOOL_RESULT,
@@ -351,24 +359,37 @@ async def run_sub_agent_async(payload: dict) -> dict:
                     )
                     await session.commit()
 
-            await emitter.emit(
-                session_id=session_id,
-                event_type=EventType.AGENT_STEP_COMPLETED,
-                step=f"experiment.{hypothesis_id}.step_{step_index}",
-                payload={"step": step},
-                hypothesis_id=hypothesis_id,
-            )
+                if result.success:
+                    await emitter.emit(
+                        session_id=session_id,
+                        event_type=EventType.AGENT_STEP_COMPLETED,
+                        step=f"experiment.{hypothesis_id}.step_{step_index}",
+                        payload={"step": step, "tool": tool_name},
+                        hypothesis_id=hypothesis_id,
+                    )
+                else:
+                    await emitter.emit(
+                        session_id=session_id,
+                        event_type=EventType.AGENT_STEP_FAILED,
+                        step=f"experiment.{hypothesis_id}.step_{step_index}",
+                        payload={"step": step, "non_fatal": True, "tool": tool_name},
+                        hypothesis_id=hypothesis_id,
+                    )
             step_index += 1
 
-        tool_hit = result is not None and result.success
+        tool_hit = any_tool_success
         verdict = "confirmed" if tool_hit or sandbox_ok else "inconclusive"
         confidence = 0.62 if verdict == "confirmed" else 0.35
         evidence = (
-            "Tool step completed successfully and/or sandbox probe succeeded."
+            f"Ran {len(tool_steps)} tool step(s); any_success={tool_hit}; sandbox_ok={sandbox_ok}."
             if verdict == "confirmed"
-            else "Tool step failed or returned no success, and sandbox did not confirm."
+            else "All tool steps failed or returned no success, and sandbox did not confirm."
         )
-        key_finding = "Primary tool executed without error." if tool_hit else ("Sandbox probe completed." if sandbox_ok else None)
+        key_finding = (
+            "At least one tool step completed without error."
+            if tool_hit
+            else ("Sandbox probe completed." if sandbox_ok else None)
+        )
 
         await _update_hypothesis(
             session_factory,
@@ -390,7 +411,6 @@ async def run_sub_agent_async(payload: dict) -> dict:
         )
 
         duration_sec = time.perf_counter() - started
-        tool_ok = result is not None and result.success
         experiment_result = {
             "hypothesis_id": hypothesis_id,
             "verdict": verdict,
