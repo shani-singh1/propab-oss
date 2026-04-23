@@ -24,7 +24,9 @@ class ToolRegistry:
         package_name = "propab.tools"
         package = importlib.import_module(package_name)
         for module_info in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
-            if ".general_computation." not in module_info.name:
+            if module_info.ispkg:
+                continue
+            if module_info.name.endswith(".registry") or module_info.name.endswith(".types"):
                 continue
             module = importlib.import_module(module_info.name)
             spec = getattr(module, "TOOL_SPEC", None)

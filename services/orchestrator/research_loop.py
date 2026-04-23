@@ -107,6 +107,7 @@ async def run_research_loop(
             emitter=emitter,
             session_factory=session_factory,
             paper_ttl_days=paper_ttl_days,
+            llm=llm,
         )
         await _update_session(session_factory, session_id, prior_json=json.dumps(prior.to_dict()))
         await emitter.emit(
@@ -123,6 +124,7 @@ async def run_research_loop(
             max_hypotheses=max_hypotheses,
             llm=llm,
             session_id=session_id,
+            emitter=emitter,
         )
         hypothesis_rows = await _insert_hypothesis_rows(session_factory, session_id, hypotheses)
         await emitter.emit(

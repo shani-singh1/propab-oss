@@ -3,9 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 
+from propab.events import EventEmitter
 from propab.llm import LLMClient
+from propab.types import EventType
 from services.orchestrator.intake import ParsedQuestion
-from services.orchestrator.literature import Prior
+from services.orchestrator.schemas import Prior
 
 
 @dataclass(slots=True)
@@ -52,6 +54,7 @@ async def generate_ranked_hypotheses(
     max_hypotheses: int,
     llm: LLMClient,
     session_id: str,
+    emitter: EventEmitter,
 ) -> list[RankedHypothesis]:
     prompt = _build_hypothesis_prompt(parsed, prior, max_hypotheses)
     raw = await llm.call(prompt=prompt, purpose="hypothesis_generation", session_id=session_id)
@@ -60,11 +63,27 @@ async def generate_ranked_hypotheses(
     except json.JSONDecodeError:
         generated = []
 
+    if isinstance(generated, list):
+        await emitter.emit(
+            session_id=session_id,
+            event_type=EventType.HYPO_GENERATED,
+            step="hypothesis.generate",
+            payload={"hypotheses": generated},
+        )
+    else:
+        await emitter.emit(
+            session_id=session_id,
+            event_type=EventType.HYPO_GENERATED,
+            step="hypothesis.generate",
+            payload={"hypotheses": [], "note": "Model returned non-array JSON; falling back to templates."},
+        )
+
     hypotheses: list[RankedHypothesis] = []
     for idx in range(max_hypotheses):
         rank = idx + 1
         composite = round(max(0.15, 1.0 - idx * 0.12), 3)
-        entry = generated[idx] if idx < len(generated) and isinstance(generated[idx], dict) else {}
+        gen_list = generated if isinstance(generated, list) else []
+        entry = gen_list[idx] if idx < len(gen_list) and isinstance(gen_list[idx], dict) else {}
         hypotheses.append(
             RankedHypothesis(
                 id=str(entry.get("id", f"h{rank}")),
