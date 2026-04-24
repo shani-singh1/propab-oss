@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     orchestrator_internal_token: str = ""
     sub_agent_plan_source: str = "heuristic"
     sub_agent_max_planned_steps: int = 4
+    embed_provider: str = "openai"
     embed_model: str = "text-embedding-3-small"
     qdrant_url: str = ""
     qdrant_collection: str = "propab_chunks"
@@ -51,6 +52,14 @@ class Settings(BaseSettings):
             return (self.google_api_key or "").strip()
         if p == "ollama":
             return ""
+        return (self.openai_api_key or "").strip()
+
+    @property
+    def embed_api_secret(self) -> str:
+        """API secret for embedding provider."""
+        p = (self.embed_provider or "").strip().lower()
+        if p in {"google", "gemini"}:
+            return (self.google_api_key or "").strip()
         return (self.openai_api_key or "").strip()
 
 

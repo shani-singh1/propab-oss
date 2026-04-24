@@ -31,7 +31,7 @@ async def evaluate_literature_short_circuit(
     short-circuit hypothesis generation (ARCHITECTURE §5.4).
     """
     facts = prior.established_facts or []
-    if not facts or not settings.openai_api_key.strip():
+    if not facts or not settings.embed_api_secret.strip():
         return None
 
     texts: list[str] = []
@@ -49,8 +49,9 @@ async def evaluate_literature_short_circuit(
     try:
         vectors = await embed_texts(
             texts=[question[:8000], *texts],
-            api_key=settings.openai_api_key,
+            api_key=settings.embed_api_secret,
             model=settings.embed_model,
+            provider=settings.embed_provider,
         )
     except Exception:
         return None

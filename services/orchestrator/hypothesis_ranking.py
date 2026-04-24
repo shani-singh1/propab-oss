@@ -53,12 +53,17 @@ async def compute_novelty_scores(hypothesis_texts: list[str], prior: Prior) -> l
     if not hypothesis_texts:
         return []
     facts = _fact_texts_for_embedding(prior)
-    if not facts or not settings.openai_api_key.strip():
+    if not facts or not settings.embed_api_secret.strip():
         return [0.55] * len(hypothesis_texts)
 
     texts = facts + [t[:6000] for t in hypothesis_texts]
     try:
-        vecs = await embed_texts(texts=texts, api_key=settings.openai_api_key, model=settings.embed_model)
+        vecs = await embed_texts(
+            texts=texts,
+            api_key=settings.embed_api_secret,
+            model=settings.embed_model,
+            provider=settings.embed_provider,
+        )
     except Exception:
         return [0.55] * len(hypothesis_texts)
 

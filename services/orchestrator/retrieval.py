@@ -216,13 +216,18 @@ async def run_hybrid_retrieval(
         bm25_rankings.append(_bm25_rank(bm25, corpus_ids, q, limit=40))
 
     dense_hits: list[dict[str, Any]] = []
-    if settings.qdrant_url and settings.openai_api_key:
+    if settings.qdrant_url and settings.embed_api_secret:
         chunk_records = [
             {"paper_id": pid, "chunk_index": idx, "text": txt} for pid, idx, txt in loaded
         ]
         if all((c.get("text") or "").strip() for c in chunk_records):
             texts_for_embed = [c["text"][:8000] for c in chunk_records]
-            vectors = await embed_texts(texts=texts_for_embed, api_key=settings.openai_api_key, model=settings.embed_model)
+            vectors = await embed_texts(
+                texts=texts_for_embed,
+                api_key=settings.embed_api_secret,
+                model=settings.embed_model,
+                provider=settings.embed_provider,
+            )
             if vectors and len(vectors) == len(chunk_records):
                 await asyncio.to_thread(
                     lambda: upsert_chunks(
@@ -233,7 +238,14 @@ async def run_hybrid_retrieval(
                         vectors=vectors,
                     )
                 )
-                qvec = (await embed_texts(texts=[question], api_key=settings.openai_api_key, model=settings.embed_model))[0]
+                qvec = (
+                    await embed_texts(
+                        texts=[question],
+                        api_key=settings.embed_api_secret,
+                        model=settings.embed_model,
+                        provider=settings.embed_provider,
+                    )
+                )[0]
                 dense_hits = await asyncio.to_thread(
                     lambda: search_chunks(
                         url=settings.qdrant_url,
@@ -288,13 +300,14 @@ async def run_hybrid_retrieval(
                 "pool_size": len(pool_rows),
             },
         )
-    elif settings.openai_api_key.strip() and len(pool_ids) >= 1 and pool_rows:
+    elif settings.embed_api_secret.strip() and len(pool_ids) >= 1 and pool_rows:
         texts_for_pool = [question[:8000]] + [t[:8000] for _pid, _idx, t in pool_rows]
         try:
             pvecs = await embed_texts(
                 texts=texts_for_pool,
-                api_key=settings.openai_api_key,
+                api_key=settings.embed_api_secret,
                 model=settings.embed_model,
+                provider=settings.embed_provider,
             )
         except Exception:
             pvecs = []
