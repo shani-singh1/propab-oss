@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from uuid import uuid4
 
@@ -20,6 +21,36 @@ from propab.tools.registry import ToolRegistry
 from propab.types import EventType
 from services.worker.domain_router import route_domain
 from services.worker.sandbox import run_sandboxed_python
+
+
+def _tokens(text: str) -> set[str]:
+    return {t for t in re.findall(r"[a-z0-9]{4,}", text.lower())}
+
+
+def _hypothesis_relevance_score(hypothesis_text: str, successful_outputs: list[dict]) -> float:
+    """
+    Coarse relevance signal: lexical overlap + evidence-key bonus.
+    Keeps confirmation from being based solely on transport-level success.
+    """
+    if not successful_outputs:
+        return 0.0
+    hyp_toks = _tokens(hypothesis_text)
+    if not hyp_toks:
+        return 0.0
+    blob = json.dumps(successful_outputs, ensure_ascii=False).lower()
+    out_toks = _tokens(blob)
+    overlap = len(hyp_toks & out_toks) / float(len(hyp_toks))
+    evidence_keys = (
+        "conclusion",
+        "verdict",
+        "significant",
+        "p_value",
+        "improvement",
+        "confidence_interval",
+        "summary",
+    )
+    key_bonus = 0.02 * sum(1 for k in evidence_keys if k in blob)
+    return float(overlap + key_bonus)
 
 
 async def _update_hypothesis(
@@ -157,6 +188,11 @@ async def run_sub_agent_async(payload: dict) -> dict:
         plan_steps: list[dict] = [
             {"type": "tool", "tool": tn, "params": dict(pr)} for tn, pr in tool_steps
         ] + [{"type": "code", "code": sandbox_code}]
+        executable_steps = [s for s in plan_steps if s.get("type") in {"tool", "code"}]
+        if not executable_steps:
+            raise RuntimeError(
+                f"Empty execution plan for hypothesis {hypothesis_id}; refusing silent zero-step trace."
+            )
         plan = {
             "steps": plan_steps,
             "available_tools": available_tools,
@@ -180,6 +216,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
 
         sandbox_ok = False
         any_tool_success = False
+        successful_tool_outputs: list[dict] = []
         for step_index, step in enumerate(plan_steps):
             await emitter.emit(
                 session_id=session_id,
@@ -314,6 +351,8 @@ async def run_sub_agent_async(payload: dict) -> dict:
 
                 if result.success:
                     any_tool_success = True
+                    if isinstance(result.output, dict):
+                        successful_tool_outputs.append(result.output)
                     await emitter.emit(
                         session_id=session_id,
                         event_type=EventType.TOOL_RESULT,
@@ -409,17 +448,23 @@ async def run_sub_agent_async(payload: dict) -> dict:
                     )
 
         tool_hit = any_tool_success
-        verdict = "confirmed" if tool_hit or sandbox_ok else "inconclusive"
-        confidence = 0.62 if verdict == "confirmed" else 0.35
+        relevance_score = _hypothesis_relevance_score(hyp_text, successful_tool_outputs)
+        supports_hypothesis = tool_hit and relevance_score >= 0.08
+        verdict = "confirmed" if supports_hypothesis else "inconclusive"
+        confidence = 0.67 if verdict == "confirmed" else 0.35
         n_tool_steps = len([s for s in plan_steps if s.get("type") == "tool"])
         evidence = (
-            f"Ran {n_tool_steps} tool step(s); plan_origin={plan_origin}; any_success={tool_hit}; sandbox_ok={sandbox_ok}."
+            f"Ran {n_tool_steps} tool step(s); plan_origin={plan_origin}; "
+            f"any_success={tool_hit}; relevance_score={relevance_score:.3f}; sandbox_ok={sandbox_ok}."
             if verdict == "confirmed"
-            else "All tool steps failed or returned no success, and sandbox did not confirm."
+            else (
+                "No hypothesis-relevant confirming evidence was found. "
+                f"any_success={tool_hit}, relevance_score={relevance_score:.3f}, sandbox_ok={sandbox_ok}."
+            )
         )
         key_finding = (
-            "At least one tool step completed without error."
-            if tool_hit
+            "At least one successful tool output contained hypothesis-relevant evidence."
+            if supports_hypothesis
             else ("Sandbox probe completed." if sandbox_ok else None)
         )
 

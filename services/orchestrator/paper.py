@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from propab.claim_grounding import ground_session_claims
@@ -22,6 +23,32 @@ from propab.paper_compiler import (
 from propab.paper_sections import generate_prose_sections, render_paper_tex
 from propab.storage import get_object_bytes, put_bytes
 from propab.types import EventType
+
+
+async def _session_experiment_step_count(session_factory: async_sessionmaker, session_id: str) -> int:
+    async with session_factory() as session:
+        count = (
+            await session.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM experiment_steps e
+                    JOIN hypotheses h ON h.id = e.hypothesis_id
+                    WHERE h.session_id = CAST(:sid AS uuid)
+                    """
+                ),
+                {"sid": session_id},
+            )
+        ).scalar_one()
+    return int(count or 0)
+
+
+def _ensure_nonempty_trace(step_count: int) -> None:
+    if step_count <= 0:
+        raise RuntimeError(
+            "Paper generation blocked: session has zero experiment steps. "
+            "This indicates experiments did not execute; returning honest failure instead of speculative paper."
+        )
 
 
 def _safe_figure_filename(index: int, object_id: str) -> str:
@@ -72,6 +99,9 @@ async def write_paper_minimal(
     Compile methods + results + references from DB; optional LLM prose; embed session figures;
     render arXiv-style LaTeX; run pdflatex when available; upload to MinIO.
     """
+    step_count = await _session_experiment_step_count(session_factory, session_id)
+    _ensure_nonempty_trace(step_count)
+
     await emitter.emit(
         session_id=session_id,
         event_type=EventType.PAPER_SECTION_STARTED,
