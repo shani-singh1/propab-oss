@@ -18,7 +18,11 @@ services:
       - PROPAB_DATA_DIR=/data/propab
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
       - EMBED_PROVIDER=${EMBED_PROVIDER:-openai}
+      - EMBED_MODEL=${EMBED_MODEL:-text-embedding-3-small}
       - ORCHESTRATOR_URL=http://orchestrator:8010
       - ORCHESTRATOR_INTERNAL_TOKEN=${ORCHESTRATOR_INTERNAL_TOKEN:-}
     ports:
@@ -51,7 +55,11 @@ services:
       - PROPAB_DATA_DIR=/data/propab
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
       - EMBED_PROVIDER=${EMBED_PROVIDER:-openai}
+      - EMBED_MODEL=${EMBED_MODEL:-text-embedding-3-small}
       - ORCHESTRATOR_INTERNAL_TOKEN=${ORCHESTRATOR_INTERNAL_TOKEN:-}
     volumes:
       - propab_data:/data/propab
@@ -78,7 +86,11 @@ services:
       - PROPAB_DATA_DIR=/data/propab
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
       - EMBED_PROVIDER=${EMBED_PROVIDER:-openai}
+      - EMBED_MODEL=${EMBED_MODEL:-text-embedding-3-small}
     volumes:
       - propab_data:/data/propab
       - /var/run/docker.sock:/var/run/docker.sock
