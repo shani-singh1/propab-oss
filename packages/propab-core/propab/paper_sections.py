@@ -41,6 +41,14 @@ def render_paper_tex(
     )
 
 
+def _confirmed_hypothesis_count(synthesis: dict[str, Any] | None) -> int:
+    ledger = (synthesis or {}).get("ledger")
+    if not isinstance(ledger, dict):
+        return 0
+    confirmed = ledger.get("confirmed")
+    return len(confirmed) if isinstance(confirmed, list) else 0
+
+
 def _fallback_from_context(question: str, prior: dict[str, Any], synthesis: dict[str, Any] | None) -> dict[str, str]:
     syn = synthesis or {}
     if syn.get("short_circuit"):
@@ -69,10 +77,27 @@ def _fallback_from_context(question: str, prior: dict[str, Any], synthesis: dict
         + (f", including ``{cite}''." if cite else ".")
     )
     ledger = syn.get("ledger") or {}
+    if not isinstance(ledger, dict):
+        ledger = {}
+    n_c = len(ledger.get("confirmed") or [])
+    n_r = len(ledger.get("refuted") or [])
+    n_i = len(ledger.get("inconclusive") or [])
+    abs_plain = (
+        f"This session investigated: {question[:700]}. "
+        f"Automated sub-agent runs produced stored traces summarized in Results "
+        f"(confirmed={n_c}, refuted={n_r}, inconclusive={n_i}). "
+    )
+    if n_c == 0:
+        abs_plain += (
+            "No hypothesis met the platform confirmation bar against the recorded tool outputs; "
+            "do not treat narrative optimizer rankings as established facts without independent replication."
+        )
+    else:
+        abs_plain += "Claims tied to confirmed hypotheses are summarized in Results; other rows remain tentative."
+
     disc_plain = (
         f"Automated experiments concluded with ledger "
-        f"(confirmed={len(ledger.get('confirmed', []))}, refuted={len(ledger.get('refuted', []))}, "
-        f"inconclusive={len(ledger.get('inconclusive', []))}). "
+        f"(confirmed={n_c}, refuted={n_r}, inconclusive={n_i}). "
         "Limitations include sandboxed execution and tool proxies where noted in outputs."
     )
     concl_plain = (
@@ -80,7 +105,7 @@ def _fallback_from_context(question: str, prior: dict[str, Any], synthesis: dict
         "inconclusive rows indicate insufficient signal or tooling limits."
     )
     return {
-        "abstract": _latex_escape(question[:1500]),
+        "abstract": _latex_escape(abs_plain[:2000]),
         "introduction": _latex_escape(intro_plain),
         "discussion": _latex_escape(disc_plain),
         "conclusion": _latex_escape(concl_plain),
@@ -100,6 +125,10 @@ async def generate_prose_sections(
         str(getattr(llm, "provider", "") or "").lower() in ("ollama", "gemini")
         or bool(str(getattr(llm, "api_key", "") or "").strip())
     )
+    # LLM prose routinely asserts definitive rankings when every hypothesis is inconclusive;
+    # the ledger from synthesis is authoritative for what may be claimed at high level.
+    if use_llm and _confirmed_hypothesis_count(synthesis) == 0:
+        use_llm = False
     if not use_llm:
         return _fallback_from_context(question, prior, synthesis)
 
