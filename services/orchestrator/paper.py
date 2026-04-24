@@ -100,7 +100,12 @@ async def write_paper_minimal(
     render arXiv-style LaTeX; run pdflatex when available; upload to MinIO.
     """
     step_count = await _session_experiment_step_count(session_factory, session_id)
-    _ensure_nonempty_trace(step_count)
+    literature_only = bool((synthesis or {}).get("short_circuit"))
+    if step_count <= 0 and not literature_only:
+        _ensure_nonempty_trace(step_count)
+    elif step_count <= 0 and literature_only:
+        # Literature short-circuit may have no experiment rows; still emit a minimal note PDF.
+        pass
 
     await emitter.emit(
         session_id=session_id,

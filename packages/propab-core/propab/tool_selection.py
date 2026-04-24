@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import AbstractSet, Any
 
 
 def _tokens(text: str) -> set[str]:
@@ -41,14 +41,17 @@ def select_tool_steps(
     hypothesis_text: str,
     hypothesis: dict[str, Any],
     max_tools: int = 2,
+    exclude_tool_names: AbstractSet[str] | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     """
     Up to ``max_tools`` distinct tools, in relevance order, each with non-empty ``example.params``.
     """
     if max_tools < 1:
         return []
+    banned = frozenset(exclude_tool_names or ())
     if not specs:
-        return [_fallback_params(hypothesis)][:max_tools]
+        fb = _fallback_params(hypothesis)
+        return [fb][:max_tools] if fb[0] not in banned else []
     ranked = sorted(specs, key=lambda s: score_spec_relevance(hypothesis_text, s), reverse=True)
     out: list[tuple[str, dict[str, Any]]] = []
     used: set[str] = set()
@@ -56,7 +59,7 @@ def select_tool_steps(
         if len(out) >= max_tools:
             break
         name = str(spec.get("name", ""))
-        if not name or name in used:
+        if not name or name in used or name in banned:
             continue
         params = (spec.get("example") or {}).get("params")
         if not isinstance(params, dict) or not params:
@@ -64,7 +67,10 @@ def select_tool_steps(
         used.add(name)
         out.append((name, params))
     if not out:
-        return [_fallback_params(hypothesis)][:max_tools]
+        fb = _fallback_params(hypothesis)
+        if fb[0] not in banned:
+            return [fb][:max_tools]
+        return []
     return out
 
 

@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     orchestrator_internal_token: str = ""
     sub_agent_plan_source: str = "heuristic"
     sub_agent_max_planned_steps: int = 4
+    sub_agent_max_rounds: int = 3
+    sub_agent_tools_per_round: int = 3
+    # Paper: substantive (default) requires confirmed/refuted ledger or metric-like / deep tool trace.
+    # strict_confirmed = only confirmed hypotheses; always = prior behavior (any non-empty trace).
+    paper_policy: str = "substantive"
+    paper_min_substantive_tools: int = 2
     embed_provider: str = "openai"
     embed_model: str = "text-embedding-3-small"
     qdrant_url: str = ""

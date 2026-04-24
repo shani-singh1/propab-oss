@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from propab.config import settings
 from propab.events import EventEmitter
 from propab.llm import LLMClient
+from propab.paper_gate import session_merits_paper, short_circuit_merits_paper
 from propab.types import EventType
 from services.orchestrator.answer_gate import evaluate_literature_short_circuit
 from services.orchestrator.hypotheses import generate_ranked_hypotheses
@@ -132,16 +133,30 @@ async def run_research_loop(
             emitter=emitter,
         )
         if short_answer is not None:
+            sc_merits, sc_reason = short_circuit_merits_paper()
             await _update_session(session_factory, session_id, stage="paper")
-            paper_payload = await write_paper_minimal(
-                session_id=session_id,
-                session_factory=session_factory,
-                emitter=emitter,
-                llm=llm,
-                question=parsed.text,
-                prior=prior.to_dict(),
-                synthesis={"short_circuit": True, "short_answer": short_answer},
-            )
+            paper_payload: dict | None = None
+            if sc_merits:
+                paper_payload = await write_paper_minimal(
+                    session_id=session_id,
+                    session_factory=session_factory,
+                    emitter=emitter,
+                    llm=llm,
+                    question=parsed.text,
+                    prior=prior.to_dict(),
+                    synthesis={"short_circuit": True, "short_answer": short_answer},
+                )
+            else:
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.PAPER_SKIPPED,
+                    step="paper.skipped",
+                    payload={
+                        "reason": sc_reason,
+                        "literature_answer": short_answer,
+                        "note": "No experiment trace; paper suppressed (set PAPER_POLICY=always to allow literature-only PDF).",
+                    },
+                )
             await _update_session(session_factory, session_id, status="completed", stage="completed")
             await emitter.emit(
                 session_id=session_id,
@@ -152,7 +167,12 @@ async def run_research_loop(
                     "breakthroughs": [],
                     "dead_ends": [],
                     "existing_answer": short_answer,
-                    "note": "Literature short-circuit: question matched an established fact in the prior.",
+                    "paper_skipped_reason": None if paper_payload else sc_reason,
+                    "note": (
+                        "Literature short-circuit: prior matched an established answer."
+                        if paper_payload
+                        else "Literature short-circuit: answer returned without experiment paper."
+                    ),
                 },
             )
             return
@@ -318,15 +338,31 @@ async def run_research_loop(
                 for r in experiment_results
             ],
         }
-        paper_payload = await write_paper_minimal(
-            session_id=session_id,
-            session_factory=session_factory,
-            emitter=emitter,
-            llm=llm,
-            question=parsed.text,
-            prior=prior.to_dict(),
-            synthesis=synthesis_payload,
+        merits, merit_reason = await session_merits_paper(
+            session_factory, session_id, ledger=ledger
         )
+        paper_payload: dict | None = None
+        if merits:
+            paper_payload = await write_paper_minimal(
+                session_id=session_id,
+                session_factory=session_factory,
+                emitter=emitter,
+                llm=llm,
+                question=parsed.text,
+                prior=prior.to_dict(),
+                synthesis=synthesis_payload,
+            )
+        else:
+            await emitter.emit(
+                session_id=session_id,
+                event_type=EventType.PAPER_SKIPPED,
+                step="paper.skipped",
+                payload={
+                    "reason": merit_reason,
+                    "ledger": dict(ledger),
+                    "note": "Paper suppressed until there is confirmed/refuted hypotheses or substantive metric-like tool evidence. Inspect GET /sessions/{id}/trace.",
+                },
+            )
 
         await _update_session(session_factory, session_id, status="completed", stage="completed")
         await emitter.emit(
@@ -337,7 +373,12 @@ async def run_research_loop(
                 "paper": paper_payload,
                 "breakthroughs": ledger["confirmed"],
                 "dead_ends": ledger["refuted"],
-                "note": "Session completed with deterministic methods compilation and paper-ready payload.",
+                "paper_skipped_reason": None if paper_payload else merit_reason,
+                "note": (
+                    "Session completed with paper payload."
+                    if paper_payload
+                    else "Session completed without paper; experiments did not meet substantive bar."
+                ),
             },
         )
     except Exception as exc:

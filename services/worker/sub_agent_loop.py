@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from propab.config import settings
+from propab.paper_gate import SUBSTANTIVE_TOOL_NAMES
 from propab.sandbox_profiles import effective_sandbox_timeout_sec
 from propab.db import create_engine, create_redis, create_session_factory
 from propab.events import EventEmitter
@@ -21,6 +22,75 @@ from propab.tools.registry import ToolRegistry
 from propab.types import EventType
 from services.worker.domain_router import route_domain
 from services.worker.sandbox import run_sandboxed_python
+
+
+def _heuristic_tool_plan_merged(
+    specs: list[dict],
+    *,
+    hypothesis_text: str,
+    hypothesis: dict,
+) -> list[tuple[str, dict]]:
+    """Several selection rounds so the agent chains distinct tools like an iterative researcher."""
+    rounds = max(1, int(settings.sub_agent_max_rounds))
+    per = max(1, int(settings.sub_agent_tools_per_round))
+    used_names: set[str] = set()
+    merged: list[tuple[str, dict]] = []
+    for _ in range(rounds):
+        batch = select_tool_steps(
+            specs,
+            hypothesis_text=hypothesis_text,
+            hypothesis=hypothesis,
+            max_tools=per,
+            exclude_tool_names=frozenset(used_names),
+        )
+        before = len(merged)
+        for tn, pr in batch:
+            if tn in used_names:
+                continue
+            used_names.add(tn)
+            merged.append((tn, pr))
+        if len(merged) == before:
+            break
+    if not merged:
+        return select_tool_steps(
+            specs,
+            hypothesis_text=hypothesis_text,
+            hypothesis=hypothesis,
+            max_tools=per,
+        )
+    return merged
+
+
+def _extend_plan_with_heuristic_rounds(
+    base: list[tuple[str, dict]],
+    specs: list[dict],
+    *,
+    hypothesis_text: str,
+    hypothesis: dict,
+) -> list[tuple[str, dict]]:
+    """Append extra tool steps (excluding tools already in ``base``)."""
+    used_names = {t for t, _ in base}
+    extra_rounds = max(0, int(settings.sub_agent_max_rounds) - 1)
+    per = max(1, int(settings.sub_agent_tools_per_round))
+    out = list(base)
+    for _ in range(extra_rounds):
+        batch = select_tool_steps(
+            specs,
+            hypothesis_text=hypothesis_text,
+            hypothesis=hypothesis,
+            max_tools=per,
+            exclude_tool_names=frozenset(used_names),
+        )
+        gained = False
+        for tn, pr in batch:
+            if tn in used_names:
+                continue
+            used_names.add(tn)
+            out.append((tn, pr))
+            gained = True
+        if not gained:
+            break
+    return out
 
 
 def _tokens(text: str) -> set[str]:
@@ -153,11 +223,10 @@ async def run_sub_agent_async(payload: dict) -> dict:
         max_llm = max(1, min(int(settings.sub_agent_max_planned_steps), 12))
         can_llm = settings.llm_provider.strip().lower() == "ollama" or bool(settings.llm_api_secret.strip())
 
-        tool_steps = select_tool_steps(
+        tool_steps = _heuristic_tool_plan_merged(
             specs,
             hypothesis_text=hyp_text,
             hypothesis=hypothesis,
-            max_tools=2,
         )
         plan_origin = "heuristic"
         if plan_source in ("llm", "hybrid") and can_llm:
@@ -174,7 +243,12 @@ async def run_sub_agent_async(payload: dict) -> dict:
                 plan_source == "llm" or (plan_source == "hybrid" and len(planned) >= 1)
             )
             if use_llm_plan and planned is not None:
-                tool_steps = planned
+                tool_steps = _extend_plan_with_heuristic_rounds(
+                    list(planned),
+                    specs,
+                    hypothesis_text=hyp_text,
+                    hypothesis=hypothesis,
+                )
                 plan_origin = "llm"
 
         rank = hypothesis.get("rank")
@@ -198,6 +272,8 @@ async def run_sub_agent_async(payload: dict) -> dict:
             "available_tools": available_tools,
             "resource_limits": resource_limits,
             "plan_origin": plan_origin,
+            "heuristic_rounds": int(settings.sub_agent_max_rounds),
+            "tools_per_round": int(settings.sub_agent_tools_per_round),
         }
         await emitter.emit(
             session_id=session_id,
@@ -217,6 +293,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
         sandbox_ok = False
         any_tool_success = False
         successful_tool_outputs: list[dict] = []
+        successful_tool_names: list[str] = []
         for step_index, step in enumerate(plan_steps):
             await emitter.emit(
                 session_id=session_id,
@@ -351,6 +428,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
 
                 if result.success:
                     any_tool_success = True
+                    successful_tool_names.append(tool_name)
                     if isinstance(result.output, dict):
                         successful_tool_outputs.append(result.output)
                     await emitter.emit(
@@ -449,17 +527,22 @@ async def run_sub_agent_async(payload: dict) -> dict:
 
         tool_hit = any_tool_success
         relevance_score = _hypothesis_relevance_score(hyp_text, successful_tool_outputs)
+        substantive_hit = any(n in SUBSTANTIVE_TOOL_NAMES for n in successful_tool_names)
+        if substantive_hit:
+            relevance_score = min(1.0, relevance_score + 0.06)
         supports_hypothesis = tool_hit and relevance_score >= 0.08
         verdict = "confirmed" if supports_hypothesis else "inconclusive"
         confidence = 0.67 if verdict == "confirmed" else 0.35
         n_tool_steps = len([s for s in plan_steps if s.get("type") == "tool"])
         evidence = (
             f"Ran {n_tool_steps} tool step(s); plan_origin={plan_origin}; "
+            f"rounds_config=max{settings.sub_agent_max_rounds}x{settings.sub_agent_tools_per_round}/round; "
             f"any_success={tool_hit}; relevance_score={relevance_score:.3f}; sandbox_ok={sandbox_ok}."
             if verdict == "confirmed"
             else (
                 "No hypothesis-relevant confirming evidence was found. "
-                f"any_success={tool_hit}, relevance_score={relevance_score:.3f}, sandbox_ok={sandbox_ok}."
+                f"any_success={tool_hit}, relevance_score={relevance_score:.3f}, sandbox_ok={sandbox_ok}; "
+                f"rounds_config=max{settings.sub_agent_max_rounds}x{settings.sub_agent_tools_per_round}/round."
             )
         )
         key_finding = (
