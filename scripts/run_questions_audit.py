@@ -66,6 +66,11 @@ if tex:
 if pdf:
     doc=fitz.open(stream=pdf, filetype='pdf')
     text=' '.join((doc.load_page(p).get_text('text') or '') for p in range(min(3, doc.page_count)))
+    if 'â' in text:
+        try:
+            text = text.encode('latin-1').decode('utf-8', errors='replace')
+        except UnicodeError:
+            pass
     print('PDF_TEXT_START')
     print(text[:2500].replace('\\\\n',' '))
     print('PDF_TEXT_END')
