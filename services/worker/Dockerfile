@@ -8,11 +8,14 @@ RUN --mount=type=cache,target=/var/cache/apt,id=apt-worker,sharing=locked \
 
 WORKDIR /app
 COPY pyproject.toml README.md ARCHITECTURE.md ./
+COPY requirements ./requirements
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements/dl.txt
 COPY packages ./packages
 COPY services ./services
 COPY migrations ./migrations
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -e ".[dl]"
+    pip install -e . --no-deps
 
 CMD ["celery", "-A", "services.worker.celery_app", "worker", "--loglevel=info", "--concurrency=2"]

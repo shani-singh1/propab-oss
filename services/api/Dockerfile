@@ -11,12 +11,15 @@ RUN --mount=type=cache,target=/var/cache/apt,id=apt-api,sharing=locked \
 
 WORKDIR /app
 COPY pyproject.toml README.md ARCHITECTURE.md ./
+COPY requirements ./requirements
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements/base.txt
 COPY packages ./packages
 COPY services ./services
 COPY migrations ./migrations
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -e .
+    pip install -e . --no-deps
 
 EXPOSE 8000
 CMD ["uvicorn", "services.api.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
