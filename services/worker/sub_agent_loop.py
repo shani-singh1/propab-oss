@@ -23,6 +23,14 @@ from propab.types import EventType
 from services.worker.domain_router import route_domain
 from services.worker.sandbox import run_sandboxed_python
 
+_UTILITY_TOOL_NAMES = frozenset(
+    {
+        "json_extract",
+        "text_stats",
+        "format_convert",
+    }
+)
+
 
 def _heuristic_tool_plan_merged(
     specs: list[dict],
@@ -33,6 +41,7 @@ def _heuristic_tool_plan_merged(
     """Several selection rounds so the agent chains distinct tools like an iterative researcher."""
     rounds = max(1, int(settings.sub_agent_max_rounds))
     per = max(1, int(settings.sub_agent_tools_per_round))
+    initial_ban = _UTILITY_TOOL_NAMES if len(specs) > 1 else frozenset()
     used_names: set[str] = set()
     merged: list[tuple[str, dict]] = []
     for _ in range(rounds):
@@ -41,7 +50,7 @@ def _heuristic_tool_plan_merged(
             hypothesis_text=hypothesis_text,
             hypothesis=hypothesis,
             max_tools=per,
-            exclude_tool_names=frozenset(used_names),
+            exclude_tool_names=frozenset(used_names) | initial_ban,
         )
         before = len(merged)
         for tn, pr in batch:
@@ -72,6 +81,7 @@ def _extend_plan_with_heuristic_rounds(
     used_names = {t for t, _ in base}
     extra_rounds = max(0, int(settings.sub_agent_max_rounds) - 1)
     per = max(1, int(settings.sub_agent_tools_per_round))
+    initial_ban = _UTILITY_TOOL_NAMES if len(specs) > 1 else frozenset()
     out = list(base)
     for _ in range(extra_rounds):
         batch = select_tool_steps(
@@ -79,7 +89,7 @@ def _extend_plan_with_heuristic_rounds(
             hypothesis_text=hypothesis_text,
             hypothesis=hypothesis,
             max_tools=per,
-            exclude_tool_names=frozenset(used_names),
+            exclude_tool_names=frozenset(used_names) | initial_ban,
         )
         gained = False
         for tn, pr in batch:

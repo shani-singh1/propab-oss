@@ -228,7 +228,7 @@ def _parse_pdf_bytes(content: bytes) -> dict[str, Any]:
         for i in range(min(page_count, 50)):
             page = doc.load_page(i)
             texts.append(page.get_text("text") or "")
-        body = "\n\n".join(texts).strip()[:200_000]
+        body = "\n\n".join(texts).replace("\x00", "").strip()[:200_000]
         sections_json = {
             "page_count": page_count,
             "body": body,

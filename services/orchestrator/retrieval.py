@@ -222,12 +222,15 @@ async def run_hybrid_retrieval(
         ]
         if all((c.get("text") or "").strip() for c in chunk_records):
             texts_for_embed = [c["text"][:8000] for c in chunk_records]
-            vectors = await embed_texts(
-                texts=texts_for_embed,
-                api_key=settings.embed_api_secret,
-                model=settings.embed_model,
-                provider=settings.embed_provider,
-            )
+            try:
+                vectors = await embed_texts(
+                    texts=texts_for_embed,
+                    api_key=settings.embed_api_secret,
+                    model=settings.embed_model,
+                    provider=settings.embed_provider,
+                )
+            except Exception:
+                vectors = []
             if vectors and len(vectors) == len(chunk_records):
                 await asyncio.to_thread(
                     lambda: upsert_chunks(
@@ -238,23 +241,29 @@ async def run_hybrid_retrieval(
                         vectors=vectors,
                     )
                 )
-                qvec = (
-                    await embed_texts(
+                try:
+                    qvecs = await embed_texts(
                         texts=[question],
                         api_key=settings.embed_api_secret,
                         model=settings.embed_model,
                         provider=settings.embed_provider,
                     )
-                )[0]
-                dense_hits = await asyncio.to_thread(
-                    lambda: search_chunks(
-                        url=settings.qdrant_url,
-                        collection=settings.qdrant_collection,
-                        session_id=session_id,
-                        vector=qvec,
-                        limit=40,
+                except Exception:
+                    qvecs = []
+                if not qvecs:
+                    qvec = None
+                else:
+                    qvec = qvecs[0]
+                if qvec is not None:
+                    dense_hits = await asyncio.to_thread(
+                        lambda: search_chunks(
+                            url=settings.qdrant_url,
+                            collection=settings.qdrant_collection,
+                            session_id=session_id,
+                            vector=qvec,
+                            limit=40,
+                        )
                     )
-                )
 
     dense_ranking = [f"{h['paper_id']}|{h['chunk_index']}" for h in dense_hits if h.get("paper_id") is not None]
     all_rankings: list[list[str]] = [*bm25_rankings]

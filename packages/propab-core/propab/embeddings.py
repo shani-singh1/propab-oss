@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import httpx
@@ -36,7 +37,16 @@ async def _google_embed(*, texts: list[str], api_key: str, model: str) -> list[l
                 "model": f"models/{model_id}",
                 "content": {"parts": [{"text": t}]},
             }
-            response = await client.post(url, headers=headers, json=payload)
+            response: httpx.Response | None = None
+            for attempt in range(3):
+                response = await client.post(url, headers=headers, json=payload)
+                # Gemini embedding endpoint can intermittently return 429/503 under burst load.
+                if response.status_code not in (429, 503):
+                    break
+                if attempt < 2:
+                    await asyncio.sleep(1.5 * (2**attempt))
+            if response is None:
+                raise RuntimeError("Google embedding call did not produce a response.")
             response.raise_for_status()
             body = response.json()
             emb = body.get("embedding") or {}

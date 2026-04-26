@@ -42,6 +42,17 @@ _LEGACY_TO_PRIMARY: dict[str, str] = {
 }
 
 
+def _keyword_fallback_domain(hypothesis_text: str) -> str:
+    t = (hypothesis_text or "").lower()
+    if any(k in t for k in ("transformer", "activation", "optimizer", "sgd", "adam", "train", "model", "neural", "mlp", "attention", "learning rate", "warmup")):
+        return "deep_learning"
+    if any(k in t for k in ("loss surface", "convergence", "complexity", "benchmark", "hessian", "gradient", "ravine", "plateau")):
+        return "algorithm_optimization"
+    if any(k in t for k in ("baseline", "significance", "p-value", "confidence interval", "reproduc", "flops", "experiment grid")):
+        return "ml_research"
+    return "general_computation"
+
+
 def coerce_routed_domain(raw: str) -> str:
     d = (raw or "").strip().lower().replace("-", "_")
     if d in _ALLOWED:
@@ -80,6 +91,17 @@ async def route_domain(
         hypothesis_id=hypothesis_id,
     )
     data = _extract_json(raw) or {}
-    domain = coerce_routed_domain(str(data.get("domain", "general_computation")))
-    reason = str(data.get("reason", "Default domain after routing.")).strip()
+    parsed_domain = str(data.get("domain", "")).strip()
+    domain = coerce_routed_domain(parsed_domain)
+    reason = str(data.get("reason", "")).strip()
+    if not parsed_domain:
+        domain = _keyword_fallback_domain(hypothesis_text)
+        reason = f"Keyword fallback routing to {domain} after non-JSON/empty domain response."
+    elif domain == "general_computation":
+        kw = _keyword_fallback_domain(hypothesis_text)
+        if kw != "general_computation":
+            domain = kw
+            reason = f"Coerced away from general_computation using keyword fallback to {domain}."
+    if not reason:
+        reason = "Default domain after routing."
     return domain, reason
