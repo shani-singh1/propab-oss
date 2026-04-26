@@ -54,8 +54,28 @@ def _fallback_hypothesis_text(question: str, rank: int) -> str:
             "Performance gains depend on model scale and are not uniform across settings.",
             "Observed gains remain after controlling for parameter count and compute budget.",
         ]
+    if rank >= 5:
+        return f"Hypothesis {rank}: Null hypothesis — the intervention has no statistically significant effect beyond noise-level variation. (Question: {q})"
     text = options[(rank - 1) % len(options)]
     return f"Hypothesis {rank}: {text} (Question: {q})"
+
+
+def _ensure_null_hypothesis(hypotheses: list[RankedHypothesis], question: str) -> list[RankedHypothesis]:
+    if not hypotheses:
+        return hypotheses
+    for h in hypotheses:
+        t = (h.text or "").lower()
+        if any(k in t for k in ("null hypothesis", "no significant effect", "no effect", "not significantly")):
+            return hypotheses
+    # Force one null hypothesis for scientific falsification.
+    target = hypotheses[-1]
+    target.text = (
+        f"Null hypothesis: The intervention has no statistically significant effect for this question beyond noise-level differences. "
+        f"(Question: {question})"
+    )
+    if not (target.test_methodology or "").strip():
+        target.test_methodology = "Test against baseline and verify p-value >= 0.05 under repeated runs."
+    return hypotheses
 
 
 def _build_hypothesis_prompt(parsed: ParsedQuestion, prior: Prior, max_hypotheses: int) -> str:
@@ -75,6 +95,7 @@ Prior dead ends:
 
 Generate exactly {max_hypotheses} hypotheses.
 Return JSON array only with fields: id, text, test_methodology, gap_reference, expected_result.
+One of the hypotheses must be a null hypothesis predicting no significant effect.
 """
 
 
@@ -147,4 +168,5 @@ async def generate_ranked_hypotheses(
             llm=llm,
             session_id=session_id,
         )
+    hypotheses = _ensure_null_hypothesis(hypotheses, parsed.text)
     return hypotheses

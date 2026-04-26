@@ -227,7 +227,14 @@ def _parse_pdf_bytes(content: bytes) -> dict[str, Any]:
         texts: list[str] = []
         for i in range(min(page_count, 50)):
             page = doc.load_page(i)
-            texts.append(page.get_text("text") or "")
+            raw = page.get_text("text") or ""
+            # Quick encoding normalization for mojibake-like apostrophes/dashes in extracted text.
+            if "â" in raw:
+                try:
+                    raw = raw.encode("latin-1").decode("utf-8", errors="replace")
+                except UnicodeError:
+                    pass
+            texts.append(raw)
         body = "\n\n".join(texts).replace("\x00", "").strip()[:200_000]
         sections_json = {
             "page_count": page_count,

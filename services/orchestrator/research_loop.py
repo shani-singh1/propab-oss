@@ -195,6 +195,13 @@ async def run_research_loop(
         )
 
         await _update_session(session_factory, session_id, stage="experiment")
+        baseline_metric = float(len(prior.established_facts or []))
+        baseline = {
+            "description": "Session baseline from prior established facts count before hypothesis dispatch.",
+            "metric_name": "established_facts_count",
+            "metric_value": baseline_metric,
+            "how_obtained": "literature",
+        }
         pending: list[dict] = []
         for row_id, hypothesis in hypothesis_rows:
             await emitter.emit(
@@ -209,6 +216,7 @@ async def run_research_loop(
                     "session_id": session_id,
                     "hypothesis_id": row_id,
                     "hypothesis": hypothesis.to_dict(),
+                    "baseline": baseline,
                     "prior": prior.to_dict(),
                     "domain": parsed.domain,
                 }

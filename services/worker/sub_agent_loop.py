@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import time
+from typing import Any, TypedDict
 from uuid import uuid4
 
 from sqlalchemy import text
@@ -30,6 +31,20 @@ _UTILITY_TOOL_NAMES = frozenset(
         "format_convert",
     }
 )
+
+
+class HypothesisEvidence(TypedDict):
+    metric_value: float | None
+    baseline_value: float | None
+    delta: float | None
+    delta_pct: float | None
+    p_value: float | None
+    effect_size: float | None
+    confidence_interval: list[float] | None
+    n_tool_steps: int
+    n_metric_steps: int
+    relevance_score: float
+    verdict_reason: str
 
 
 def _heuristic_tool_plan_merged(
@@ -107,6 +122,99 @@ def _tokens(text: str) -> set[str]:
     return {t for t in re.findall(r"[a-z0-9]{4,}", text.lower())}
 
 
+def _walk_numeric_values(payload: Any, *, prefix: str = "") -> dict[str, float]:
+    out: dict[str, float] = {}
+    if isinstance(payload, dict):
+        for k, v in payload.items():
+            key = f"{prefix}.{k}" if prefix else str(k)
+            out.update(_walk_numeric_values(v, prefix=key))
+    elif isinstance(payload, list):
+        nums = [x for x in payload if isinstance(x, (int, float)) and not isinstance(x, bool)]
+        if nums and len(nums) <= 128:
+            out[prefix or "list"] = float(nums[-1])
+    elif isinstance(payload, (int, float)) and not isinstance(payload, bool):
+        out[prefix or "value"] = float(payload)
+    return out
+
+
+def _extract_ci(payload: dict[str, Any]) -> list[float] | None:
+    for k in ("confidence_interval", "ci", "interval"):
+        v = payload.get(k)
+        if isinstance(v, list) and len(v) >= 2 and all(isinstance(x, (int, float)) for x in v[:2]):
+            return [float(v[0]), float(v[1])]
+    return None
+
+
+def _first_key(payload: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    for k in keys:
+        v = payload.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+    return None
+
+
+def _build_evidence(
+    *,
+    successful_outputs: list[dict[str, Any]],
+    relevance_score: float,
+    n_tool_steps: int,
+    baseline_value: float | None,
+) -> HypothesisEvidence:
+    metric_value: float | None = None
+    p_value: float | None = None
+    effect_size: float | None = None
+    ci = None
+    metric_steps = 0
+    for out in successful_outputs:
+        nums = _walk_numeric_values(out)
+        if nums:
+            metric_steps += 1
+            if metric_value is None:
+                metric_value = next(iter(nums.values()))
+        if p_value is None:
+            p_value = _first_key(out, ("p_value", "p", "pvalue"))
+        if effect_size is None:
+            effect_size = _first_key(out, ("effect_size", "cohens_d", "d"))
+        if ci is None:
+            ci = _extract_ci(out)
+    delta = None if (metric_value is None or baseline_value is None) else (metric_value - baseline_value)
+    delta_pct = None
+    if delta is not None and baseline_value not in (None, 0.0):
+        delta_pct = (delta / baseline_value) * 100.0
+    return HypothesisEvidence(
+        metric_value=metric_value,
+        baseline_value=baseline_value,
+        delta=delta,
+        delta_pct=delta_pct,
+        p_value=p_value,
+        effect_size=effect_size,
+        confidence_interval=ci,
+        n_tool_steps=n_tool_steps,
+        n_metric_steps=metric_steps,
+        relevance_score=float(relevance_score),
+        verdict_reason="",
+    )
+
+
+def _compute_confidence(evidence: HypothesisEvidence) -> float:
+    score = 0.0
+    if evidence["metric_value"] is not None:
+        score += 0.20
+    if evidence["baseline_value"] is not None:
+        score += 0.20
+    p = evidence["p_value"]
+    if p is not None and p < 0.05:
+        score += 0.25
+    es = evidence["effect_size"]
+    if es is not None and abs(es) > 0.2:
+        score += 0.15
+    if evidence["n_metric_steps"] >= 3:
+        score += 0.10
+    if evidence["relevance_score"] > 0.30:
+        score += 0.10
+    return min(max(score, 0.0), 0.95)
+
+
 def _hypothesis_relevance_score(hypothesis_text: str, successful_outputs: list[dict]) -> float:
     """
     Coarse relevance signal: lexical overlap + evidence-key bonus.
@@ -175,6 +283,12 @@ async def run_sub_agent_async(payload: dict) -> dict:
     session_id: str = payload["session_id"]
     hypothesis_id: str = payload["hypothesis_id"]
     hypothesis: dict = payload["hypothesis"]
+    baseline = payload.get("baseline") if isinstance(payload.get("baseline"), dict) else {}
+    baseline_value = (
+        float(baseline.get("metric_value"))
+        if isinstance(baseline.get("metric_value"), (int, float))
+        else None
+    )
 
     engine = create_engine(settings.database_url)
     session_factory = create_session_factory(engine)
@@ -540,24 +654,53 @@ async def run_sub_agent_async(payload: dict) -> dict:
         substantive_hit = any(n in SUBSTANTIVE_TOOL_NAMES for n in successful_tool_names)
         if substantive_hit:
             relevance_score = min(1.0, relevance_score + 0.06)
-        supports_hypothesis = tool_hit and relevance_score >= 0.08
-        verdict = "confirmed" if supports_hypothesis else "inconclusive"
-        confidence = 0.67 if verdict == "confirmed" else 0.35
         n_tool_steps = len([s for s in plan_steps if s.get("type") == "tool"])
-        evidence = (
-            f"Ran {n_tool_steps} tool step(s); plan_origin={plan_origin}; "
-            f"rounds_config=max{settings.sub_agent_max_rounds}x{settings.sub_agent_tools_per_round}/round; "
-            f"any_success={tool_hit}; relevance_score={relevance_score:.3f}; sandbox_ok={sandbox_ok}."
-            if verdict == "confirmed"
-            else (
-                "No hypothesis-relevant confirming evidence was found. "
-                f"any_success={tool_hit}, relevance_score={relevance_score:.3f}, sandbox_ok={sandbox_ok}; "
-                f"rounds_config=max{settings.sub_agent_max_rounds}x{settings.sub_agent_tools_per_round}/round."
+        evidence_obj = _build_evidence(
+            successful_outputs=successful_tool_outputs,
+            relevance_score=relevance_score,
+            n_tool_steps=n_tool_steps,
+            baseline_value=baseline_value,
+        )
+        # Hard gate contract: no metric-bearing steps => no confirmation.
+        if evidence_obj["n_metric_steps"] == 0:
+            verdict = "inconclusive"
+            confidence = 0.0
+            evidence_obj["verdict_reason"] = "no metric-bearing steps executed"
+        elif evidence_obj["delta"] is None and evidence_obj["p_value"] is None:
+            verdict = "inconclusive"
+            confidence = 0.30
+            evidence_obj["verdict_reason"] = "tools ran but produced no comparable numbers"
+        else:
+            supports_hypothesis = False
+            if evidence_obj["p_value"] is not None:
+                supports_hypothesis = bool(
+                    evidence_obj["delta"] is not None
+                    and evidence_obj["p_value"] < 0.05
+                    and evidence_obj["relevance_score"] >= 0.12
+                )
+            elif evidence_obj["effect_size"] is not None:
+                supports_hypothesis = bool(
+                    abs(evidence_obj["effect_size"]) > 0.2 and evidence_obj["relevance_score"] >= 0.12
+                )
+            elif evidence_obj["delta_pct"] is not None:
+                supports_hypothesis = bool(
+                    abs(evidence_obj["delta_pct"]) >= 2.0 and evidence_obj["relevance_score"] >= 0.12
+                )
+            confidence = _compute_confidence(evidence_obj)
+            verdict = "confirmed" if supports_hypothesis else "inconclusive"
+            evidence_obj["verdict_reason"] = (
+                "metric crossed confirmation threshold with baseline/statistical support"
+                if supports_hypothesis
+                else "metric evidence did not cross confirmation threshold"
             )
+        evidence = (
+            f"evidence={json.dumps(evidence_obj, ensure_ascii=False)}; "
+            f"plan_origin={plan_origin}; rounds_config=max{settings.sub_agent_max_rounds}x{settings.sub_agent_tools_per_round}/round; "
+            f"any_success={tool_hit}; sandbox_ok={sandbox_ok}."
         )
         key_finding = (
-            "At least one successful tool output contained hypothesis-relevant evidence."
-            if supports_hypothesis
+            "At least one metric-bearing tool output crossed the confirmation contract."
+            if verdict == "confirmed"
             else ("Sandbox probe completed." if sandbox_ok else None)
         )
 
@@ -590,7 +733,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
             "tool_trace_id": trace_pointer,
             "figures": [],
             "duration_sec": round(duration_sec, 3),
-            "failure_reason": None if verdict == "confirmed" else "Probes did not meet confirmation criteria.",
+            "failure_reason": None if verdict == "confirmed" else evidence_obj["verdict_reason"],
         }
 
         await redis.close()
