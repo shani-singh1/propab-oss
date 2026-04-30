@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import time
 from typing import Any, TypedDict
@@ -23,6 +24,8 @@ from propab.tools.registry import ToolRegistry
 from propab.types import EventType
 from services.worker.domain_router import route_domain
 from services.worker.sandbox import run_sandboxed_python
+
+logger = logging.getLogger(__name__)
 
 _UTILITY_TOOL_NAMES = frozenset(
     {
@@ -197,6 +200,13 @@ def _build_evidence(
 
 
 def _compute_confidence(evidence: HypothesisEvidence) -> float:
+    logger.info(
+        "compute_confidence called: n_metric_steps=%s, p_value=%s, effect_size=%s, delta_pct=%s",
+        evidence.get("n_metric_steps"),
+        evidence.get("p_value"),
+        evidence.get("effect_size"),
+        evidence.get("delta_pct"),
+    )
     score = 0.0
     if evidence["metric_value"] is not None:
         score += 0.20

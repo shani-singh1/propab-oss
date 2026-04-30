@@ -78,14 +78,15 @@ if pdf:
     run = subprocess.run(
         ["docker", "exec", "propab-oss-orchestrator-1", "python", "-c", py],
         capture_output=True,
-        text=True,
         timeout=180,
         check=False,
     )
+    stdout = (run.stdout or b"").decode("utf-8", errors="replace")
+    stderr = (run.stderr or b"").decode("utf-8", errors="replace")
     return {
         "exit_code": run.returncode,
-        "stdout_tail": run.stdout[-12000:],
-        "stderr_tail": run.stderr[-4000:],
+        "stdout_tail": stdout[-12000:],
+        "stderr_tail": stderr[-4000:],
     }
 
 

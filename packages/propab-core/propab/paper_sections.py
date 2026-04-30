@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -144,10 +145,17 @@ async def generate_prose_sections(
             f"Task: {instruction}\n"
             "Output plain text only, no markdown, no citations markup, <= 180 words."
         )
-        raw = (await llm.call(prompt=prompt, purpose=purpose, session_id=session_id)).strip()
-        if raw.startswith("[") or raw.startswith("{"):
-            return ""
-        return _latex_escape(raw[:2500])
+        for attempt in range(3):
+            try:
+                raw = (await llm.call(prompt=prompt, purpose=purpose, session_id=session_id)).strip()
+                if raw.startswith("[") or raw.startswith("{"):
+                    return ""
+                return _latex_escape(raw[:2500])
+            except Exception:
+                if attempt < 2:
+                    await asyncio.sleep(1.5 * (2**attempt))
+                    continue
+                return ""
 
     abstract = await one("paper.abstract", "Write the abstract summarizing problem, approach, and high-level outcome.")
     introduction = await one("paper.introduction", "Write the introduction: motivation, gap, and what was executed.")

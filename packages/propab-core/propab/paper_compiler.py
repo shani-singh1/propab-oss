@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from sqlalchemy import text
@@ -44,6 +45,27 @@ def _format_params(params: Any) -> str:
     if isinstance(params, dict):
         return json.dumps(params, ensure_ascii=False)
     return str(params)
+
+
+def _extract_metric_steps_from_evidence(evidence_summary: str | None) -> int | None:
+    text = (evidence_summary or "").strip()
+    if not text:
+        return None
+    # New format: evidence={...}; plan_origin=...
+    m = re.search(r"evidence=(\{[\s\S]*?\})\s*;", text)
+    if m:
+        try:
+            obj = json.loads(m.group(1))
+            v = obj.get("n_metric_steps")
+            if isinstance(v, int):
+                return v
+        except json.JSONDecodeError:
+            pass
+    # Legacy fallback: n_metric_steps=<int>
+    m2 = re.search(r"n_metric_steps\s*=\s*(\d+)", text)
+    if m2:
+        return int(m2.group(1))
+    return None
 
 
 async def compile_methods_section(session_factory: async_sessionmaker, hypothesis_id: str) -> str:
@@ -178,6 +200,23 @@ async def compile_session_results_latex(session_factory: async_sessionmaker, ses
         trace = _latex_escape(str(row.get("tool_trace_id") or ""))
         hyp = _latex_escape(str(row.get("text") or "")[:900])
         steps = int(row.get("step_count") or 0)
+        n_metric_steps = _extract_metric_steps_from_evidence(str(row.get("evidence_summary") or ""))
+        if steps == 0:
+            parts.append(
+                f"\\subsection{{Hypothesis {label}}}\n"
+                f"\\textbf{{Statement:}} {hyp}\\\\\n"
+                "\\textbf{Status:} excluded from analysis (no experiment steps executed).\\\\\n"
+                "\\textbf{Note:} This hypothesis was generated but never executed, so it is not included in conclusions."
+            )
+            continue
+        if verdict.lower() == "confirmed" and n_metric_steps == 0:
+            parts.append(
+                f"\\subsection{{Hypothesis {label}}}\n"
+                f"\\textbf{{Statement:}} {hyp}\\\\\n"
+                "\\textbf{Status:} excluded from analysis (confirmed without metric evidence).\\\\\n"
+                "\\textbf{Note:} Confirmation requires metric-bearing evidence; this row is excluded pending rerun."
+            )
+            continue
         parts.append(
             f"\\subsection{{Hypothesis {label}}}\n"
             f"\\textbf{{Statement:}} {hyp}\\\\\n"

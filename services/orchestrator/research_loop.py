@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import traceback
 from uuid import UUID, uuid5
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -390,11 +391,46 @@ async def run_research_loop(
             },
         )
     except Exception as exc:
+        last_events: list[dict] = []
+        try:
+            async with session_factory() as session:
+                rows = (
+                    await session.execute(
+                        text(
+                            """
+                            SELECT event_type, step, payload_json, created_at
+                            FROM events
+                            WHERE session_id = CAST(:sid AS uuid)
+                            ORDER BY created_at DESC
+                            LIMIT 20
+                            """
+                        ),
+                        {"sid": session_id},
+                    )
+                ).mappings().all()
+            last_events = [
+                {
+                    "event_type": str(r.get("event_type") or ""),
+                    "step": str(r.get("step") or ""),
+                    "payload": r.get("payload_json"),
+                    "created_at": str(r.get("created_at") or ""),
+                }
+                for r in rows
+            ]
+        except Exception:
+            # Best effort only; never mask original failure.
+            last_events = []
         await _update_session(session_factory, session_id, status="failed", stage="failed")
         await emitter.emit(
             session_id=session_id,
             event_type=EventType.SESSION_FAILED,
             step="session.failed",
-            payload={"error": str(exc)},
+            payload={
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "traceback": traceback.format_exc(),
+                "stage": "failed",
+                "last_events": last_events,
+            },
         )
         raise
