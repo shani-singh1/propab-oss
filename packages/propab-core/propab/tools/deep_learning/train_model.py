@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import math
+import time as _t
 
 from propab.tools.model_registry import get_model, put_model
 from propab.tools.types import ToolError, ToolResult
@@ -8,22 +8,31 @@ from propab.tools.types import ToolError, ToolResult
 TOOL_SPEC = {
     "name": "train_model",
     "domain": "deep_learning",
-    "description": "Train a tiny MLP from build_mlp on synthetic data (CPU torch).",
+    "description": (
+        "Train a registered MLP (from build_mlp) on synthetic data using real PyTorch. "
+        "Returns val_losses list for significance testing and final_val_loss."
+    ),
     "params": {
         "model_id": {"type": "str", "required": True},
-        "task": {"type": "str", "required": True, "enum": ["classification", "regression", "autoencoding", "language_modeling"]},
+        "task": {
+            "type": "str",
+            "required": True,
+            "enum": ["classification", "regression", "autoencoding", "language_modeling"],
+        },
         "dataset": {"type": "str", "required": False, "default": "synthetic"},
-        "n_steps": {"type": "int", "required": False, "default": 80},
+        "n_steps": {"type": "int", "required": False, "default": 120},
         "batch_size": {"type": "int", "required": False, "default": 32},
         "optimizer": {"type": "str", "required": False, "default": "adam"},
         "learning_rate": {"type": "float", "required": False, "default": 1e-3},
         "lr_schedule": {"type": "str", "required": False, "default": "none"},
         "weight_decay": {"type": "float", "required": False, "default": 0.0},
+        "noise_level": {"type": "float", "required": False, "default": 0.0},
         "record_every": {"type": "int", "required": False, "default": 10},
     },
     "output": {
-        "loss_curve": "list",
-        "gradient_norms": "list",
+        "loss_curve": "list[dict]",
+        "val_losses": "list[float]",
+        "gradient_norms": "list[dict]",
         "final_train_loss": "float",
         "final_val_loss": "float",
         "final_metric": "float",
@@ -39,12 +48,13 @@ def train_model(
     model_id: str,
     task: str,
     dataset: str = "synthetic",
-    n_steps: int = 80,
+    n_steps: int = 120,
     batch_size: int = 32,
     optimizer: str = "adam",
     learning_rate: float = 1e-3,
     lr_schedule: str = "none",
     weight_decay: float = 0.0,
+    noise_level: float = 0.0,
     record_every: int = 10,
 ) -> ToolResult:
     try:
@@ -53,66 +63,151 @@ def train_model(
     except ImportError:
         return ToolResult(
             success=False,
-            error=ToolError(type="missing_dependency", message="PyTorch required — install propab[dl] on the worker."),
+            error=ToolError(
+                type="missing_dependency",
+                message="PyTorch required — install propab[dl] on the worker.",
+            ),
         )
 
     info = get_model(str(model_id))
     if not info or info.get("kind") != "mlp":
-        return ToolResult(success=False, error=ToolError(type="validation_error", message="model_id must come from build_mlp."))
+        return ToolResult(
+            success=False,
+            error=ToolError(
+                type="validation_error",
+                message=f"model_id '{model_id}' not found or not an MLP. Call build_mlp first.",
+            ),
+        )
 
     dims: list[int] = info["dims"]
+    activation_name: str = info.get("activation", "relu")
+
+    def _act_layer() -> nn.Module:
+        return {
+            "relu": nn.ReLU(),
+            "gelu": nn.GELU(),
+            "silu": nn.SiLU(),
+            "tanh": nn.Tanh(),
+            "sigmoid": nn.Sigmoid(),
+        }.get(activation_name.lower(), nn.ReLU())
+
+    # Build the network
     layers: list[nn.Module] = []
     for i in range(len(dims) - 1):
         layers.append(nn.Linear(dims[i], dims[i + 1]))
         if i < len(dims) - 2:
-            layers.append(nn.ReLU())
+            layers.append(_act_layer())
     net = nn.Sequential(*layers)
-    opt_cls = {"adam": torch.optim.Adam, "sgd": torch.optim.SGD, "adamw": torch.optim.AdamW}.get(optimizer.lower(), torch.optim.Adam)
-    opt = opt_cls(net.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
-    n_steps = max(5, min(int(n_steps), 2000))
-    bs = max(4, min(int(batch_size), 512))
-    torch.manual_seed(0)
-    x = torch.randn(bs, dims[0])
-    if task == "classification":
-        y = torch.randint(0, dims[-1], (bs,))
+    # Initialize optimizer
+    opt_name = str(optimizer).lower()
+    opt_map = {
+        "adam": torch.optim.Adam,
+        "adamw": torch.optim.AdamW,
+        "sgd": torch.optim.SGD,
+        "rmsprop": torch.optim.RMSprop,
+        "adagrad": torch.optim.Adagrad,
+    }
+    opt_cls = opt_map.get(opt_name, torch.optim.Adam)
+    try:
+        opt = opt_cls(net.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay))
+    except TypeError:
+        # SGD doesn't accept weight_decay in all versions
+        opt = opt_cls(net.parameters(), lr=float(learning_rate))
+
+    # Generate a deterministic synthetic dataset keyed to model_id
+    # Different model_ids → different data, ensuring varied outcomes
+    seed = hash(str(model_id)) & 0x7FFFFFFF
+    torch.manual_seed(seed)
+
+    n_train, n_val = 300, 80
+    n_steps = max(20, min(int(n_steps), 400))
+    bs = max(8, min(int(batch_size), 256))
+    rec_every = max(1, int(record_every))
+
+    X_train = torch.randn(n_train, dims[0])
+    X_val = torch.randn(n_val, dims[0])
+
+    if task in ("classification", "language_modeling"):
+        n_classes = max(2, dims[-1])
+        Y_train = torch.randint(0, n_classes, (n_train,))
+        Y_val = torch.randint(0, n_classes, (n_val,))
         loss_fn = nn.CrossEntropyLoss()
+        is_class = True
     else:
-        y = torch.randn(bs, dims[-1])
+        # regression / autoencoding
+        W_true = torch.randn(dims[0], dims[-1]) * 0.3
+        Y_train = X_train @ W_true + torch.randn(n_train, dims[-1]) * max(0.0, float(noise_level) + 0.1)
+        Y_val = X_val @ W_true + torch.randn(n_val, dims[-1]) * max(0.0, float(noise_level) + 0.1)
         loss_fn = nn.MSELoss()
+        is_class = False
 
-    import time as _t
+    # Optional LR warmup / cosine schedule
+    scheduler = None
+    lr_sched_name = str(lr_schedule).lower()
+    if lr_sched_name == "warmup":
+        warmup_steps = max(5, n_steps // 10)
+        scheduler = torch.optim.lr_scheduler.LinearLR(
+            opt, start_factor=0.1, end_factor=1.0, total_iters=warmup_steps
+        )
+    elif lr_sched_name == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=n_steps)
 
     t0 = _t.perf_counter()
-    curve: list[dict] = []
-    grads: list[dict] = []
-    last_loss = 0.0
+    loss_curve: list[dict] = []
+    gradient_norms: list[dict] = []
+    val_losses: list[float] = []
+    last_train_loss = 0.0
+
     for step in range(n_steps):
+        # Random minibatch each step
+        idx = torch.randint(0, n_train, (bs,))
+        x_b = X_train[idx]
+        y_b = Y_train[idx]
+
         opt.zero_grad()
-        logits = net(x)
-        if task == "classification":
-            loss = loss_fn(logits, y)
-        else:
-            loss = loss_fn(logits, y)
+        logits = net(x_b)
+        loss = loss_fn(logits, y_b)
         loss.backward()
-        gn = float(torch.nn.utils.clip_grad_norm_(net.parameters(), 10.0))
+        gn = float(torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0))
         opt.step()
-        last_loss = float(loss.detach())
-        if step % max(1, int(record_every)) == 0:
-            curve.append({"step": step, "train_loss": last_loss, "val_loss": last_loss})
-            grads.append({"step": step, "grad_norm": gn})
+        if scheduler is not None:
+            scheduler.step()
+
+        last_train_loss = float(loss.detach())
+
+        if step % rec_every == 0:
+            with torch.no_grad():
+                val_logits = net(X_val)
+                val_loss = float(loss_fn(val_logits, Y_val).detach())
+            val_losses.append(round(val_loss, 6))
+            loss_curve.append({
+                "step": step,
+                "train_loss": round(last_train_loss, 6),
+                "val_loss": round(val_loss, 6),
+            })
+            gradient_norms.append({"step": step, "grad_norm": round(gn, 6)})
 
     dt = _t.perf_counter() - t0
-    tid = str(model_id) + ":trained"
-    put_model(tid, {"kind": "mlp_trained", "base": model_id, "dims": dims, "state_dict": {k: v.detach().cpu() for k, v in net.state_dict().items()}})
+    final_val = val_losses[-1] if val_losses else round(last_train_loss, 6)
+    tid = f"{model_id}:trained"
+    put_model(tid, {
+        "kind": "mlp_trained",
+        "base": model_id,
+        "dims": dims,
+        "val_losses": val_losses,
+        "final_val_loss": final_val,
+    })
+
     return ToolResult(
         success=True,
         output={
-            "loss_curve": curve,
-            "gradient_norms": grads,
-            "final_train_loss": last_loss,
-            "final_val_loss": last_loss,
-            "final_metric": last_loss,
+            "loss_curve": loss_curve,
+            "val_losses": val_losses,
+            "gradient_norms": gradient_norms,
+            "final_train_loss": round(last_train_loss, 6),
+            "final_val_loss": final_val,
+            "final_metric": final_val,
             "total_time_sec": round(dt, 4),
             "steps_per_sec": round(n_steps / max(dt, 1e-6), 2),
             "trained_model_id": tid,

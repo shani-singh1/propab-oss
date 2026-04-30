@@ -16,10 +16,10 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://127.0.0.1:11434"
     orchestrator_url: str = ""
     orchestrator_internal_token: str = ""
-    sub_agent_plan_source: str = "heuristic"
-    sub_agent_max_planned_steps: int = 4
-    sub_agent_max_rounds: int = 3
-    sub_agent_tools_per_round: int = 3
+    sub_agent_plan_source: str = "llm"
+    sub_agent_max_planned_steps: int = 6
+    sub_agent_max_rounds: int = 4
+    sub_agent_tools_per_round: int = 4
     # Paper: substantive (default) requires confirmed/refuted ledger or metric-like / deep tool trace.
     # strict_confirmed = only confirmed hypotheses; always = prior behavior (any non-empty trace).
     paper_policy: str = "substantive"
@@ -34,18 +34,18 @@ class Settings(BaseSettings):
     minio_secret_key: str = ""
     minio_bucket: str = "propab"
     minio_secure: bool = False
-    sandbox_timeout_sec: int = 30
+    sandbox_timeout_sec: int = 120
     sandbox_memory_mb: int = 512
     sandbox_code_max_retries: int = 3
     literature_answer_similarity: float = 0.92
     # Think-act agent budgets
-    agent_max_steps: int = 15
+    agent_max_steps: int = 20
     agent_min_steps: int = 5
     # Multi-round orchestrator
-    research_max_rounds: int = 5
-    research_max_hours: float = 1.0
+    research_max_rounds: int = 4
+    research_max_hours: float = 1.5
     research_target_confirmed: int = 3
-    research_max_hypotheses: int = 50
+    research_max_hypotheses: int = 60
     research_min_marginal_return: float = 0.05
     reranker_enabled: bool = False
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"

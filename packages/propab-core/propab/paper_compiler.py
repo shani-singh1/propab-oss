@@ -136,11 +136,21 @@ async def compile_session_methods_latex(session_factory: async_sessionmaker, ses
         body = await compile_methods_section(session_factory, hid)
         label = f"h{hyp['rank']}"
         hyp_text = _latex_escape(str(hyp["text"] or ""))
-        section = (
-            f"\\subsection{{Hypothesis {label}}}\\label{{subsec:{hid}}}\n"
-            f"\\textit{{{hyp_text}}}\\\\\n"
-            f"{body}\n"
-        )
+        # 0-step hypotheses: note exclusion in methods but don't render a full section
+        has_steps = "No automated experiment steps" not in body
+        if not has_steps:
+            section = (
+                f"\\subsection{{Hypothesis {label}}}\\label{{subsec:{hid}}}\n"
+                f"\\textit{{{hyp_text}}}\\\\\n"
+                "\\textit{{Note: No experiment steps were executed for this hypothesis; "
+                "excluded from methods and results analysis.}}\n"
+            )
+        else:
+            section = (
+                f"\\subsection{{Hypothesis {label}}}\\label{{subsec:{hid}}}\n"
+                f"\\textit{{{hyp_text}}}\\\\\n"
+                f"{body}\n"
+            )
         sections.append(section)
         per_hypothesis[hid] = body
 

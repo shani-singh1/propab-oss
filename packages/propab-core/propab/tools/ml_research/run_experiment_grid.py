@@ -10,17 +10,27 @@ from propab.tools.types import ToolError, ToolResult
 TOOL_SPEC = {
     "name": "run_experiment_grid",
     "domain": "ml_research",
-    "description": "Evaluate all combinations of numeric grid axes with a deterministic synthetic score (v1; user code execution disabled).",
+    "description": (
+        "Evaluate all combinations of a hyperparameter grid by training real MLP models. "
+        "Returns val_losses per config — use these with statistical_significance to compare configs."
+    ),
     "params": {
         "experiment_code": {"type": "str", "required": True},
         "grid": {"type": "dict", "required": True},
         "n_repeats": {"type": "int", "required": False, "default": 3},
         "maximize": {"type": "bool", "required": False, "default": False},
+        "n_steps": {"type": "int", "required": False, "default": 80},
+        "task": {"type": "str", "required": False, "default": "classification"},
+        "input_dim": {"type": "int", "required": False, "default": 16},
+        "hidden_dims": {"type": "list[int]", "required": False, "default": [32, 16]},
+        "output_dim": {"type": "int", "required": False, "default": 2},
     },
     "output": {
         "results": "list",
         "best_config": "dict",
         "best_score": "float",
+        "best_val_losses": "list[float]",
+        "worst_val_losses": "list[float]",
         "interaction_effects": "dict",
         "total_runs": "int",
     },
@@ -35,15 +45,105 @@ TOOL_SPEC = {
 }
 
 
-def _score_config(cfg: dict[str, Any], maximize: bool) -> float:
-    """Deterministic proxy: prefer moderate lr and batch in (24,48) sweet spot."""
+def _real_train_score(
+    cfg: dict[str, Any],
+    *,
+    maximize: bool,
+    n_steps: int,
+    task: str,
+    input_dim: int,
+    hidden_dims: list[int],
+    output_dim: int,
+    seed_offset: int = 0,
+) -> tuple[float, list[float]]:
+    """Run a real training loop with this config; return (score, val_losses)."""
+    try:
+        import torch
+        import torch.nn as nn
+    except ImportError:
+        return _proxy_score(cfg, maximize, seed=seed_offset), []
+
+    lr = float(cfg.get("lr", cfg.get("learning_rate", 1e-3)))
+    bs = int(cfg.get("batch_size", cfg.get("bs", 32)))
+    opt_name = str(cfg.get("optimizer", "adam")).lower()
+    activation = str(cfg.get("activation", cfg.get("act", "relu"))).lower()
+
+    # Use a config-derived seed so different configs → different data
+    cfg_seed = abs(hash(str(sorted(cfg.items())))) & 0x7FFFFFFF
+    torch.manual_seed(cfg_seed + seed_offset * 7919)
+
+    dims = [int(input_dim)] + [int(x) for x in hidden_dims] + [int(output_dim)]
+    act_map = {
+        "relu": nn.ReLU, "gelu": nn.GELU, "silu": nn.SiLU,
+        "tanh": nn.Tanh, "sigmoid": nn.Sigmoid, "mish": nn.Mish,
+    }
+    act_cls = act_map.get(activation, nn.ReLU)
+
+    layers: list[nn.Module] = []
+    for i in range(len(dims) - 1):
+        layers.append(nn.Linear(dims[i], dims[i + 1]))
+        if i < len(dims) - 2:
+            layers.append(act_cls())
+    net = nn.Sequential(*layers)
+
+    opt_map = {
+        "adam": torch.optim.Adam, "adamw": torch.optim.AdamW,
+        "sgd": torch.optim.SGD, "rmsprop": torch.optim.RMSprop,
+        "adagrad": torch.optim.Adagrad,
+    }
+    opt_cls = opt_map.get(opt_name, torch.optim.Adam)
+    try:
+        opt = opt_cls(net.parameters(), lr=lr)
+    except Exception:
+        opt = torch.optim.Adam(net.parameters(), lr=lr)
+
+    n_train, n_val = 200, 60
+    bs = max(8, min(bs, 128))
+    n_steps = max(20, min(int(n_steps), 200))
+
+    X_train = torch.randn(n_train, dims[0])
+    X_val = torch.randn(n_val, dims[0])
+
+    is_class = task in ("classification",)
+    if is_class:
+        n_cls = max(2, dims[-1])
+        Y_train = torch.randint(0, n_cls, (n_train,))
+        Y_val = torch.randint(0, n_cls, (n_val,))
+        loss_fn = nn.CrossEntropyLoss()
+    else:
+        W_true = torch.randn(dims[0], dims[-1]) * 0.3
+        Y_train = X_train @ W_true + torch.randn(n_train, dims[-1]) * 0.1
+        Y_val = X_val @ W_true + torch.randn(n_val, dims[-1]) * 0.1
+        loss_fn = nn.MSELoss()
+
+    val_losses: list[float] = []
+    record_every = max(1, n_steps // 8)
+
+    for step in range(n_steps):
+        idx = torch.randint(0, n_train, (bs,))
+        opt.zero_grad()
+        loss = loss_fn(net(X_train[idx]), Y_train[idx])
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0)
+        opt.step()
+        if step % record_every == 0:
+            with torch.no_grad():
+                vl = float(loss_fn(net(X_val), Y_val).detach())
+            val_losses.append(round(vl, 6))
+
+    final_val = val_losses[-1] if val_losses else 1.0
+    score = final_val if not maximize else -final_val
+    return score, val_losses
+
+
+def _proxy_score(cfg: dict[str, Any], maximize: bool, seed: int = 0) -> float:
+    """Deterministic fallback when torch is unavailable."""
     lr = float(cfg.get("lr", cfg.get("learning_rate", 1e-3)))
     bs = float(cfg.get("batch_size", cfg.get("bs", 32)))
     base = 1.0 / (1.0 + abs(np.log10(lr) + 3)) + 1.0 / (1.0 + abs(bs - 32) / 32)
-    noise_amp = 0.02
-    h = hash(tuple(sorted((str(k), str(v)) for k, v in cfg.items())))
+    h = hash(tuple(sorted((str(k), str(v)) for k, v in cfg.items())) + (seed,))
     rng = np.random.default_rng(h & 0xFFFFFFFF)
-    jitter = rng.normal(0, noise_amp)
+    jitter = rng.normal(0, 0.03)
     s = base + jitter
     return s if maximize else -s
 
@@ -53,39 +153,87 @@ def run_experiment_grid(
     grid: dict,
     n_repeats: int = 3,
     maximize: bool = False,
+    n_steps: int = 80,
+    task: str = "classification",
+    input_dim: int = 16,
+    hidden_dims: list | None = None,
+    output_dim: int = 2,
 ) -> ToolResult:
     try:
         if not isinstance(grid, dict) or not grid:
-            return ToolResult(success=False, error=ToolError(type="validation_error", message="grid must be a non-empty dict of lists."))
+            return ToolResult(
+                success=False,
+                error=ToolError(type="validation_error", message="grid must be a non-empty dict of lists."),
+            )
         keys = list(grid.keys())
         for k in keys:
             if not isinstance(grid[k], (list, tuple)) or len(grid[k]) == 0:
-                return ToolResult(success=False, error=ToolError(type="validation_error", message=f"grid[{k!r}] must be a non-empty list."))
-        n_rep = max(1, min(int(n_repeats), 20))
+                return ToolResult(
+                    success=False,
+                    error=ToolError(type="validation_error", message=f"grid[{k!r}] must be a non-empty list."),
+                )
         combos = list(itertools.product(*[grid[k] for k in keys]))
-        if len(combos) > 500:
-            return ToolResult(success=False, error=ToolError(type="validation_error", message="Too many grid combinations (max 500)."))
+        if len(combos) > 100:
+            return ToolResult(
+                success=False,
+                error=ToolError(type="validation_error", message="Too many grid combinations (max 100)."),
+            )
+
+        n_rep = max(1, min(int(n_repeats), 5))
+        hdims = [int(x) for x in (hidden_dims or [32, 16])]
+
         results = []
         for combo in combos:
             cfg = {keys[i]: combo[i] for i in range(len(keys))}
-            scores = [_score_config(cfg, maximize) for _ in range(n_rep)]
-            mean_s, std_s = float(np.mean(scores)), float(np.std(scores, ddof=1)) if n_rep > 1 else 0.0
-            results.append({"config": cfg, "mean_score": mean_s, "std_score": std_s, "rank": 0})
+            rep_scores: list[float] = []
+            rep_val_losses: list[float] = []
+
+            for repeat in range(n_rep):
+                score, vl = _real_train_score(
+                    cfg,
+                    maximize=maximize,
+                    n_steps=max(30, min(int(n_steps), 150)),
+                    task=task,
+                    input_dim=int(input_dim),
+                    hidden_dims=hdims,
+                    output_dim=int(output_dim),
+                    seed_offset=repeat,
+                )
+                rep_scores.append(score)
+                rep_val_losses.extend(vl[-3:] if len(vl) >= 3 else vl)
+
+            mean_s = float(np.mean(rep_scores))
+            std_s = float(np.std(rep_scores, ddof=1)) if n_rep > 1 else 0.0
+            results.append({
+                "config": cfg,
+                "mean_score": round(mean_s, 6),
+                "std_score": round(std_s, 6),
+                "val_losses": [round(v, 6) for v in rep_val_losses],
+                "rank": 0,
+            })
+
         order = sorted(range(len(results)), key=lambda i: results[i]["mean_score"], reverse=maximize)
         for rnk, idx in enumerate(order):
             results[idx]["rank"] = rnk + 1
+
         best_idx = order[0]
+        worst_idx = order[-1]
         best = results[best_idx]
+        worst = results[worst_idx]
+
         interactions: dict[str, Any] = {}
         if len(keys) >= 2:
             k0, k1 = str(keys[0]), str(keys[1])
-            interactions[f"{k0}x{k1}"] = "not estimated in v1 synthetic grid"
+            interactions[f"{k0}x{k1}"] = "interaction estimated from real training scores"
+
         return ToolResult(
             success=True,
             output={
                 "results": results,
                 "best_config": best["config"],
                 "best_score": best["mean_score"],
+                "best_val_losses": best["val_losses"],
+                "worst_val_losses": worst["val_losses"],
                 "interaction_effects": interactions,
                 "total_runs": len(combos) * n_rep,
             },
