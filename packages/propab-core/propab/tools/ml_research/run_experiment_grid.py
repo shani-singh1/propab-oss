@@ -15,8 +15,11 @@ TOOL_SPEC = {
         "Returns val_losses per config — use these with statistical_significance to compare configs."
     ),
     "params": {
-        "experiment_code": {"type": "str", "required": True},
-        "grid": {"type": "dict", "required": True},
+        "experiment_code": {"type": "str", "required": False, "default": "# grid search",
+                            "description": "Ignored. Provide grid dict instead."},
+        "grid": {"type": "dict", "required": False,
+                 "default": {"lr": [0.001, 0.01], "batch_size": [16, 32]},
+                 "description": "Hyperparameter grid. E.g. {'lr': [0.001, 0.01], 'batch_size': [16, 32]}"},
         "n_repeats": {"type": "int", "required": False, "default": 3},
         "maximize": {"type": "bool", "required": False, "default": False},
         "n_steps": {"type": "int", "required": False, "default": 80},
@@ -149,8 +152,8 @@ def _proxy_score(cfg: dict[str, Any], maximize: bool, seed: int = 0) -> float:
 
 
 def run_experiment_grid(
-    experiment_code: str,
-    grid: dict,
+    experiment_code: str = "# grid search",
+    grid: dict | None = None,
     n_repeats: int = 3,
     maximize: bool = False,
     n_steps: int = 80,
@@ -160,6 +163,8 @@ def run_experiment_grid(
     output_dim: int = 2,
 ) -> ToolResult:
     try:
+        if grid is None:
+            grid = {"lr": [0.001, 0.01], "batch_size": [16, 32]}
         if not isinstance(grid, dict) or not grid:
             return ToolResult(
                 success=False,
