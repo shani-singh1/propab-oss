@@ -13,10 +13,12 @@ TOOL_SPEC = {
         "Returns val_losses list for significance testing and final_val_loss."
     ),
     "params": {
-        "model_id": {"type": "str", "required": True},
+        "model_id": {"type": "str", "required": False, "default": "auto",
+                     "description": "model_id from build_mlp. Use 'auto' to auto-build a default MLP."},
         "task": {
             "type": "str",
-            "required": True,
+            "required": False,
+            "default": "classification",
             "enum": ["classification", "regression", "autoencoding", "language_modeling"],
         },
         "dataset": {"type": "str", "required": False, "default": "synthetic"},
@@ -48,8 +50,8 @@ TOOL_SPEC = {
 
 
 def train_model(
-    model_id: str,
-    task: str,
+    model_id: str = "auto",
+    task: str = "classification",
     dataset: str = "synthetic",
     n_steps: int = 120,
     batch_size: int = 32,
@@ -85,13 +87,24 @@ def train_model(
             ),
         )
 
+    # Auto-build a default MLP if no model_id provided or model not found
+    if str(model_id).lower() in ("auto", "", "none", "null") or get_model(str(model_id)) is None:
+        from propab.tools.deep_learning.build_mlp import build_mlp as _build
+        _br = _build(input_dim=16, hidden_dims=[64, 32], output_dim=2, activation="relu")
+        if not _br.success:
+            return ToolResult(success=False, error=ToolError(
+                type="auto_build_error",
+                message=f"Auto-build MLP failed: {_br.error}",
+            ))
+        model_id = _br.output["model_id"]
+
     info = get_model(str(model_id))
     if not info or info.get("kind") != "mlp":
         return ToolResult(
             success=False,
             error=ToolError(
                 type="validation_error",
-                message=f"model_id '{model_id}' not found or not an MLP. Call build_mlp first.",
+                message=f"model_id '{model_id}' not found or not an MLP. Call build_mlp first, or use model_id='auto'.",
             ),
         )
 

@@ -10,9 +10,12 @@ TOOL_SPEC = {
     "domain": "deep_learning",
     "description": "Analytical MLP parameter count and architecture summary (v1; trains via train_model).",
     "params": {
-        "input_dim": {"type": "int", "required": True},
-        "hidden_dims": {"type": "list[int]", "required": True},
-        "output_dim": {"type": "int", "required": True},
+        "input_dim": {"type": "int", "required": False, "default": 16,
+                      "description": "Input feature dimension. Default 16."},
+        "hidden_dims": {"type": "list[int]", "required": False, "default": [64, 32],
+                        "description": "Hidden layer sizes. Default [64, 32]."},
+        "output_dim": {"type": "int", "required": False, "default": 2,
+                       "description": "Output dimension / number of classes. Default 2."},
         "activation": {
             "type": "str",
             "required": False,
@@ -36,7 +39,7 @@ TOOL_SPEC = {
 
 
 def build_mlp(
-    input_dim: int,
+    input_dim: int = 16,
     hidden_dims: list | None = None,
     output_dim: int = 2,
     activation: str = "relu",
