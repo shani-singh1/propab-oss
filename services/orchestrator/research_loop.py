@@ -10,6 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from propab.config import settings
+from propab.db import create_redis
 from propab.events import EventEmitter
 from propab.llm import LLMClient
 from propab.paper_gate import session_merits_paper, short_circuit_merits_paper
@@ -22,6 +23,7 @@ from services.orchestrator.literature import build_prior
 from services.orchestrator.paper import write_paper_minimal
 from services.orchestrator.accumulated_ledger import AccumulatedLedger
 from services.orchestrator.budget import ResearchBudget
+from services.worker.peer_findings import build_peer_finding_payload, publish_peer_finding
 from services.worker.tasks import run_sub_agent_task
 
 logger = logging.getLogger(__name__)
@@ -177,9 +179,13 @@ async def _run_round(
 ) -> list[dict]:
     """
     Dispatch all hypotheses for one round and collect results.
-    Collects as each sub-agent finishes; respects round deadline.
+    - Results collected as sub-agents finish (not all-at-once).
+    - Each completed result is broadcast as a peer finding to still-running agents.
+    - Round deadline enforced.
     """
+    all_hypothesis_ids = [row_id for row_id, _ in hypothesis_rows]
     pending: list[dict] = []
+
     for row_id, hypothesis in hypothesis_rows:
         await emitter.emit(
             session_id=session_id,
@@ -204,6 +210,14 @@ async def _run_round(
     round_budget = budget.round_budget(round_number)
     deadline = time.monotonic() + round_budget.max_seconds
     results: list[dict] = []
+    completed_ids: set[str] = set()
+
+    # Open a short-lived Redis connection for peer broadcasts
+    _redis = None
+    try:
+        _redis = await create_redis(settings.redis_url)
+    except Exception as exc:
+        logger.warning("Could not open Redis for peer broadcast: %s", exc)
 
     while pending and time.monotonic() < deadline:
         progressed = False
@@ -230,6 +244,8 @@ async def _run_round(
                     "learned": None,
                 }
             results.append(result)
+            completed_ids.add(str(result.get("hypothesis_id", "")))
+
             await emitter.emit(
                 session_id=session_id,
                 event_type=EventType.SYNTH_RESULT_RECEIVED,
@@ -237,8 +253,34 @@ async def _run_round(
                 payload={"result": result, "round": round_number},
                 hypothesis_id=result.get("hypothesis_id"),
             )
+
+            # Broadcast to still-running agents
+            still_running = [hid for hid in all_hypothesis_ids if hid not in completed_ids]
+            if still_running and _redis is not None:
+                finding_payload = build_peer_finding_payload(result)
+                n_broadcast = await publish_peer_finding(
+                    _redis, target_hypothesis_ids=still_running, finding=finding_payload,
+                )
+                if n_broadcast > 0:
+                    await emitter.emit(
+                        session_id=session_id,
+                        event_type=EventType.MEMORY_LEDGER_BROADCAST,
+                        step="memory.broadcast",
+                        payload={
+                            "from_hypothesis": result.get("hypothesis_id"),
+                            "broadcast_to": still_running,
+                            "verdict": result.get("verdict"),
+                        },
+                    )
+
         if not progressed and pending:
             await asyncio.sleep(0.12)
+
+    if _redis is not None:
+        try:
+            await _redis.close()
+        except Exception:
+            pass
 
     # Handle timed-out pending tasks
     for item in pending:

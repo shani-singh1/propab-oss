@@ -23,6 +23,7 @@ from propab.tool_selection import select_tool_steps
 from propab.tools.registry import ToolRegistry
 from propab.types import EventType
 from services.worker.domain_router import route_domain
+from services.worker.peer_findings import poll_peer_findings
 from services.worker.sandbox import run_sandboxed_python
 from services.worker.significance import (
     any_significance_tool_ran,
@@ -691,6 +692,17 @@ async def run_sub_agent_async(payload: dict) -> dict:
 
             # Think-act loop
             while not should_stop(agent_ctx):
+                # Poll peer channel non-blocking — inject new findings into context
+                try:
+                    new_peers = await poll_peer_findings(redis, hypothesis_id=hypothesis_id)
+                    if new_peers:
+                        agent_ctx.peer_findings.extend(new_peers)
+                        logger.debug(
+                            "Agent %s received %d peer finding(s).", hypothesis_id, len(new_peers)
+                        )
+                except Exception:
+                    pass  # peer polling is always best-effort
+
                 action = await decide_next_action(
                     context=agent_ctx,
                     specs=specs,
