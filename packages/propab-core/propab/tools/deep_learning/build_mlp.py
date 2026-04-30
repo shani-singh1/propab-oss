@@ -37,12 +37,30 @@ TOOL_SPEC = {
 
 def build_mlp(
     input_dim: int,
-    hidden_dims: list,
-    output_dim: int,
+    hidden_dims: list | None = None,
+    output_dim: int = 2,
     activation: str = "relu",
     dropout: float = 0.0,
     batch_norm: bool = False,
+    # Aliases for common LLM naming variations
+    hidden_layers: list | None = None,
+    layers: list | None = None,
+    num_classes: int | None = None,
+    n_classes: int | None = None,
+    input_size: int | None = None,
+    output_size: int | None = None,
 ) -> ToolResult:
+    # Resolve aliases
+    if hidden_dims is None:
+        hidden_dims = hidden_layers or layers or [64, 32]
+    if num_classes is not None:
+        output_dim = int(num_classes)
+    if n_classes is not None:
+        output_dim = int(n_classes)
+    if input_size is not None:
+        input_dim = int(input_size)
+    if output_size is not None:
+        output_dim = int(output_size)
     try:
         dims = [int(input_dim)] + [int(x) for x in hidden_dims] + [int(output_dim)]
         if any(d <= 0 for d in dims):

@@ -20,7 +20,8 @@ TOOL_SPEC = {
             "enum": ["classification", "regression", "autoencoding", "language_modeling"],
         },
         "dataset": {"type": "str", "required": False, "default": "synthetic"},
-        "n_steps": {"type": "int", "required": False, "default": 120},
+        "n_steps": {"type": "int", "required": False, "default": 120,
+                    "description": "Number of gradient steps (also accepted as 'epochs' or 'num_steps')"},
         "batch_size": {"type": "int", "required": False, "default": 32},
         "optimizer": {"type": "str", "required": False, "default": "adam"},
         "learning_rate": {"type": "float", "required": False, "default": 1e-3},
@@ -28,6 +29,8 @@ TOOL_SPEC = {
         "weight_decay": {"type": "float", "required": False, "default": 0.0},
         "noise_level": {"type": "float", "required": False, "default": 0.0},
         "record_every": {"type": "int", "required": False, "default": 10},
+        "epochs": {"type": "int", "required": False, "default": None,
+                   "description": "Alias for n_steps — pass epochs OR n_steps, not both"},
     },
     "output": {
         "loss_curve": "list[dict]",
@@ -56,7 +59,20 @@ def train_model(
     weight_decay: float = 0.0,
     noise_level: float = 0.0,
     record_every: int = 10,
+    epochs: int | None = None,  # alias for n_steps
+    num_steps: int | None = None,  # alias for n_steps
+    num_epochs: int | None = None,  # alias for n_steps
+    lr: float | None = None,  # alias for learning_rate
 ) -> ToolResult:
+    # Resolve parameter aliases from LLM variations
+    if epochs is not None:
+        n_steps = int(epochs)
+    if num_steps is not None:
+        n_steps = int(num_steps)
+    if num_epochs is not None:
+        n_steps = int(num_epochs)
+    if lr is not None:
+        learning_rate = float(lr)
     try:
         import torch
         import torch.nn as nn

@@ -95,8 +95,12 @@ def _extract_named_values(results_so_far: list[dict], tool_names: list[str]) -> 
             if isinstance(v, (int, float)) and not isinstance(v, bool):
                 lines.append(f"  {label}: {k} = {round(float(v), 6)}")
 
-        # First-level numeric lists (e.g. val_losses, loss_curve values, etc.)
+        # First-level numeric lists (e.g. loss_curve values, etc.)
+        # Skip keys handled in dedicated blocks below to avoid duplication
+        _skip_list_keys = {"val_losses", "fixed_seed_results", "random_seed_results", "eval_losses"}
         for k, v in result.items():
+            if k in _skip_list_keys:
+                continue
             if isinstance(v, list) and 2 <= len(v) <= 50:
                 nums = [x for x in v if isinstance(x, (int, float)) and not isinstance(x, bool)]
                 if len(nums) == len(v):
