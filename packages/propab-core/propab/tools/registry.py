@@ -85,10 +85,12 @@ class ToolRegistry:
 
     def call(self, tool_name: str, params: dict[str, Any]) -> ToolResult:
         entry = self._registry[tool_name]
-        filtered = self._filter_params(entry.fn, params, tool_name)
+        filtered = self._filter_params(entry.fn, params, tool_name, spec=entry.spec)
         return entry.fn(**filtered)
 
-    def _filter_params(self, fn: Any, params: dict[str, Any], tool_name: str) -> dict[str, Any]:
+    def _filter_params(
+        self, fn: Any, params: dict[str, Any], tool_name: str, spec: dict | None = None
+    ) -> dict[str, Any]:
         """
         Filter params to only those accepted by the function, applying synonym
         remapping first. Logs unknown params at DEBUG level instead of crashing.
@@ -144,5 +146,24 @@ class ToolRegistry:
                 tool_name,
                 list(remaining.keys()),
             )
+
+        # Fill missing required params from spec's example params (prevents "missing required arg" crashes)
+        if spec:
+            example_params = (spec.get("example") or {}).get("params") or {}
+            for name, p in sig.parameters.items():
+                if (
+                    name not in result
+                    and p.default is inspect.Parameter.empty
+                    and p.kind in (
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.KEYWORD_ONLY,
+                    )
+                    and name in example_params
+                ):
+                    result[name] = example_params[name]
+                    logger.debug(
+                        "Tool %s: filled missing required param %r from spec example",
+                        tool_name, name,
+                    )
 
         return result

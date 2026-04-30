@@ -10,10 +10,11 @@ TOOL_SPEC = {
     "domain": "deep_learning",
     "description": "Analytical transformer parameter / FLOP summary (v1 encoder-style estimate).",
     "params": {
-        "model_type": {"type": "str", "required": True, "enum": ["encoder", "decoder", "encoder_decoder"]},
-        "d_model": {"type": "int", "required": True},
-        "n_heads": {"type": "int", "required": True},
-        "n_layers": {"type": "int", "required": True},
+        "model_type": {"type": "str", "required": False, "default": "encoder",
+                       "enum": ["encoder", "decoder", "encoder_decoder"]},
+        "d_model": {"type": "int", "required": False, "default": 128},
+        "n_heads": {"type": "int", "required": False, "default": 4},
+        "n_layers": {"type": "int", "required": False, "default": 2},
         "d_ff": {"type": "int", "required": False, "default": None},
         "max_seq_len": {"type": "int", "required": False, "default": 512},
         "dropout": {"type": "float", "required": False, "default": 0.1},
@@ -34,10 +35,10 @@ TOOL_SPEC = {
 
 
 def build_transformer(
-    model_type: str,
-    d_model: int,
-    n_heads: int,
-    n_layers: int,
+    model_type: str = "encoder",
+    d_model: int = 128,
+    n_heads: int = 4,
+    n_layers: int = 2,
     d_ff: int | None = None,
     max_seq_len: int = 512,
     dropout: float = 0.1,
