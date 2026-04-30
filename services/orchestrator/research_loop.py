@@ -220,6 +220,7 @@ async def run_research_loop(
                     "baseline": baseline,
                     "prior": prior.to_dict(),
                     "domain": parsed.domain,
+                    "question": parsed.text,
                 }
             )
             pending.append({"ar": ar, "hid": row_id})

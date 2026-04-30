@@ -8,7 +8,8 @@ from propab.tools.types import ToolError, ToolResult
 TOOL_SPEC = {
     "name": "statistical_significance",
     "domain": "ml_research",
-    "description": "Compare two result vectors (t-test, Wilcoxon, or bootstrap difference of means).",
+    "significance_capable": True,
+    "description": "Compare two result vectors (t-test, Wilcoxon, or bootstrap difference of means). Produces p_value and effect_size.",
     "params": {
         "results_a": {"type": "list[float]", "required": True},
         "results_b": {"type": "list[float]", "required": True},

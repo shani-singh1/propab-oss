@@ -6,8 +6,9 @@ import re
 from propab.llm import LLMClient
 
 DOMAIN_ROUTING_PROMPT = """
-Given this hypothesis, return the single most relevant domain for Propab v1 (DL / algorithms / ML focus).
+Given this hypothesis and the original research question, return the single most relevant domain.
 
+Original research question: {question}
 Hypothesis: {hypothesis_text}
 
 Domains (choose exactly one name from this list):
@@ -18,6 +19,10 @@ Domains (choose exactly one name from this list):
 - statistics: classical stats, regression, inference (not deep nets)
 - data_analysis: EDA, aggregation, cleaning, tabular summaries
 - general_computation: anything else — sandboxed code, parsing, glue logic
+
+Important: if the research question involves COMPARING or RANKING approaches (e.g. "which optimizer
+is better", "does X outperform Y"), prefer ml_research or algorithm_optimization over deep_learning,
+even if the hypothesis mentions neural networks.
 
 Return JSON only: {{"domain": "domain_name", "reason": "one sentence"}}
 """
@@ -82,8 +87,12 @@ async def route_domain(
     llm: LLMClient,
     session_id: str,
     hypothesis_id: str,
+    question: str = "",
 ) -> tuple[str, str]:
-    prompt = DOMAIN_ROUTING_PROMPT.format(hypothesis_text=hypothesis_text)
+    prompt = DOMAIN_ROUTING_PROMPT.format(
+        hypothesis_text=hypothesis_text,
+        question=question or hypothesis_text,
+    )
     raw = await llm.call(
         prompt=prompt,
         purpose="domain_routing",

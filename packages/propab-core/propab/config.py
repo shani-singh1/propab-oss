@@ -38,6 +38,15 @@ class Settings(BaseSettings):
     sandbox_memory_mb: int = 512
     sandbox_code_max_retries: int = 3
     literature_answer_similarity: float = 0.92
+    # Think-act agent budgets
+    agent_max_steps: int = 15
+    agent_min_steps: int = 5
+    # Multi-round orchestrator
+    research_max_rounds: int = 5
+    research_max_hours: float = 1.0
+    research_target_confirmed: int = 3
+    research_max_hypotheses: int = 50
+    research_min_marginal_return: float = 0.05
     reranker_enabled: bool = False
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     api_host: str = "0.0.0.0"

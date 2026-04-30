@@ -43,6 +43,21 @@ class ToolRegistry:
     def get_cluster(self, domain: str) -> list[dict[str, Any]]:
         return [entry.spec for entry in self._registry.values() if entry.domain == domain]
 
+    def get_significance_tools(self) -> list[dict[str, Any]]:
+        """All tools that can produce p-values, effect sizes, or confidence intervals."""
+        return [
+            entry.spec
+            for entry in self._registry.values()
+            if entry.spec.get("significance_capable", False)
+        ]
+
+    def get_cluster_with_significance(self, domain: str) -> list[dict[str, Any]]:
+        """Domain cluster always augmented with significance-capable tools."""
+        cluster = {s["name"]: s for s in self.get_cluster(domain)}
+        for sig_spec in self.get_significance_tools():
+            cluster.setdefault(sig_spec["name"], sig_spec)
+        return list(cluster.values())
+
     def call(self, tool_name: str, params: dict[str, Any]) -> ToolResult:
         entry = self._registry[tool_name]
         return entry.fn(**params)

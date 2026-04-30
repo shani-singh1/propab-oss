@@ -8,7 +8,8 @@ from propab.tools.types import ToolError, ToolResult
 TOOL_SPEC = {
     "name": "literature_baseline_compare",
     "domain": "ml_research",
-    "description": "Compare repeated experimental results to a literature baseline (t-test vs baseline mean).",
+    "significance_capable": True,
+    "description": "Compare repeated experimental results to a literature baseline (t-test vs baseline mean). Produces p_value and effect_size.",
     "params": {
         "our_results": {"type": "list[float]", "required": True},
         "baseline_value": {"type": "float", "required": True},

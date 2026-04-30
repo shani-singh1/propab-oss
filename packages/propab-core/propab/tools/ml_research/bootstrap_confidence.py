@@ -7,7 +7,8 @@ from propab.tools.types import ToolError, ToolResult
 TOOL_SPEC = {
     "name": "bootstrap_confidence",
     "domain": "ml_research",
-    "description": "Bootstrap CI for mean, median, std, min, max, or percentile of a metric vector.",
+    "significance_capable": True,
+    "description": "Bootstrap CI for mean, median, std, min, max, or percentile of a metric vector. Produces confidence_interval.",
     "params": {
         "values": {"type": "list[float]", "required": True},
         "metric": {"type": "str", "required": False, "default": "mean"},

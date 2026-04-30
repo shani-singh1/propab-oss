@@ -24,16 +24,26 @@ from propab.tools.registry import ToolRegistry
 from propab.types import EventType
 from services.worker.domain_router import route_domain
 from services.worker.sandbox import run_sandboxed_python
+from services.worker.significance import (
+    any_significance_tool_ran,
+    check_significance,
+)
+from services.worker.think_act import (
+    AgentContext,
+    decide_next_action,
+    should_stop,
+)
 
 logger = logging.getLogger(__name__)
 
-_UTILITY_TOOL_NAMES = frozenset(
-    {
-        "json_extract",
-        "text_stats",
-        "format_convert",
-    }
-)
+_UTILITY_TOOL_NAMES = frozenset({"json_extract", "text_stats", "format_convert"})
+
+# Tools that produce p_value / effect_size / confidence_interval
+_SIGNIFICANCE_TOOL_NAMES = frozenset({
+    "statistical_significance",
+    "bootstrap_confidence",
+    "literature_baseline_compare",
+})
 
 
 class HypothesisEvidence(TypedDict):
@@ -56,7 +66,6 @@ def _heuristic_tool_plan_merged(
     hypothesis_text: str,
     hypothesis: dict,
 ) -> list[tuple[str, dict]]:
-    """Several selection rounds so the agent chains distinct tools like an iterative researcher."""
     rounds = max(1, int(settings.sub_agent_max_rounds))
     per = max(1, int(settings.sub_agent_tools_per_round))
     initial_ban = _UTILITY_TOOL_NAMES if len(specs) > 1 else frozenset()
@@ -80,10 +89,7 @@ def _heuristic_tool_plan_merged(
             break
     if not merged:
         return select_tool_steps(
-            specs,
-            hypothesis_text=hypothesis_text,
-            hypothesis=hypothesis,
-            max_tools=per,
+            specs, hypothesis_text=hypothesis_text, hypothesis=hypothesis, max_tools=per,
         )
     return merged
 
@@ -95,7 +101,6 @@ def _extend_plan_with_heuristic_rounds(
     hypothesis_text: str,
     hypothesis: dict,
 ) -> list[tuple[str, dict]]:
-    """Append extra tool steps (excluding tools already in ``base``)."""
     used_names = {t for t, _ in base}
     extra_rounds = max(0, int(settings.sub_agent_max_rounds) - 1)
     per = max(1, int(settings.sub_agent_tools_per_round))
@@ -121,8 +126,8 @@ def _extend_plan_with_heuristic_rounds(
     return out
 
 
-def _tokens(text: str) -> set[str]:
-    return {t for t in re.findall(r"[a-z0-9]{4,}", text.lower())}
+def _tokens(text_: str) -> set[str]:
+    return {t for t in re.findall(r"[a-z0-9]{4,}", text_.lower())}
 
 
 def _walk_numeric_values(payload: Any, *, prefix: str = "") -> dict[str, float]:
@@ -145,6 +150,9 @@ def _extract_ci(payload: dict[str, Any]) -> list[float] | None:
         v = payload.get(k)
         if isinstance(v, list) and len(v) >= 2 and all(isinstance(x, (int, float)) for x in v[:2]):
             return [float(v[0]), float(v[1])]
+    lo, hi = payload.get("ci_lower"), payload.get("ci_upper")
+    if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+        return [float(lo), float(hi)]
     return None
 
 
@@ -226,10 +234,6 @@ def _compute_confidence(evidence: HypothesisEvidence) -> float:
 
 
 def _hypothesis_relevance_score(hypothesis_text: str, successful_outputs: list[dict]) -> float:
-    """
-    Coarse relevance signal: lexical overlap + evidence-key bonus.
-    Keeps confirmation from being based solely on transport-level success.
-    """
     if not successful_outputs:
         return 0.0
     hyp_toks = _tokens(hypothesis_text)
@@ -238,15 +242,8 @@ def _hypothesis_relevance_score(hypothesis_text: str, successful_outputs: list[d
     blob = json.dumps(successful_outputs, ensure_ascii=False).lower()
     out_toks = _tokens(blob)
     overlap = len(hyp_toks & out_toks) / float(len(hyp_toks))
-    evidence_keys = (
-        "conclusion",
-        "verdict",
-        "significant",
-        "p_value",
-        "improvement",
-        "confidence_interval",
-        "summary",
-    )
+    evidence_keys = ("conclusion", "verdict", "significant", "p_value", "improvement",
+                     "confidence_interval", "summary")
     key_bonus = 0.02 * sum(1 for k in evidence_keys if k in blob)
     return float(overlap + key_bonus)
 
@@ -285,14 +282,117 @@ async def _update_hypothesis(
         await session.commit()
 
 
+async def _insert_experiment_step_tool(
+    session_factory: async_sessionmaker,
+    *,
+    step_id: str,
+    hypothesis_id: str,
+    step_index: int,
+    tool_name: str,
+    params: dict,
+    result_output: Any,
+    result_error: Any,
+    duration_ms: int,
+) -> None:
+    async with session_factory() as session:
+        await session.execute(
+            text("""
+                INSERT INTO experiment_steps
+                    (id, hypothesis_id, step_type, step_index, input_json, output_json, error_json, duration_ms)
+                VALUES
+                    (:id, :hypothesis_id, 'tool_call', :step_index,
+                     CAST(:input_json AS jsonb), CAST(:output_json AS jsonb),
+                     CAST(:error_json AS jsonb), :duration_ms)
+            """),
+            {
+                "id": step_id,
+                "hypothesis_id": hypothesis_id,
+                "step_index": step_index,
+                "input_json": json.dumps({"tool": tool_name, "params": params}),
+                "output_json": json.dumps(result_output) if result_output is not None else "null",
+                "error_json": json.dumps(result_error) if result_error is not None else "null",
+                "duration_ms": duration_ms,
+            },
+        )
+        await session.execute(
+            text("""
+                INSERT INTO tool_calls
+                    (id, step_id, hypothesis_id, tool_name, domain, params_json, result_json, success, duration_ms)
+                VALUES
+                    (:id, :step_id, :hypothesis_id, :tool_name, :domain,
+                     CAST(:params_json AS jsonb), CAST(:result_json AS jsonb), :success, :duration_ms)
+            """),
+            {
+                "id": str(uuid4()),
+                "step_id": step_id,
+                "hypothesis_id": hypothesis_id,
+                "tool_name": tool_name,
+                "domain": "unknown",
+                "params_json": json.dumps(params),
+                "result_json": json.dumps(result_output) if result_output is not None else "null",
+                "success": result_error is None,
+                "duration_ms": duration_ms,
+            },
+        )
+        await session.commit()
+
+
+async def _insert_experiment_step_code(
+    session_factory: async_sessionmaker,
+    *,
+    step_id: str,
+    hypothesis_id: str,
+    step_index: int,
+    code: str,
+    parsed_output: Any,
+    sandbox_out: dict,
+    duration_ms: int,
+    memory_mb: int,
+    timeout_sec: int,
+) -> None:
+    async with session_factory() as session:
+        await session.execute(
+            text("""
+                INSERT INTO experiment_steps
+                    (id, hypothesis_id, step_type, step_index, input_json, output_json, error_json,
+                     duration_ms, memory_mb, timeout_sec)
+                VALUES
+                    (:id, :hypothesis_id, 'code_exec', :step_index,
+                     CAST(:input_json AS jsonb), CAST(:output_json AS jsonb),
+                     CAST(:error_json AS jsonb), :duration_ms, :memory_mb, :timeout_sec)
+            """),
+            {
+                "id": step_id,
+                "hypothesis_id": hypothesis_id,
+                "step_index": step_index,
+                "input_json": json.dumps({"code": code}),
+                "output_json": json.dumps({"parsed": parsed_output, "stdout": sandbox_out.get("stdout")}),
+                "error_json": json.dumps(sandbox_out) if not sandbox_out.get("ok") else "null",
+                "duration_ms": duration_ms,
+                "memory_mb": memory_mb,
+                "timeout_sec": timeout_sec,
+            },
+        )
+        await session.commit()
+
+
 async def run_sub_agent_async(payload: dict) -> dict:
     """
-    Execute sub-agent trace: up to two ranked tool calls, sandbox probe, verdict.
-    Tool failures are non-fatal: later steps still run; verdict uses any successful tool or sandbox.
+    Execute sub-agent trace with think-act or heuristic execution.
+
+    - think-act (SUB_AGENT_PLAN_SOURCE=llm or hybrid): LLM decides each tool call
+      after observing accumulated results. Significance gate enforced before verdict.
+    - heuristic (SUB_AGENT_PLAN_SOURCE=heuristic): static multi-round tool plan,
+      with a significance recovery step appended when no stat tool ran.
+
+    Tool failures are non-fatal. Verdict requires significance evidence.
     """
     session_id: str = payload["session_id"]
     hypothesis_id: str = payload["hypothesis_id"]
     hypothesis: dict = payload["hypothesis"]
+    question: str = str(payload.get("question") or "")
+    peer_findings: list[dict] = payload.get("peer_findings") or []
+    learned_from: str | None = payload.get("learned_from") or None
     baseline = payload.get("baseline") if isinstance(payload.get("baseline"), dict) else {}
     baseline_value = (
         float(baseline.get("metric_value"))
@@ -314,7 +414,6 @@ async def run_sub_agent_async(payload: dict) -> dict:
     registry = ToolRegistry()
     trace_pointer = str(uuid4())
     started = time.perf_counter()
-    result = None
 
     try:
         await _update_hypothesis(session_factory, hypothesis_id, status="running")
@@ -332,6 +431,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
             llm=llm,
             session_id=session_id,
             hypothesis_id=hypothesis_id,
+            question=question,
         )
         sandbox_timeout_sec = effective_sandbox_timeout_sec(domain, settings.sandbox_timeout_sec)
 
@@ -343,27 +443,32 @@ async def run_sub_agent_async(payload: dict) -> dict:
             hypothesis_id=hypothesis_id,
         )
 
-        specs = registry.get_cluster(domain)
+        # Always include significance tools alongside domain cluster
+        specs = registry.get_cluster_with_significance(domain)
         if not specs:
-            specs = registry.get_cluster("general_computation")
+            specs = registry.get_cluster_with_significance("general_computation")
         available_tools = [str(s["name"]) for s in specs]
         resource_limits = {
             "memory_mb": settings.sandbox_memory_mb,
             "timeout_sec": sandbox_timeout_sec,
             "domain": domain,
         }
+
         hyp_text = str(hypothesis.get("text", ""))
         plan_source = (settings.sub_agent_plan_source or "heuristic").strip().lower()
-        max_llm = max(1, min(int(settings.sub_agent_max_planned_steps), 12))
         can_llm = settings.llm_provider.strip().lower() == "ollama" or bool(settings.llm_api_secret.strip())
+        use_think_act = plan_source in ("llm", "hybrid") and can_llm
+        agent_max_steps = max(int(settings.agent_max_steps), 5)
+        agent_min_steps = max(1, min(int(settings.agent_min_steps), agent_max_steps - 1))
 
-        tool_steps = _heuristic_tool_plan_merged(
-            specs,
-            hypothesis_text=hyp_text,
-            hypothesis=hypothesis,
+        # Build initial tool steps (heuristic plan used as starting point for both paths)
+        heuristic_steps = _heuristic_tool_plan_merged(
+            specs, hypothesis_text=hyp_text, hypothesis=hypothesis,
         )
-        plan_origin = "heuristic"
-        if plan_source in ("llm", "hybrid") and can_llm:
+        plan_origin = "think_act" if use_think_act else "heuristic"
+
+        if not use_think_act and plan_source in ("llm", "hybrid") and can_llm:
+            max_llm = max(1, min(int(settings.sub_agent_max_planned_steps), 12))
             planned = await build_tool_plan_via_llm(
                 llm=llm,
                 session_id=session_id,
@@ -373,314 +478,398 @@ async def run_sub_agent_async(payload: dict) -> dict:
                 max_steps=max_llm,
                 emitter=emitter,
             )
-            use_llm_plan = planned is not None and (
-                plan_source == "llm" or (plan_source == "hybrid" and len(planned) >= 1)
-            )
-            if use_llm_plan and planned is not None:
-                tool_steps = _extend_plan_with_heuristic_rounds(
-                    list(planned),
-                    specs,
-                    hypothesis_text=hyp_text,
-                    hypothesis=hypothesis,
+            if planned is not None and len(planned) >= 1:
+                heuristic_steps = _extend_plan_with_heuristic_rounds(
+                    list(planned), specs, hypothesis_text=hyp_text, hypothesis=hypothesis,
                 )
                 plan_origin = "llm"
 
-        rank = hypothesis.get("rank")
-        sandbox_code = (
-            "import json,sys\n"
-            "print(json.dumps({\"sandbox\":\"ok\",\"hypothesis_rank\": "
-            + json.dumps(rank)
-            + "}))\n"
-        )
-
-        plan_steps: list[dict] = [
-            {"type": "tool", "tool": tn, "params": dict(pr)} for tn, pr in tool_steps
-        ] + [{"type": "code", "code": sandbox_code}]
-        executable_steps = [s for s in plan_steps if s.get("type") in {"tool", "code"}]
-        if not executable_steps:
-            raise RuntimeError(
-                f"Empty execution plan for hypothesis {hypothesis_id}; refusing silent zero-step trace."
-            )
-        plan = {
-            "steps": plan_steps,
-            "available_tools": available_tools,
-            "resource_limits": resource_limits,
-            "plan_origin": plan_origin,
-            "heuristic_rounds": int(settings.sub_agent_max_rounds),
-            "tools_per_round": int(settings.sub_agent_tools_per_round),
-        }
         await emitter.emit(
             session_id=session_id,
             event_type=EventType.AGENT_PLAN_CREATED,
             step=f"experiment.{hypothesis_id}.plan",
             payload={
-                "plan": plan,
                 "domain": domain,
                 "sandbox_timeout_sec": sandbox_timeout_sec,
                 "available_tools": available_tools,
                 "resource_limits": resource_limits,
                 "plan_origin": plan_origin,
+                "think_act_enabled": use_think_act,
+                "agent_max_steps": agent_max_steps,
+                "heuristic_steps": [tn for tn, _ in heuristic_steps],
             },
             hypothesis_id=hypothesis_id,
         )
 
         sandbox_ok = False
         any_tool_success = False
-        successful_tool_outputs: list[dict] = []
+        successful_tool_outputs: list[dict[str, Any]] = []
         successful_tool_names: list[str] = []
-        for step_index, step in enumerate(plan_steps):
+        step_counter = 0
+
+        # ── Shared tool execution helper (inline, no external function needed) ─
+
+        async def run_tool_step(tool_name: str, params: dict, step_index: int) -> bool:
+            nonlocal any_tool_success
+            step_id = str(uuid4())
+            t0 = time.perf_counter()
+
             await emitter.emit(
                 session_id=session_id,
-                event_type=EventType.AGENT_STEP_STARTED,
+                event_type=EventType.TOOL_CALLED,
                 step=f"experiment.{hypothesis_id}.step_{step_index}",
-                payload={"step": step},
+                payload={"tool": tool_name, "params": params},
                 hypothesis_id=hypothesis_id,
             )
 
-            step_started = time.perf_counter()
-            step_id = str(uuid4())
+            result = registry.call(tool_name, params)
+            duration_ms = int((time.perf_counter() - t0) * 1000)
 
-            if step.get("type") == "code":
-                code = str(step.get("code", ""))
+            if result.success:
+                any_tool_success = True
+                successful_tool_names.append(tool_name)
+                if isinstance(result.output, dict):
+                    successful_tool_outputs.append(result.output)
                 await emitter.emit(
                     session_id=session_id,
-                    event_type=EventType.CODE_GENERATED,
+                    event_type=EventType.TOOL_RESULT,
                     step=f"experiment.{hypothesis_id}.step_{step_index}",
-                    payload={"code": code},
+                    payload={"tool": tool_name, "output": result.output},
                     hypothesis_id=hypothesis_id,
                 )
-                max_attempts = max(1, int(settings.sandbox_code_max_retries))
-                sandbox_out: dict = {}
-                parsed = None
-                for attempt in range(max_attempts):
-                    await emitter.emit(
-                        session_id=session_id,
-                        event_type=EventType.CODE_SUBMITTED,
-                        step=f"experiment.{hypothesis_id}.step_{step_index}",
-                        payload={
-                            "memory_mb": settings.sandbox_memory_mb,
-                            "timeout_sec": sandbox_timeout_sec,
-                            "domain": domain,
-                            "attempt": attempt + 1,
-                            "max_attempts": max_attempts,
-                        },
-                        hypothesis_id=hypothesis_id,
-                    )
-                    sandbox_out = await asyncio.to_thread(
-                        run_sandboxed_python,
-                        code,
-                        timeout_sec=sandbox_timeout_sec,
-                        memory_mb=settings.sandbox_memory_mb,
-                    )
-                    parsed = sandbox_out.get("parsed") if isinstance(sandbox_out, dict) else None
-                    ok_run = bool(
-                        sandbox_out.get("ok")
-                        and isinstance(parsed, dict)
-                        and parsed.get("sandbox") == "ok"
-                    )
-                    if ok_run:
-                        sandbox_ok = True
-                        await emitter.emit(
-                            session_id=session_id,
-                            event_type=EventType.CODE_RESULT,
-                            step=f"experiment.{hypothesis_id}.step_{step_index}",
-                            payload={
-                                "stdout_json": parsed,
-                                "stdout": sandbox_out.get("stdout"),
-                                "attempt": attempt + 1,
-                            },
-                            hypothesis_id=hypothesis_id,
-                        )
-                        break
-                    is_timeout = "timeout" in str(sandbox_out.get("message", "")).lower()
-                    ev = EventType.CODE_TIMEOUT if is_timeout else EventType.CODE_ERROR
-                    await emitter.emit(
-                        session_id=session_id,
-                        event_type=ev,
-                        step=f"experiment.{hypothesis_id}.step_{step_index}",
-                        payload={
-                            "error": sandbox_out,
-                            "retry": attempt + 1,
-                            "max_attempts": max_attempts,
-                        },
-                        hypothesis_id=hypothesis_id,
-                    )
-                else:
-                    sandbox_ok = False
-
-                duration_ms = int((time.perf_counter() - step_started) * 1000)
-                async with session_factory() as session:
-                    await session.execute(
-                        text(
-                            """
-                            INSERT INTO experiment_steps (
-                                id, hypothesis_id, step_type, step_index, input_json, output_json, error_json, duration_ms, memory_mb, timeout_sec
-                            )
-                            VALUES (
-                                :id, :hypothesis_id, 'code_exec', :step_index,
-                                CAST(:input_json AS jsonb),
-                                CAST(:output_json AS jsonb),
-                                CAST(:error_json AS jsonb),
-                                :duration_ms, :memory_mb, :timeout_sec
-                            )
-                            """
-                        ),
-                        {
-                            "id": step_id,
-                            "hypothesis_id": hypothesis_id,
-                            "step_index": step_index,
-                            "input_json": json.dumps({"code": code, "max_attempts": max_attempts}),
-                            "output_json": json.dumps({"parsed": parsed, "stdout": sandbox_out.get("stdout")}),
-                            "error_json": json.dumps(sandbox_out) if not sandbox_out.get("ok") else "null",
-                            "duration_ms": duration_ms,
-                            "memory_mb": settings.sandbox_memory_mb,
-                            "timeout_sec": sandbox_timeout_sec,
-                        },
-                    )
-                    await session.commit()
                 await emitter.emit(
                     session_id=session_id,
                     event_type=EventType.AGENT_STEP_COMPLETED,
                     step=f"experiment.{hypothesis_id}.step_{step_index}",
-                    payload={"step": step, "sandbox_ok": sandbox_ok},
+                    payload={"tool": tool_name},
                     hypothesis_id=hypothesis_id,
                 )
             else:
-                tool_name = step["tool"]
-                params = step["params"]
-
                 await emitter.emit(
                     session_id=session_id,
-                    event_type=EventType.TOOL_CALLED,
+                    event_type=EventType.TOOL_ERROR,
                     step=f"experiment.{hypothesis_id}.step_{step_index}",
-                    payload={"tool": tool_name, "params": params},
+                    payload={"tool": tool_name, "error": result.error.to_dict() if result.error else {}},
+                    hypothesis_id=hypothesis_id,
+                )
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.AGENT_STEP_FAILED,
+                    step=f"experiment.{hypothesis_id}.step_{step_index}",
+                    payload={"tool": tool_name, "non_fatal": True},
                     hypothesis_id=hypothesis_id,
                 )
 
-                result = registry.call(tool_name, params)
-                duration_ms = int((time.perf_counter() - step_started) * 1000)
+            await _insert_experiment_step_tool(
+                session_factory,
+                step_id=step_id,
+                hypothesis_id=hypothesis_id,
+                step_index=step_index,
+                tool_name=tool_name,
+                params=params,
+                result_output=result.output,
+                result_error=result.error.to_dict() if result.error else None,
+                duration_ms=duration_ms,
+            )
+            return bool(result.success)
 
-                if result.success:
-                    any_tool_success = True
-                    successful_tool_names.append(tool_name)
-                    if isinstance(result.output, dict):
-                        successful_tool_outputs.append(result.output)
+        async def run_code_step(code: str, step_index: int) -> bool:
+            nonlocal sandbox_ok
+            step_id = str(uuid4())
+            t0 = time.perf_counter()
+            max_attempts = max(1, int(settings.sandbox_code_max_retries))
+            parsed = None
+            sandbox_out: dict = {}
+
+            await emitter.emit(
+                session_id=session_id,
+                event_type=EventType.CODE_GENERATED,
+                step=f"experiment.{hypothesis_id}.step_{step_index}",
+                payload={"code": code},
+                hypothesis_id=hypothesis_id,
+            )
+
+            for attempt in range(max_attempts):
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.CODE_SUBMITTED,
+                    step=f"experiment.{hypothesis_id}.step_{step_index}",
+                    payload={
+                        "memory_mb": settings.sandbox_memory_mb,
+                        "timeout_sec": sandbox_timeout_sec,
+                        "domain": domain,
+                        "attempt": attempt + 1,
+                        "max_attempts": max_attempts,
+                    },
+                    hypothesis_id=hypothesis_id,
+                )
+                sandbox_out = await asyncio.to_thread(
+                    run_sandboxed_python, code,
+                    timeout_sec=sandbox_timeout_sec, memory_mb=settings.sandbox_memory_mb,
+                )
+                parsed = sandbox_out.get("parsed") if isinstance(sandbox_out, dict) else None
+                ok_run = bool(
+                    sandbox_out.get("ok")
+                    and isinstance(parsed, dict)
+                    and parsed.get("sandbox") == "ok"
+                )
+                if ok_run:
+                    sandbox_ok = True
                     await emitter.emit(
                         session_id=session_id,
-                        event_type=EventType.TOOL_RESULT,
+                        event_type=EventType.CODE_RESULT,
                         step=f"experiment.{hypothesis_id}.step_{step_index}",
-                        payload={"tool": tool_name, "output": result.output},
+                        payload={"stdout_json": parsed, "stdout": sandbox_out.get("stdout"), "attempt": attempt + 1},
                         hypothesis_id=hypothesis_id,
                     )
-                    if step_index + 1 < len(plan_steps):
-                        plan_steps[step_index + 1] = refine_next_tool_step(
-                            tool_name,
-                            result.output if isinstance(result.output, dict) else None,
-                            plan_steps[step_index + 1],
-                        )
-                else:
-                    await emitter.emit(
-                        session_id=session_id,
-                        event_type=EventType.TOOL_ERROR,
-                        step=f"experiment.{hypothesis_id}.step_{step_index}",
-                        payload={"tool": tool_name, "error": result.error.to_dict() if result.error else {}},
-                        hypothesis_id=hypothesis_id,
-                    )
+                    break
+                is_timeout = "timeout" in str(sandbox_out.get("message", "")).lower()
+                ev = EventType.CODE_TIMEOUT if is_timeout else EventType.CODE_ERROR
+                await emitter.emit(
+                    session_id=session_id, event_type=ev,
+                    step=f"experiment.{hypothesis_id}.step_{step_index}",
+                    payload={"error": sandbox_out, "retry": attempt + 1, "max_attempts": max_attempts},
+                    hypothesis_id=hypothesis_id,
+                )
+            else:
+                sandbox_ok = False
 
-                async with session_factory() as session:
-                    await session.execute(
-                        text(
-                            """
-                            INSERT INTO experiment_steps (
-                                id, hypothesis_id, step_type, step_index, input_json, output_json, error_json, duration_ms
-                            )
-                            VALUES (
-                                :id, :hypothesis_id, 'tool_call', :step_index,
-                                CAST(:input_json AS jsonb),
-                                CAST(:output_json AS jsonb),
-                                CAST(:error_json AS jsonb),
-                                :duration_ms
-                            )
-                            """
-                        ),
-                        {
-                            "id": step_id,
-                            "hypothesis_id": hypothesis_id,
-                            "step_index": step_index,
-                            "input_json": json.dumps({"tool": tool_name, "params": params}),
-                            "output_json": json.dumps(result.output) if result.output else "null",
-                            "error_json": json.dumps(result.error.to_dict()) if result.error else "null",
-                            "duration_ms": duration_ms,
-                        },
-                    )
-                    await session.execute(
-                        text(
-                            """
-                            INSERT INTO tool_calls (
-                                id, step_id, hypothesis_id, tool_name, domain, params_json, result_json, success, duration_ms
-                            )
-                            VALUES (
-                                :id, :step_id, :hypothesis_id, :tool_name, :domain,
-                                CAST(:params_json AS jsonb),
-                                CAST(:result_json AS jsonb),
-                                :success,
-                                :duration_ms
-                            )
-                            """
-                        ),
-                        {
-                            "id": str(uuid4()),
-                            "step_id": step_id,
-                            "hypothesis_id": hypothesis_id,
-                            "tool_name": tool_name,
-                            "domain": domain,
-                            "params_json": json.dumps(params),
-                            "result_json": json.dumps(result.output) if result.output else "null",
-                            "success": bool(result.success),
-                            "duration_ms": duration_ms,
-                        },
-                    )
-                    await session.commit()
+            duration_ms = int((time.perf_counter() - t0) * 1000)
+            await _insert_experiment_step_code(
+                session_factory,
+                step_id=step_id,
+                hypothesis_id=hypothesis_id,
+                step_index=step_index,
+                code=code,
+                parsed_output=parsed,
+                sandbox_out=sandbox_out,
+                duration_ms=duration_ms,
+                memory_mb=settings.sandbox_memory_mb,
+                timeout_sec=sandbox_timeout_sec,
+            )
+            await emitter.emit(
+                session_id=session_id,
+                event_type=EventType.AGENT_STEP_COMPLETED,
+                step=f"experiment.{hypothesis_id}.step_{step_index}",
+                payload={"sandbox_ok": sandbox_ok},
+                hypothesis_id=hypothesis_id,
+            )
+            return sandbox_ok
 
-                if result.success:
+        # ─────────────────────────────────────────────────────────────────────
+        # THINK-ACT PATH: LLM decides each next action from accumulated context
+        # ─────────────────────────────────────────────────────────────────────
+        if use_think_act:
+            agent_ctx = AgentContext(
+                hypothesis_text=hyp_text,
+                test_methodology=str(hypothesis.get("test_methodology") or ""),
+                learned_from=learned_from,
+                peer_findings=peer_findings,
+                results_so_far=[],
+                tool_names_run=[],
+                steps_taken=0,
+                max_steps=agent_max_steps,
+                min_steps=agent_min_steps,
+            )
+
+            # Run the first heuristic step immediately to seed the agent with data
+            if heuristic_steps:
+                first_tool, first_params = heuristic_steps[0]
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.AGENT_STEP_STARTED,
+                    step=f"experiment.{hypothesis_id}.step_{step_counter}",
+                    payload={"tool": first_tool, "source": "heuristic_seed"},
+                    hypothesis_id=hypothesis_id,
+                )
+                ok = await run_tool_step(first_tool, dict(first_params), step_counter)
+                if ok and successful_tool_outputs:
+                    agent_ctx.results_so_far.append(successful_tool_outputs[-1])
+                    agent_ctx.tool_names_run.append(first_tool)
+                step_counter += 1
+                agent_ctx.steps_taken += 1
+
+            # Think-act loop
+            while not should_stop(agent_ctx):
+                action = await decide_next_action(
+                    context=agent_ctx,
+                    specs=specs,
+                    llm=llm,
+                    session_id=session_id,
+                    hypothesis_id=hypothesis_id,
+                )
+
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.AGENT_STEP_STARTED,
+                    step=f"experiment.{hypothesis_id}.step_{step_counter}",
+                    payload={"action": action.action_type, "reasoning": action.reasoning,
+                             "expected_outcome": action.expected_outcome},
+                    hypothesis_id=hypothesis_id,
+                )
+
+                if action.action_type == "stop":
                     await emitter.emit(
                         session_id=session_id,
                         event_type=EventType.AGENT_STEP_COMPLETED,
-                        step=f"experiment.{hypothesis_id}.step_{step_index}",
-                        payload={"step": step, "tool": tool_name},
+                        step=f"experiment.{hypothesis_id}.step_{step_counter}",
+                        payload={"action": "stop", "reasoning": action.reasoning},
                         hypothesis_id=hypothesis_id,
                     )
-                else:
-                    await emitter.emit(
-                        session_id=session_id,
-                        event_type=EventType.AGENT_STEP_FAILED,
-                        step=f"experiment.{hypothesis_id}.step_{step_index}",
-                        payload={"step": step, "non_fatal": True, "tool": tool_name},
-                        hypothesis_id=hypothesis_id,
-                    )
+                    break
 
-        tool_hit = any_tool_success
+                step_ok = False
+                if action.action_type == "tool" and action.tool_name:
+                    tool_name_ta = action.tool_name
+                    # Tolerate unknown tool names: skip and continue
+                    try:
+                        step_ok = await run_tool_step(tool_name_ta, action.params, step_counter)
+                    except KeyError:
+                        logger.warning("Think-act chose unknown tool %s; skipping.", tool_name_ta)
+                        await emitter.emit(
+                            session_id=session_id,
+                            event_type=EventType.TOOL_ERROR,
+                            step=f"experiment.{hypothesis_id}.step_{step_counter}",
+                            payload={"tool": tool_name_ta, "error": {"type": "unknown_tool"}},
+                            hypothesis_id=hypothesis_id,
+                        )
+                    if step_ok and successful_tool_outputs:
+                        agent_ctx.results_so_far.append(successful_tool_outputs[-1])
+                        agent_ctx.tool_names_run.append(tool_name_ta)
+
+                elif action.action_type == "code":
+                    code_desc = action.code_description or "custom computation"
+                    code = (
+                        f"import json, sys\n"
+                        f"# {code_desc}\n"
+                        f"result = {{'computation': {json.dumps(code_desc)}, 'status': 'executed'}}\n"
+                        f"print(json.dumps(result))\n"
+                    )
+                    step_ok = await run_code_step(code, step_counter)
+
+                step_counter += 1
+                agent_ctx.steps_taken += 1
+
+        # ─────────────────────────────────────────────────────────────────────
+        # HEURISTIC PATH: static multi-round plan + significance recovery
+        # ─────────────────────────────────────────────────────────────────────
+        else:
+            plan_steps: list[dict] = [
+                {"type": "tool", "tool": tn, "params": dict(pr)} for tn, pr in heuristic_steps
+            ] + [{
+                "type": "code",
+                "code": (
+                    "import json,sys\n"
+                    f"print(json.dumps({{\"sandbox\":\"ok\",\"hypothesis_rank\":{json.dumps(hypothesis.get('rank'))}}}))  \n"
+                ),
+            }]
+            if not plan_steps:
+                raise RuntimeError(
+                    f"Empty execution plan for hypothesis {hypothesis_id}; refusing zero-step trace."
+                )
+
+            prev_out: dict | None = None
+            for step_index, step in enumerate(plan_steps):
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.AGENT_STEP_STARTED,
+                    step=f"experiment.{hypothesis_id}.step_{step_index}",
+                    payload={"step": step},
+                    hypothesis_id=hypothesis_id,
+                )
+
+                if step.get("type") == "code":
+                    await run_code_step(str(step.get("code", "")), step_index)
+                else:
+                    tool_name = step["tool"]
+                    params = step["params"]
+                    # Chain prior output into next step if applicable
+                    if prev_out is not None and step_index > 0:
+                        step = refine_next_tool_step(
+                            plan_steps[step_index - 1].get("tool", ""),
+                            prev_out,
+                            step,
+                        )
+                        params = step["params"]
+                    await run_tool_step(tool_name, params, step_index)
+                    prev_out = successful_tool_outputs[-1] if successful_tool_outputs else None
+
+                step_counter = step_index + 1
+
+            # Significance recovery: if no significance tool ran, force one now
+            if not any_significance_tool_ran(successful_tool_names) and successful_tool_outputs:
+                sig_step_index = step_counter
+                logger.info(
+                    "Significance recovery: no stat tool ran for %s. Attempting bootstrap_confidence.",
+                    hypothesis_id,
+                )
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.AGENT_STEP_STARTED,
+                    step=f"experiment.{hypothesis_id}.step_{sig_step_index}",
+                    payload={"note": "significance_recovery", "tool": "bootstrap_confidence"},
+                    hypothesis_id=hypothesis_id,
+                )
+                # Extract numeric values from outputs
+                values: list[float] = []
+                for out in successful_tool_outputs:
+                    for v in _walk_numeric_values(out).values():
+                        values.append(v)
+                        if len(values) >= 20:
+                            break
+                    if len(values) >= 20:
+                        break
+
+                if len(values) >= 2:
+                    try:
+                        await run_tool_step(
+                            "bootstrap_confidence",
+                            {"values": values[:20]},
+                            sig_step_index,
+                        )
+                        step_counter += 1
+                    except Exception as exc:
+                        logger.warning("Significance recovery failed: %s", exc)
+                else:
+                    logger.info("Significance recovery skipped: not enough numeric values.")
+
+        # ─────────────────────────────────────────────────────────────────────
+        # VERDICT COMPUTATION (shared by both paths)
+        # ─────────────────────────────────────────────────────────────────────
         relevance_score = _hypothesis_relevance_score(hyp_text, successful_tool_outputs)
         substantive_hit = any(n in SUBSTANTIVE_TOOL_NAMES for n in successful_tool_names)
         if substantive_hit:
             relevance_score = min(1.0, relevance_score + 0.06)
-        n_tool_steps = len([s for s in plan_steps if s.get("type") == "tool"])
+
+        n_tool_steps = sum(1 for n in successful_tool_names if n not in _SIGNIFICANCE_TOOL_NAMES)
         evidence_obj = _build_evidence(
             successful_outputs=successful_tool_outputs,
             relevance_score=relevance_score,
             n_tool_steps=n_tool_steps,
             baseline_value=baseline_value,
         )
-        # Hard gate contract: no metric-bearing steps => no confirmation.
+
+        # Use significance module for the gate check
+        sig_result = check_significance(successful_tool_outputs)
+
         if evidence_obj["n_metric_steps"] == 0:
             verdict = "inconclusive"
             confidence = 0.0
             evidence_obj["verdict_reason"] = "no metric-bearing steps executed"
-        elif evidence_obj["delta"] is None and evidence_obj["p_value"] is None:
+        elif sig_result.gate_definitively_failed:
+            verdict = "refuted"
+            confidence = _compute_confidence(evidence_obj)
+            evidence_obj["verdict_reason"] = (
+                "significance test ran and found no effect (p >= 0.30, negligible effect size)"
+            )
+        elif not sig_result.gate_passed:
             verdict = "inconclusive"
-            confidence = 0.30
-            evidence_obj["verdict_reason"] = "tools ran but produced no comparable numbers"
+            confidence = _compute_confidence(evidence_obj)
+            evidence_obj["verdict_reason"] = (
+                "no significance evidence: p_value/effect_size/CI not produced or not decisive"
+            )
         else:
+            # Gate passed — check direction
             supports_hypothesis = False
             if evidence_obj["p_value"] is not None:
                 supports_hypothesis = bool(
@@ -699,17 +888,26 @@ async def run_sub_agent_async(payload: dict) -> dict:
             confidence = _compute_confidence(evidence_obj)
             verdict = "confirmed" if supports_hypothesis else "inconclusive"
             evidence_obj["verdict_reason"] = (
-                "metric crossed confirmation threshold with baseline/statistical support"
+                "significance gate passed; metric direction supports hypothesis"
                 if supports_hypothesis
-                else "metric evidence did not cross confirmation threshold"
+                else "significance gate passed but metric direction ambiguous"
             )
+
+        sig_summary = {
+            "gate_passed": sig_result.gate_passed,
+            "p_value": sig_result.p_value,
+            "effect_size": sig_result.effect_size,
+            "method": sig_result.method,
+        }
         evidence = (
             f"evidence={json.dumps(evidence_obj, ensure_ascii=False)}; "
-            f"plan_origin={plan_origin}; rounds_config=max{settings.sub_agent_max_rounds}x{settings.sub_agent_tools_per_round}/round; "
-            f"any_success={tool_hit}; sandbox_ok={sandbox_ok}."
+            f"significance={json.dumps(sig_summary)}; "
+            f"plan_origin={plan_origin}; "
+            f"any_success={any_tool_success}; sandbox_ok={sandbox_ok}; "
+            f"steps={step_counter}."
         )
         key_finding = (
-            "At least one metric-bearing tool output crossed the confirmation contract."
+            "Significance gate passed: metric evidence supports hypothesis."
             if verdict == "confirmed"
             else ("Sandbox probe completed." if sandbox_ok else None)
         )
@@ -729,12 +927,12 @@ async def run_sub_agent_async(payload: dict) -> dict:
             session_id=session_id,
             event_type=EventType.AGENT_COMPLETED,
             step=f"experiment.{hypothesis_id}.complete",
-            payload={"verdict": verdict, "confidence": confidence},
+            payload={"verdict": verdict, "confidence": confidence, "sig_gate_passed": sig_result.gate_passed},
             hypothesis_id=hypothesis_id,
         )
 
         duration_sec = time.perf_counter() - started
-        experiment_result = {
+        result_dict = {
             "hypothesis_id": hypothesis_id,
             "verdict": verdict,
             "confidence": confidence,
@@ -744,11 +942,16 @@ async def run_sub_agent_async(payload: dict) -> dict:
             "figures": [],
             "duration_sec": round(duration_sec, 3),
             "failure_reason": None if verdict == "confirmed" else evidence_obj["verdict_reason"],
+            "learned": (
+                f"Tools run: {', '.join(successful_tool_names[:10])}. "
+                f"Significance: {sig_result.method or 'none'}. "
+                f"Verdict: {verdict}."
+            ),
         }
 
         await redis.close()
         await engine.dispose()
-        return experiment_result
+        return result_dict
 
     except Exception as exc:
         await _update_hypothesis(
@@ -780,4 +983,5 @@ async def run_sub_agent_async(payload: dict) -> dict:
             "figures": [],
             "duration_sec": round(time.perf_counter() - started, 3),
             "failure_reason": str(exc),
+            "learned": None,
         }
