@@ -220,33 +220,42 @@ async def run_hybrid_retrieval(
         chunk_records = [
             {"paper_id": pid, "chunk_index": idx, "text": txt} for pid, idx, txt in loaded
         ]
-        if all((c.get("text") or "").strip() for c in chunk_records):
-            texts_for_embed = [c["text"][:8000] for c in chunk_records]
+        # Cap to avoid spending many minutes embedding thousands of chunks sequentially.
+        _embed_cap = min(len(chunk_records), 60)
+        chunk_records_for_embed = chunk_records[:_embed_cap]
+        if all((c.get("text") or "").strip() for c in chunk_records_for_embed):
+            texts_for_embed = [c["text"][:8000] for c in chunk_records_for_embed]
             try:
-                vectors = await embed_texts(
-                    texts=texts_for_embed,
-                    api_key=settings.embed_api_secret,
-                    model=settings.embed_model,
-                    provider=settings.embed_provider,
+                vectors = await asyncio.wait_for(
+                    embed_texts(
+                        texts=texts_for_embed,
+                        api_key=settings.embed_api_secret,
+                        model=settings.embed_model,
+                        provider=settings.embed_provider,
+                    ),
+                    timeout=90.0,
                 )
             except Exception:
                 vectors = []
-            if vectors and len(vectors) == len(chunk_records):
+            if vectors and len(vectors) == len(chunk_records_for_embed):
                 await asyncio.to_thread(
                     lambda: upsert_chunks(
                         url=settings.qdrant_url,
                         collection=settings.qdrant_collection,
                         session_id=session_id,
-                        chunks=chunk_records,
+                        chunks=chunk_records_for_embed,
                         vectors=vectors,
                     )
                 )
                 try:
-                    qvecs = await embed_texts(
-                        texts=[question],
-                        api_key=settings.embed_api_secret,
-                        model=settings.embed_model,
-                        provider=settings.embed_provider,
+                    qvecs = await asyncio.wait_for(
+                        embed_texts(
+                            texts=[question],
+                            api_key=settings.embed_api_secret,
+                            model=settings.embed_model,
+                            provider=settings.embed_provider,
+                        ),
+                        timeout=30.0,
                     )
                 except Exception:
                     qvecs = []
@@ -310,20 +319,25 @@ async def run_hybrid_retrieval(
             },
         )
     elif settings.embed_api_secret.strip() and len(pool_ids) >= 1 and pool_rows:
-        texts_for_pool = [question[:8000]] + [t[:8000] for _pid, _idx, t in pool_rows]
+        _pool_cap = min(len(pool_rows), 20)
+        pool_rows_capped = pool_rows[:_pool_cap]
+        texts_for_pool = [question[:8000]] + [t[:8000] for _pid, _idx, t in pool_rows_capped]
         try:
-            pvecs = await embed_texts(
-                texts=texts_for_pool,
-                api_key=settings.embed_api_secret,
-                model=settings.embed_model,
-                provider=settings.embed_provider,
+            pvecs = await asyncio.wait_for(
+                embed_texts(
+                    texts=texts_for_pool,
+                    api_key=settings.embed_api_secret,
+                    model=settings.embed_model,
+                    provider=settings.embed_provider,
+                ),
+                timeout=60.0,
             )
         except Exception:
             pvecs = []
-        if len(pvecs) == len(pool_rows) + 1:
+        if len(pvecs) == len(pool_rows_capped) + 1:
             qv = pvecs[0]
             scored: list[tuple[str, float]] = []
-            for i, (pid, idx, _txt) in enumerate(pool_rows):
+            for i, (pid, idx, _txt) in enumerate(pool_rows_capped):
                 sim = _cosine_similarity(qv, pvecs[i + 1])
                 scored.append((f"{pid}|{idx}", sim))
             scored.sort(key=lambda x: -x[1])
