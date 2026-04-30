@@ -49,6 +49,7 @@ class EventType(str, Enum):
     SYNTH_LEDGER_UPDATED = "synthesis.ledger_updated"
     SYNTH_BREAKTHROUGH = "synthesis.breakthrough"
     SYNTH_DEAD_END = "synthesis.dead_end"
+    SYNTH_ALL_INCONCLUSIVE = "synthesis.all_inconclusive"
     PAPER_TRACE_COMPILED = "paper.trace_compiled"
     PAPER_SECTION_STARTED = "paper.section_started"
     PAPER_SECTION_COMPLETED = "paper.section_completed"
@@ -56,6 +57,25 @@ class EventType(str, Enum):
     PAPER_READY = "paper.ready"
     PAPER_SKIPPED = "paper.skipped"
     PAPER_CLAIM_GROUNDING = "paper.claim_grounding"
+    # Multi-round events
+    ROUND_STARTED = "round.started"
+    ROUND_COMPLETED = "round.completed"
+    ROUND_SKIPPED = "round.skipped"
+    HYPO_REFINED = "hypothesis.refined"
+    HYPO_DEDUPLICATED = "hypothesis.deduplicated"
+    HYPO_PROMOTED = "hypothesis.promoted"
+    HYPO_RETIRED = "hypothesis.retired"
+    # Budget / progress
+    BUDGET_CHECKPOINT = "budget.checkpoint"
+    BUDGET_EXHAUSTED = "budget.exhausted"
+    PROGRESS_DIMINISHING = "progress.diminishing"
+    PROGRESS_MILESTONE = "progress.milestone"
+    # Cross-agent memory
+    MEMORY_LEDGER_BROADCAST = "memory.ledger_broadcast"
+    MEMORY_PEER_FINDING = "memory.peer_finding"
+    MEMORY_KB_WRITTEN = "memory.kb_written"
+    # Session resume
+    SESSION_RESUMED = "session.resumed"
 
 
 @dataclass(slots=True)

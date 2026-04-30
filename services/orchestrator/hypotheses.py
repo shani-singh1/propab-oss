@@ -78,7 +78,17 @@ def _ensure_null_hypothesis(hypotheses: list[RankedHypothesis], question: str) -
     return hypotheses
 
 
-def _build_hypothesis_prompt(parsed: ParsedQuestion, prior: Prior, max_hypotheses: int) -> str:
+def _build_hypothesis_prompt(
+    parsed: ParsedQuestion,
+    prior: Prior,
+    max_hypotheses: int,
+    prior_round_findings: str = "",
+) -> str:
+    prior_block = (
+        f"\nResults from previous research rounds:\n{prior_round_findings}\n"
+        if prior_round_findings.strip()
+        else ""
+    )
     return f"""
 You are a research hypothesis generator.
 
@@ -90,13 +100,38 @@ Prior established facts:
 Prior open gaps:
 {json.dumps(prior.open_gaps)}
 
-Prior dead ends:
+Prior dead ends (do not repeat these):
 {json.dumps(prior.dead_ends)}
-
+{prior_block}
 Generate exactly {max_hypotheses} hypotheses.
-Return JSON array only with fields: id, text, test_methodology, gap_reference, expected_result.
-One of the hypotheses must be a null hypothesis predicting no significant effect.
+
+Requirements:
+- Each hypothesis must be specific and falsifiable, NOT generic.
+- Each must state its test methodology naming at least one specific statistical tool
+  (e.g. statistical_significance, bootstrap_confidence, literature_baseline_compare).
+- Do NOT repeat confirmed findings, refuted hypotheses, or dead ends from prior rounds.
+- Do NOT use generic phrasing like "Hypothesis 1: ..." or "The intervention has an effect."
+- One hypothesis should be a null hypothesis (no significant effect).
+{f'- For non-round-1: hypotheses should be MORE targeted based on prior round results.' if prior_round_findings else ''}
+
+Return JSON array only. Each item: {{id, text, test_methodology, gap_reference, expected_result}}
 """
+
+
+def _is_generic_fallback(text: str) -> bool:
+    """Returns True if hypothesis text looks like a generic/fallback placeholder."""
+    import re
+    stripped = (text or "").strip()
+    if re.match(r"^Hypothesis\s+\d+\s*:", stripped):
+        return True
+    generic_phrases = (
+        "targeted intervention measurably",
+        "a targeted intervention",
+        "the intervention has no statistically significant effect beyond noise",
+        "measured improvement on the primary metric",
+    )
+    lower = stripped.lower()
+    return any(p.lower() in lower for p in generic_phrases)
 
 
 async def generate_ranked_hypotheses(
@@ -108,8 +143,9 @@ async def generate_ranked_hypotheses(
     emitter: EventEmitter,
     *,
     use_llm_ranking: bool = True,
+    prior_round_findings: str = "",
 ) -> list[RankedHypothesis]:
-    prompt = _build_hypothesis_prompt(parsed, prior, max_hypotheses)
+    prompt = _build_hypothesis_prompt(parsed, prior, max_hypotheses, prior_round_findings)
     raw = await llm.call(prompt=prompt, purpose="hypothesis_generation", session_id=session_id)
     try:
         generated = json.loads(raw)
@@ -137,16 +173,24 @@ async def generate_ranked_hypotheses(
         composite = round(max(0.15, 1.0 - idx * 0.12), 3)
         gen_list = generated if isinstance(generated, list) else []
         entry = gen_list[idx] if idx < len(gen_list) and isinstance(gen_list[idx], dict) else {}
+        raw_text = str(entry.get("text", ""))
+
+        # Reject generic fallback phrasing; use domain-specific fallback instead
+        if not raw_text or _is_generic_fallback(raw_text):
+            raw_text = _fallback_hypothesis_text(parsed.text, rank)
+
+        methodology = str(entry.get("test_methodology", ""))
+        if not methodology.strip():
+            methodology = (
+                "Test with statistical_significance or bootstrap_confidence, "
+                "comparing treatment vs baseline metric vectors."
+            )
+
         hypotheses.append(
             RankedHypothesis(
                 id=str(entry.get("id", f"h{rank}")),
-                text=str(entry.get("text", _fallback_hypothesis_text(parsed.text, rank))),
-                test_methodology=str(
-                    entry.get(
-                        "test_methodology",
-                        "Run a controlled experiment and compare baseline vs intervention metrics.",
-                    )
-                ),
+                text=raw_text,
+                test_methodology=methodology,
                 scores={
                     "novelty": round(max(0.2, composite - 0.1), 3),
                     "testability": round(max(0.3, composite), 3),
