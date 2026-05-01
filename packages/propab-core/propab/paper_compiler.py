@@ -12,8 +12,21 @@ def _latex_escape(s: str) -> str:
     """Escape minimal LaTeX special characters in user/tool-derived text."""
     if not s:
         return ""
+    greek_map = {
+        "α": r"$\alpha$",
+        "β": r"$\beta$",
+        "γ": r"$\gamma$",
+        "δ": r"$\delta$",
+        "η": r"$\eta$",
+        "σ": r"$\sigma$",
+        "λ": r"$\lambda$",
+        "μ": r"$\mu$",
+    }
     out: list[str] = []
     for ch in s:
+        if ch in greek_map:
+            out.append(greek_map[ch])
+            continue
         if ch == "\\":
             out.append(r"\textbackslash{}")
         elif ch == "&":
@@ -43,8 +56,33 @@ def _format_params(params: Any) -> str:
     if params is None:
         return "{}"
     if isinstance(params, dict):
-        return json.dumps(params, ensure_ascii=False)
-    return str(params)
+        blob = json.dumps(params, ensure_ascii=False)
+    else:
+        blob = str(params)
+    return blob[:280] + ("..." if len(blob) > 280 else "")
+
+
+def _format_evidence_for_paper(evidence_summary: str | None) -> str:
+    text = (evidence_summary or "").strip()
+    if not text:
+        return ""
+    m = re.search(r"evidence=(\{[\s\S]*?\})\s*;", text)
+    if m:
+        try:
+            ev = json.loads(m.group(1))
+            p = ev.get("p_value")
+            e = ev.get("effect_size")
+            ci = ev.get("confidence_interval")
+            p_s = f"{float(p):.6f}" if isinstance(p, (float, int)) else "n/a"
+            e_s = f"{float(e):.4f}" if isinstance(e, (float, int)) else "n/a"
+            if isinstance(ci, list) and len(ci) >= 2 and all(isinstance(x, (float, int)) for x in ci[:2]):
+                ci_s = f"[{float(ci[0]):.4f}, {float(ci[1]):.4f}]"
+            else:
+                ci_s = "n/a"
+            return f"p={p_s}, effect={e_s}, CI={ci_s}"
+        except Exception:
+            pass
+    return text[:220] + ("..." if len(text) > 220 else "")
 
 
 def _extract_metric_steps_from_evidence(evidence_summary: str | None) -> int | None:
@@ -204,7 +242,7 @@ async def compile_session_results_latex(session_factory: async_sessionmaker, ses
         verdict = _latex_escape(str(row.get("verdict") or "pending"))
         conf = row.get("confidence")
         conf_s = f"{float(conf):.2f}" if conf is not None else "n/a"
-        ev = _latex_escape(str(row.get("evidence_summary") or "")[:1200])
+        ev = _latex_escape(_format_evidence_for_paper(str(row.get("evidence_summary") or "")))
         kf = row.get("key_finding")
         kf_s = _latex_escape(str(kf))[:500] if kf else ""
         trace = _latex_escape(str(row.get("tool_trace_id") or ""))

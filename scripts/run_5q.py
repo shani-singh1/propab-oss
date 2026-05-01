@@ -16,27 +16,27 @@ QUESTIONS = [
     {
         "id": "Q1",
         "question": "Does the choice of activation function significantly affect transformer training stability and convergence speed on sequence classification tasks?",
-        "max_hypotheses": 4,
+        "max_hypotheses": 2,
     },
     {
         "id": "Q2",
         "question": "Does batch normalization placement (pre-norm vs post-norm) affect gradient flow and convergence rate in MLPs trained on noisy synthetic data?",
-        "max_hypotheses": 4,
+        "max_hypotheses": 2,
     },
     {
         "id": "Q3",
         "question": "Does learning rate warmup improve final model quality beyond its effect on early training stability?",
-        "max_hypotheses": 4,
+        "max_hypotheses": 2,
     },
     {
         "id": "Q4",
         "question": "Compare SGD, Adam, AdamW, RMSProp, and Adagrad across five different loss surface geometries — rank them by convergence speed, final loss, and stability.",
-        "max_hypotheses": 4,
+        "max_hypotheses": 2,
     },
     {
         "id": "Q5",
         "question": "Does model width or model depth contribute more to parameter efficiency in MLPs trained on a fixed compute budget?",
-        "max_hypotheses": 4,
+        "max_hypotheses": 2,
     },
 ]
 
@@ -86,7 +86,7 @@ def main() -> None:
 
     print(f"\n=== All submitted. Monitoring {len([s for s in sessions if s['session_id']])} sessions ===\n")
 
-    deadline = time.monotonic() + 3600  # 1 hour max
+    deadline = time.monotonic() + 1200  # 20 minutes max for dev profile
     while True:
         if time.monotonic() > deadline:
             print("Monitor timeout reached (1h). Check /sessions manually.")

@@ -32,8 +32,8 @@ TOOL_SPEC = {
         "dataset": {
             "type": "str",
             "required": False,
-            "default": "synthetic",
-            "description": "Dataset: 'synthetic' (default) or 'mnist' for real image classification.",
+            "default": "mnist",
+            "description": "Dataset: 'mnist' (default) or 'synthetic'.",
         },
         "n_steps": {
             "type": "int",
@@ -78,7 +78,7 @@ TOOL_SPEC = {
 def train_model(
     model_id: str = "auto",
     task: str = "classification",
-    dataset: str = "synthetic",
+    dataset: str = "mnist",
     n_steps: int = 200,
     batch_size: int = 32,
     optimizer: str = "adam",

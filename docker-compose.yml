@@ -25,6 +25,7 @@ services:
       - EMBED_MODEL=${EMBED_MODEL:-text-embedding-3-small}
       - ORCHESTRATOR_URL=http://orchestrator:8010
       - ORCHESTRATOR_INTERNAL_TOKEN=${ORCHESTRATOR_INTERNAL_TOKEN:-}
+      - PROPAB_PROFILE=${PROPAB_PROFILE:-dev}
     ports:
       - "8000:8000"
     volumes:
@@ -61,6 +62,7 @@ services:
       - EMBED_PROVIDER=${EMBED_PROVIDER:-openai}
       - EMBED_MODEL=${EMBED_MODEL:-text-embedding-3-small}
       - ORCHESTRATOR_INTERNAL_TOKEN=${ORCHESTRATOR_INTERNAL_TOKEN:-}
+      - PROPAB_PROFILE=${PROPAB_PROFILE:-dev}
     volumes:
       - propab_data:/data/propab
     depends_on:
@@ -91,6 +93,7 @@ services:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
       - EMBED_PROVIDER=${EMBED_PROVIDER:-openai}
       - EMBED_MODEL=${EMBED_MODEL:-text-embedding-3-small}
+      - PROPAB_PROFILE=${PROPAB_PROFILE:-dev}
     volumes:
       - propab_data:/data/propab
       - /var/run/docker.sock:/var/run/docker.sock

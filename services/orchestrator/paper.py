@@ -217,15 +217,27 @@ async def write_paper_minimal(
         main_path.write_text(full_tex, encoding="utf-8")
 
         if shutil.which("pdflatex"):
-            proc = subprocess.run(
-                ["pdflatex", "-interaction=nonstopmode", "main.tex"],
+            # Preflight lint in draft mode to catch escaping issues early.
+            pre = subprocess.run(
+                ["pdflatex", "-interaction=nonstopmode", "-draftmode", "main.tex"],
                 cwd=tmp,
                 capture_output=True,
                 text=True,
                 timeout=120,
             )
-            latex_ok = proc.returncode == 0 and (tmp / "main.pdf").exists()
-            latex_log = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            if pre.returncode == 0:
+                proc = subprocess.run(
+                    ["pdflatex", "-interaction=nonstopmode", "main.tex"],
+                    cwd=tmp,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                latex_ok = proc.returncode == 0 and (tmp / "main.pdf").exists()
+                latex_log = (pre.stdout or "") + "\n" + (pre.stderr or "") + "\n" + (proc.stdout or "") + "\n" + (proc.stderr or "")
+            else:
+                latex_ok = False
+                latex_log = (pre.stdout or "") + "\n" + (pre.stderr or "")
         else:
             latex_log = "pdflatex not found on PATH"
 

@@ -758,6 +758,8 @@ async def run_sub_agent_async(payload: dict) -> dict:
                         f"print(json.dumps(result))\n"
                     )
                     step_ok = await run_code_step(code, step_counter)
+                    if step_ok:
+                        agent_ctx.tool_names_run.append("__code__")
 
                 step_counter += 1
                 agent_ctx.steps_taken += 1

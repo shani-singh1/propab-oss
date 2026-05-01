@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from propab.config import settings
 from propab.llm import LLMClient
 
 from .significance import SignificanceResult, any_significance_tool_ran, check_significance
@@ -197,6 +198,13 @@ What should you do next? Rules:
 4. Do not repeat a tool you already ran unless with meaningfully different parameters.
 5. Good sequence: build_mlp → train_model → (train_model again with different config) →
    statistical_significance(results_a=val_losses_A, results_b=val_losses_B) → stop
+6. STRICT RULE: You may only use action_type="code" if:
+   (a) no available tool covers the exact measurement, and
+   (b) you explicitly state which tool you checked and why it does not apply.
+7. Maximum code steps allowed for this hypothesis: {max_code_steps}.
+   Code steps already used: {used_code_steps}.
+8. If you are about to write code to train/evaluate/compare models, use tools instead:
+   train_model, run_experiment_grid, compare_optimizers, statistical_significance.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ADAPTIVE n_steps GUIDANCE — read before calling train_model or run_experiment_grid:
@@ -207,9 +215,9 @@ ADAPTIVE n_steps GUIDANCE — read before calling train_model or run_experiment_
   These produce larger effect sizes and are detectable in fewer steps.
 • Convergence speed / optimizer comparison: n_steps >= 500
   You need to see the full curve to measure when each approach plateaus.
-• Default (if unsure): n_steps = 300
+• Default (if unsure): n_steps = {n_steps_default}
 • NEVER use n_steps < 100 for hypothesis testing — results will be underpowered.
-For real data: use dataset='mnist' for interpretable image classification experiments.
+For classification tasks: use dataset='{classification_default_dataset}' unless a strong reason exists not to.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Choose ONE action:
@@ -227,6 +235,10 @@ Return JSON only:
   "expected_outcome": "what you expect to learn or confirm from this action"
 }}
 """
+
+
+def _count_code_steps(tool_names_run: list[str]) -> int:
+    return sum(1 for n in tool_names_run if str(n).strip().lower() == "__code__")
 
 _CORRECTION_PROMPT_TMPL = """You tried to stop before running any significance test.
 
@@ -337,6 +349,10 @@ async def decide_next_action(
         sig_tool_ran=any_significance_tool_ran(context.tool_names_run),
         peer_summary=context.to_peer_summary(),
         tools_summary=_tools_summary(specs),
+        max_code_steps=int(getattr(settings, "max_code_steps_per_hypothesis", 1)),
+        used_code_steps=_count_code_steps(context.tool_names_run),
+        n_steps_default=int(getattr(settings, "n_steps_default", 150)),
+        classification_default_dataset=str(getattr(settings, "classification_default_dataset", "mnist")),
     )
 
     raw = await llm.call(
@@ -347,6 +363,18 @@ async def decide_next_action(
     )
     data = _extract_json(raw) or {}
     action = _parse_action(data)
+
+    # Hard cap: max code steps per hypothesis
+    used_code_steps = _count_code_steps(context.tool_names_run)
+    max_code_steps = int(getattr(settings, "max_code_steps_per_hypothesis", 1))
+    if action.action_type == "code" and used_code_steps >= max_code_steps:
+        logger.info(
+            "Code-step cap hit for %s (%s/%s). Forcing tool fallback.",
+            hypothesis_id,
+            used_code_steps,
+            max_code_steps,
+        )
+        action = _fallback_significance_action(context)
 
     # If agent chose a significance tool with spec-example params, issue a correction
     if (

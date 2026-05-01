@@ -56,6 +56,12 @@ def build_mlp(
     # Resolve aliases
     if hidden_dims is None:
         hidden_dims = hidden_layers or layers or [64, 32]
+    if isinstance(hidden_dims, int):
+        hidden_dims = [hidden_dims]
+    if isinstance(hidden_layers, int):
+        hidden_layers = [hidden_layers]
+    if isinstance(layers, int):
+        layers = [layers]
     if num_classes is not None:
         output_dim = int(num_classes)
     if n_classes is not None:

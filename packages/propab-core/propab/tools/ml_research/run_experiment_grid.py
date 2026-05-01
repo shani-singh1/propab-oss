@@ -5,6 +5,7 @@ from typing import Any
 
 import numpy as np
 
+from propab.config import settings
 from propab.tools.types import ToolError, ToolResult
 
 TOOL_SPEC = {
@@ -29,6 +30,7 @@ TOOL_SPEC = {
             "description": "Steps per config. Subtle effects need >=300; structural effects >=150; convergence >=500.",
         },
         "task": {"type": "str", "required": False, "default": "classification"},
+        "dataset": {"type": "str", "required": False, "default": "mnist"},
         "input_dim": {"type": "int", "required": False, "default": 16},
         "hidden_dims": {"type": "list[int]", "required": False, "default": [32, 16]},
         "output_dim": {"type": "int", "required": False, "default": 2},
@@ -62,6 +64,7 @@ def _real_train_score(
     input_dim: int,
     hidden_dims: list[int],
     output_dim: int,
+    dataset: str = "synthetic",
     seed_offset: int = 0,
 ) -> tuple[float, list[float]]:
     """Run a real training loop with this config; return (score, val_losses)."""
@@ -108,12 +111,48 @@ def _real_train_score(
     n_train, n_val = 200, 60
     bs = max(8, min(bs, 128))
     n_steps = max(20, min(int(n_steps), 1000))
+    dataset_name = str(dataset or "synthetic").strip().lower()
+    if task == "classification" and dataset_name == "mnist":
+        try:
+            import torchvision
+            import torchvision.transforms as transforms
 
-    X_train = torch.randn(n_train, dims[0])
-    X_val = torch.randn(n_val, dims[0])
+            transform = transforms.Compose(
+                [
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.1307,), (0.3081,)),
+                    transforms.Lambda(lambda x: x.view(-1)),
+                ]
+            )
+            mnist_train = torchvision.datasets.MNIST("/tmp/mnist", train=True, download=True, transform=transform)
+            mnist_val = torchvision.datasets.MNIST("/tmp/mnist", train=False, download=True, transform=transform)
+            tr_n = min(800, len(mnist_train))
+            va_n = min(200, len(mnist_val))
+            tr_idx = torch.randperm(len(mnist_train))[:tr_n]
+            va_idx = torch.randperm(len(mnist_val))[:va_n]
+            X_train = torch.stack([mnist_train[i][0] for i in tr_idx])
+            Y_train = torch.tensor([mnist_train[i][1] for i in tr_idx], dtype=torch.long)
+            X_val = torch.stack([mnist_val[i][0] for i in va_idx])
+            Y_val = torch.tensor([mnist_val[i][1] for i in va_idx], dtype=torch.long)
+            dims = [784] + [int(x) for x in hidden_dims] + [10]
+            n_train, n_val = len(X_train), len(X_val)
+            layers = []
+            for i in range(len(dims) - 1):
+                layers.append(nn.Linear(dims[i], dims[i + 1]))
+                if i < len(dims) - 2:
+                    layers.append(act_cls())
+            net = nn.Sequential(*layers)
+            loss_fn = nn.CrossEntropyLoss()
+            is_class = True
+        except Exception:
+            X_train = torch.randn(n_train, dims[0])
+            X_val = torch.randn(n_val, dims[0])
+    else:
+        X_train = torch.randn(n_train, dims[0])
+        X_val = torch.randn(n_val, dims[0])
 
     is_class = task in ("classification",)
-    if is_class:
+    if is_class and not (task == "classification" and dataset_name == "mnist"):
         # Linearly separable data so models can actually learn
         W_true = torch.randn(dims[0]) * 0.5
         Y_raw_train = X_train @ W_true
@@ -185,10 +224,29 @@ def run_experiment_grid(
     maximize: bool = False,
     n_steps: int = 80,
     task: str = "classification",
+    dataset: str = "mnist",
     input_dim: int = 16,
     hidden_dims: list | None = None,
     output_dim: int = 2,
 ) -> ToolResult:
+    def normalize_grid_params(raw_grid: dict[str, Any]) -> dict[str, list[Any]]:
+        normalized: dict[str, list[Any]] = {}
+        for key, value in raw_grid.items():
+            if isinstance(value, list):
+                normalized[key] = value
+            elif isinstance(value, tuple):
+                normalized[key] = list(value)
+            else:
+                normalized[key] = [value]
+        return normalized
+
+    def _first_scalar(v: Any) -> Any:
+        if isinstance(v, list) and v:
+            return _first_scalar(v[0])
+        if isinstance(v, tuple) and v:
+            return _first_scalar(v[0])
+        return v
+
     try:
         if grid is None:
             grid = {"lr": [0.001, 0.01], "batch_size": [16, 32]}
@@ -197,6 +255,7 @@ def run_experiment_grid(
                 success=False,
                 error=ToolError(type="validation_error", message="grid must be a non-empty dict of lists."),
             )
+        grid = normalize_grid_params(grid)
         keys = list(grid.keys())
         for k in keys:
             if not isinstance(grid[k], (list, tuple)) or len(grid[k]) == 0:
@@ -211,8 +270,12 @@ def run_experiment_grid(
                 error=ToolError(type="validation_error", message="Too many grid combinations (max 100)."),
             )
 
-        n_rep = max(1, min(int(n_repeats), 5))
-        hdims = [int(x) for x in (hidden_dims or [32, 16])]
+        n_rep = max(1, min(int(n_repeats), 3))
+        if hidden_dims is None:
+            hidden_dims = [32, 16]
+        if isinstance(hidden_dims, int):
+            hidden_dims = [hidden_dims]
+        hdims = [int(_first_scalar(x)) for x in hidden_dims]
 
         results = []
         for combo in combos:
@@ -224,11 +287,12 @@ def run_experiment_grid(
                 score, vl = _real_train_score(
                     cfg,
                     maximize=maximize,
-                    n_steps=max(30, min(int(n_steps), 1000)),
+                    n_steps=max(20, min(int(_first_scalar(n_steps)), 500 if str(settings.propab_profile).lower() == "dev" else 1000)),
                     task=task,
-                    input_dim=int(input_dim),
+                    dataset=str(dataset or getattr(settings, "classification_default_dataset", "mnist")),
+                    input_dim=int(_first_scalar(input_dim)),
                     hidden_dims=hdims,
-                    output_dim=int(output_dim),
+                    output_dim=int(_first_scalar(output_dim)),
                     seed_offset=repeat,
                 )
                 rep_scores.append(score)

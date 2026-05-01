@@ -3,6 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    propab_profile: str = "dev"
     database_url: str = "postgresql+asyncpg://propab:propab@localhost:5432/propab"
     redis_url: str = "redis://localhost:6379/0"
     openai_api_key: str = ""
@@ -42,6 +43,9 @@ class Settings(BaseSettings):
     agent_max_steps: int = 12
     agent_min_steps: int = 4
     agent_max_seconds: int = 600
+    max_code_steps_per_hypothesis: int = 1
+    n_steps_default: int = 150
+    classification_default_dataset: str = "mnist"
     # Multi-round orchestrator
     research_max_rounds: int = 4
     research_max_hours: float = 3.5
@@ -82,3 +86,48 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def _apply_profile(s: Settings) -> None:
+    profile = (s.propab_profile or "dev").strip().lower()
+    profiles: dict[str, dict[str, float | int | str]] = {
+        "dev": {
+            "research_max_rounds": 2,
+            "research_max_hypotheses": 15,
+            "agent_max_steps": 8,
+            "agent_min_steps": 3,
+            "agent_max_seconds": 300,
+            "sandbox_timeout_sec": 60,
+            "n_steps_default": 120,
+            "max_code_steps_per_hypothesis": 1,
+            "classification_default_dataset": "mnist",
+        },
+        "research": {
+            "research_max_rounds": 4,
+            "research_max_hypotheses": 60,
+            "agent_max_steps": 12,
+            "agent_min_steps": 4,
+            "agent_max_seconds": 600,
+            "sandbox_timeout_sec": 300,
+            "n_steps_default": 300,
+            "max_code_steps_per_hypothesis": 1,
+            "classification_default_dataset": "mnist",
+        },
+        "deep": {
+            "research_max_rounds": 6,
+            "research_max_hypotheses": 80,
+            "agent_max_steps": 16,
+            "agent_min_steps": 5,
+            "agent_max_seconds": 1200,
+            "sandbox_timeout_sec": 600,
+            "n_steps_default": 500,
+            "max_code_steps_per_hypothesis": 2,
+            "classification_default_dataset": "mnist",
+        },
+    }
+    selected = profiles.get(profile, profiles["dev"])
+    for key, value in selected.items():
+        setattr(s, key, value)
+
+
+_apply_profile(settings)
