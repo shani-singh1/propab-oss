@@ -158,10 +158,26 @@ def train_model(
     X_val = torch.randn(n_val, dims[0])
 
     if task in ("classification", "language_modeling"):
-        n_classes = max(2, dims[-1])
-        Y_train = torch.randint(0, n_classes, (n_train,))
-        Y_val = torch.randint(0, n_classes, (n_val,))
-        loss_fn = nn.CrossEntropyLoss()
+        # Linearly separable data so architectures/configs show real performance differences
+        W_true = torch.randn(dims[0]) * 0.5
+        Y_raw_train = X_train @ W_true + torch.randn(n_train) * max(0.1, float(noise_level))
+        Y_raw_val = X_val @ W_true + torch.randn(n_val) * max(0.1, float(noise_level))
+        n_classes = dims[-1]
+        if n_classes == 1:
+            Y_train = (Y_raw_train > 0).float().unsqueeze(1)
+            Y_val = (Y_raw_val > 0).float().unsqueeze(1)
+            loss_fn = nn.BCEWithLogitsLoss()
+        else:
+            n_classes = max(2, n_classes)
+            thresholds = torch.quantile(Y_raw_train, torch.linspace(0, 1, n_classes + 1)[1:-1])
+            def _quantize(vals, thr):
+                labels = torch.zeros(len(vals), dtype=torch.long)
+                for i, t in enumerate(thr):
+                    labels[vals > t] = i + 1
+                return labels
+            Y_train = _quantize(Y_raw_train, thresholds)
+            Y_val = _quantize(Y_raw_val, thresholds)
+            loss_fn = nn.CrossEntropyLoss()
         is_class = True
     else:
         # regression / autoencoding

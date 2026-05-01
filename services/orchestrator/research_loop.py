@@ -31,8 +31,10 @@ logger = logging.getLogger(__name__)
 _HYPOTHESIS_ID_NAMESPACE = UUID("8b4fd0f5-6c2a-40e2-a4da-4d8c1f2e0b1c")
 
 
-def _hypothesis_row_id(session_id: str, logical_id: str) -> str:
-    return str(uuid5(_HYPOTHESIS_ID_NAMESPACE, f"{session_id}:{logical_id}"))
+def _hypothesis_row_id(session_id: str, logical_id: str, round_id: str = "") -> str:
+    # Include round_id so same logical_id in different rounds gets a unique DB key
+    key = f"{session_id}:{round_id}:{logical_id}" if round_id else f"{session_id}:{logical_id}"
+    return str(uuid5(_HYPOTHESIS_ID_NAMESPACE, key))
 
 
 async def _update_session(session_factory: async_sessionmaker, session_id: str, **fields: str) -> None:
@@ -130,7 +132,7 @@ async def _insert_hypothesis_rows(
     inserted: list[tuple[str, RankedHypothesis]] = []
     async with session_factory() as session:
         for hypothesis in hypotheses:
-            row_id = _hypothesis_row_id(session_id, hypothesis.id)
+            row_id = _hypothesis_row_id(session_id, hypothesis.id, round_id or "")
             await session.execute(
                 text("""
                     INSERT INTO hypotheses (

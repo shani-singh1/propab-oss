@@ -109,10 +109,27 @@ def _real_train_score(
 
     is_class = task in ("classification",)
     if is_class:
-        n_cls = max(2, dims[-1])
-        Y_train = torch.randint(0, n_cls, (n_train,))
-        Y_val = torch.randint(0, n_cls, (n_val,))
-        loss_fn = nn.CrossEntropyLoss()
+        # Linearly separable data so models can actually learn
+        W_true = torch.randn(dims[0]) * 0.5
+        Y_raw_train = X_train @ W_true
+        Y_raw_val = X_val @ W_true
+        n_cls = dims[-1]
+        if n_cls == 1:
+            Y_train = (Y_raw_train > 0).float().unsqueeze(1)
+            Y_val = (Y_raw_val > 0).float().unsqueeze(1)
+            loss_fn = nn.BCEWithLogitsLoss()
+        else:
+            n_cls = max(2, n_cls)
+            # For multi-class: use quantile-based labels
+            thresholds = torch.quantile(Y_raw_train, torch.linspace(0, 1, n_cls + 1)[1:-1])
+            def quantize(vals, thr):
+                labels = torch.zeros(len(vals), dtype=torch.long)
+                for i, t in enumerate(thr):
+                    labels[vals > t] = i + 1
+                return labels
+            Y_train = quantize(Y_raw_train, thresholds)
+            Y_val = quantize(Y_raw_val, thresholds)
+            loss_fn = nn.CrossEntropyLoss()
     else:
         W_true = torch.randn(dims[0], dims[-1]) * 0.3
         Y_train = X_train @ W_true + torch.randn(n_train, dims[-1]) * 0.1

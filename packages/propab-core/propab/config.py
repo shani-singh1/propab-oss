@@ -39,14 +39,17 @@ class Settings(BaseSettings):
     sandbox_code_max_retries: int = 3
     literature_answer_similarity: float = 0.92
     # Think-act agent budgets
-    agent_max_steps: int = 20
-    agent_min_steps: int = 5
+    agent_max_steps: int = 12
+    agent_min_steps: int = 4
+    agent_max_seconds: int = 600
     # Multi-round orchestrator
     research_max_rounds: int = 4
-    research_max_hours: float = 1.5
-    research_target_confirmed: int = 3
+    research_max_hours: float = 3.5
+    research_max_seconds_per_round: int = 3000
+    research_target_confirmed: int = 5
     research_max_hypotheses: int = 60
-    research_min_marginal_return: float = 0.05
+    research_min_marginal_return: float = 0.03
+    research_max_stale_rounds: int = 3
     reranker_enabled: bool = False
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     api_host: str = "0.0.0.0"

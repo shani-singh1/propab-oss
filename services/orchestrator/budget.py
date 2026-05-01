@@ -58,10 +58,13 @@ class ResearchBudget:
             max_hours=float(settings.research_max_hours),
             max_hypotheses_total=int(settings.research_max_hypotheses),
             target_confirmed=int(settings.research_target_confirmed),
-            min_marginal_return=float(settings.research_min_marginal_return),
+            min_marginal_return=float(getattr(settings, "research_min_marginal_return", 0.03)),
+            max_stale_rounds=int(getattr(settings, "research_max_stale_rounds", 3)),
             agent_max_steps=int(settings.agent_max_steps),
             agent_min_steps=int(settings.agent_min_steps),
+            agent_max_seconds=int(getattr(settings, "agent_max_seconds", 600)),
             max_hypotheses_per_round=int(settings.sub_agent_max_rounds) * 2,
+            max_seconds_per_round=int(getattr(settings, "research_max_seconds_per_round", 3000)),
         )
 
     def exhausted(self) -> bool:
