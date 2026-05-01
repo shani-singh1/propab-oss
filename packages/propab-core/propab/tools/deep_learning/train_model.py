@@ -9,21 +9,41 @@ TOOL_SPEC = {
     "name": "train_model",
     "domain": "deep_learning",
     "description": (
-        "Train a registered MLP (from build_mlp) on synthetic data using real PyTorch. "
-        "Returns val_losses list for significance testing and final_val_loss."
+        "Train a registered MLP (from build_mlp) on synthetic or MNIST data using real PyTorch. "
+        "Returns val_losses list for significance testing and final_val_loss. "
+        "Use dataset='mnist' for real image data (auto-adjusts to 784-dim input, 10 classes). "
+        "Choose n_steps carefully: subtle effects (activations, normalization) need >=300 steps; "
+        "structural effects (depth vs width) are visible in 100-200 steps; "
+        "convergence speed comparisons need >=500 steps."
     ),
     "params": {
-        "model_id": {"type": "str", "required": False, "default": "auto",
-                     "description": "model_id from build_mlp. Use 'auto' to auto-build a default MLP."},
+        "model_id": {
+            "type": "str",
+            "required": False,
+            "default": "auto",
+            "description": "model_id from build_mlp. Use 'auto' to auto-build a default MLP.",
+        },
         "task": {
             "type": "str",
             "required": False,
             "default": "classification",
             "enum": ["classification", "regression", "autoencoding", "language_modeling"],
         },
-        "dataset": {"type": "str", "required": False, "default": "synthetic"},
-        "n_steps": {"type": "int", "required": False, "default": 120,
-                    "description": "Number of gradient steps (also accepted as 'epochs' or 'num_steps')"},
+        "dataset": {
+            "type": "str",
+            "required": False,
+            "default": "synthetic",
+            "description": "Dataset: 'synthetic' (default) or 'mnist' for real image classification.",
+        },
+        "n_steps": {
+            "type": "int",
+            "required": False,
+            "default": 200,
+            "description": (
+                "Gradient steps. Subtle effects (activations/norm) need >=300; "
+                "structural effects (depth/width) need >=100; convergence speed needs >=500."
+            ),
+        },
         "batch_size": {"type": "int", "required": False, "default": 32},
         "optimizer": {"type": "str", "required": False, "default": "adam"},
         "learning_rate": {"type": "float", "required": False, "default": 1e-3},
@@ -31,8 +51,12 @@ TOOL_SPEC = {
         "weight_decay": {"type": "float", "required": False, "default": 0.0},
         "noise_level": {"type": "float", "required": False, "default": 0.0},
         "record_every": {"type": "int", "required": False, "default": 10},
-        "epochs": {"type": "int", "required": False, "default": None,
-                   "description": "Alias for n_steps — pass epochs OR n_steps, not both"},
+        "epochs": {
+            "type": "int",
+            "required": False,
+            "default": None,
+            "description": "Alias for n_steps — pass epochs OR n_steps, not both",
+        },
     },
     "output": {
         "loss_curve": "list[dict]",
@@ -41,11 +65,13 @@ TOOL_SPEC = {
         "final_train_loss": "float",
         "final_val_loss": "float",
         "final_metric": "float",
+        "val_accuracy": "float",
         "total_time_sec": "float",
         "steps_per_sec": "float",
         "trained_model_id": "str",
+        "dataset_used": "str",
     },
-    "example": {"params": {"model_id": "x", "task": "classification"}, "output": {}},
+    "example": {"params": {"model_id": "auto", "task": "classification", "n_steps": 200}, "output": {}},
 }
 
 
@@ -53,7 +79,7 @@ def train_model(
     model_id: str = "auto",
     task: str = "classification",
     dataset: str = "synthetic",
-    n_steps: int = 120,
+    n_steps: int = 200,
     batch_size: int = 32,
     optimizer: str = "adam",
     learning_rate: float = 1e-3,
@@ -61,10 +87,10 @@ def train_model(
     weight_decay: float = 0.0,
     noise_level: float = 0.0,
     record_every: int = 10,
-    epochs: int | None = None,  # alias for n_steps
-    num_steps: int | None = None,  # alias for n_steps
-    num_epochs: int | None = None,  # alias for n_steps
-    lr: float | None = None,  # alias for learning_rate
+    epochs: int | None = None,
+    num_steps: int | None = None,
+    num_epochs: int | None = None,
+    lr: float | None = None,
 ) -> ToolResult:
     # Resolve parameter aliases from LLM variations
     if epochs is not None:
@@ -75,6 +101,7 @@ def train_model(
         n_steps = int(num_epochs)
     if lr is not None:
         learning_rate = float(lr)
+
     try:
         import torch
         import torch.nn as nn
@@ -88,14 +115,14 @@ def train_model(
         )
 
     # Auto-build a default MLP if no model_id provided or model not found
-    if str(model_id).lower() in ("auto", "", "none", "null") or get_model(str(model_id)) is None:
+    if str(model_id).lower() in ("auto", "", "none", "null", "x") or get_model(str(model_id)) is None:
         from propab.tools.deep_learning.build_mlp import build_mlp as _build
         _br = _build(input_dim=16, hidden_dims=[64, 32], output_dim=2, activation="relu")
         if not _br.success:
-            return ToolResult(success=False, error=ToolError(
-                type="auto_build_error",
-                message=f"Auto-build MLP failed: {_br.error}",
-            ))
+            return ToolResult(
+                success=False,
+                error=ToolError(type="auto_build_error", message=f"Auto-build MLP failed: {_br.error}"),
+            )
         model_id = _br.output["model_id"]
 
     info = get_model(str(model_id))
@@ -141,63 +168,115 @@ def train_model(
     try:
         opt = opt_cls(net.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay))
     except TypeError:
-        # SGD doesn't accept weight_decay in all versions
         opt = opt_cls(net.parameters(), lr=float(learning_rate))
 
-    # Generate a deterministic synthetic dataset keyed to model_id
-    # Different model_ids → different data, ensuring varied outcomes
     seed = hash(str(model_id)) & 0x7FFFFFFF
     torch.manual_seed(seed)
 
-    n_train, n_val = 300, 80
-    n_steps = max(20, min(int(n_steps), 400))
+    n_steps = max(20, min(int(n_steps), 1000))
     bs = max(8, min(int(batch_size), 256))
     rec_every = max(1, int(record_every))
 
-    X_train = torch.randn(n_train, dims[0])
-    X_val = torch.randn(n_val, dims[0])
+    dataset_name = str(dataset).strip().lower()
+    accuracy_mode = False
 
-    if task in ("classification", "language_modeling"):
-        # Linearly separable data so architectures/configs show real performance differences
-        W_true = torch.randn(dims[0]) * 0.5
-        Y_raw_train = X_train @ W_true + torch.randn(n_train) * max(0.1, float(noise_level))
-        Y_raw_val = X_val @ W_true + torch.randn(n_val) * max(0.1, float(noise_level))
-        n_classes = dims[-1]
-        if n_classes == 1:
-            Y_train = (Y_raw_train > 0).float().unsqueeze(1)
-            Y_val = (Y_raw_val > 0).float().unsqueeze(1)
-            loss_fn = nn.BCEWithLogitsLoss()
-        else:
-            n_classes = max(2, n_classes)
-            thresholds = torch.quantile(Y_raw_train, torch.linspace(0, 1, n_classes + 1)[1:-1])
-            def _quantize(vals, thr):
-                labels = torch.zeros(len(vals), dtype=torch.long)
-                for i, t in enumerate(thr):
-                    labels[vals > t] = i + 1
-                return labels
-            Y_train = _quantize(Y_raw_train, thresholds)
-            Y_val = _quantize(Y_raw_val, thresholds)
-            loss_fn = nn.CrossEntropyLoss()
-        is_class = True
+    # ─── Dataset loading ─────────────────────────────────────────────────────
+    if dataset_name == "mnist":
+        try:
+            import torchvision
+            import torchvision.transforms as transforms
+
+            transform = transforms.Compose([
+                transforms.ToTensor(),
+                transforms.Normalize((0.1307,), (0.3081,)),
+                transforms.Lambda(lambda x: x.view(-1)),  # flatten 28x28 → 784
+            ])
+            mnist_train = torchvision.datasets.MNIST("/tmp/mnist", train=True, download=True, transform=transform)
+            mnist_val = torchvision.datasets.MNIST("/tmp/mnist", train=False, download=True, transform=transform)
+
+            # 2000 train / 500 val for speed
+            train_size = min(2000, len(mnist_train))
+            val_size = min(500, len(mnist_val))
+            idx_tr = torch.randperm(len(mnist_train))[:train_size]
+            idx_va = torch.randperm(len(mnist_val))[:val_size]
+            X_train = torch.stack([mnist_train[i][0] for i in idx_tr])
+            Y_train = torch.tensor([mnist_train[i][1] for i in idx_tr], dtype=torch.long)
+            X_val = torch.stack([mnist_val[i][0] for i in idx_va])
+            Y_val = torch.tensor([mnist_val[i][1] for i in idx_va], dtype=torch.long)
+
+            n_train, n_val = len(X_train), len(X_val)
+            loss_fn: nn.Module = nn.CrossEntropyLoss()
+            is_class = True
+            accuracy_mode = True
+
+            # If model dims don't match MNIST (784 in, 10 out), rebuild
+            if dims[0] != 784 or dims[-1] != 10:
+                from propab.tools.deep_learning.build_mlp import build_mlp as _build
+                hidden = dims[1:-1] if len(dims) > 2 else [256, 128]
+                _br = _build(input_dim=784, hidden_dims=hidden, output_dim=10, activation=activation_name)
+                if _br.success:
+                    model_id = _br.output["model_id"]
+                    info = get_model(model_id)
+                    dims = info["dims"]
+                    layers = []
+                    for i in range(len(dims) - 1):
+                        layers.append(nn.Linear(dims[i], dims[i + 1]))
+                        if i < len(dims) - 2:
+                            layers.append(_act_layer())
+                    net = nn.Sequential(*layers)
+                    opt = opt_cls(net.parameters(), lr=float(learning_rate))
+        except Exception as mnist_exc:
+            return ToolResult(
+                success=False,
+                error=ToolError(type="execution_error", message=f"MNIST load failed: {mnist_exc}"),
+            )
+
     else:
-        # regression / autoencoding
-        W_true = torch.randn(dims[0], dims[-1]) * 0.3
-        Y_train = X_train @ W_true + torch.randn(n_train, dims[-1]) * max(0.0, float(noise_level) + 0.1)
-        Y_val = X_val @ W_true + torch.randn(n_val, dims[-1]) * max(0.0, float(noise_level) + 0.1)
-        loss_fn = nn.MSELoss()
-        is_class = False
+        # Synthetic data — linearly separable for real learning signal
+        n_train, n_val = 300, 80
+        X_train = torch.randn(n_train, dims[0])
+        X_val = torch.randn(n_val, dims[0])
 
-    # Optional LR warmup / cosine schedule
+        if task in ("classification", "language_modeling"):
+            W_true = torch.randn(dims[0]) * 0.5
+            Y_raw_train = X_train @ W_true + torch.randn(n_train) * max(0.1, float(noise_level))
+            Y_raw_val = X_val @ W_true + torch.randn(n_val) * max(0.1, float(noise_level))
+            n_classes = dims[-1]
+            if n_classes == 1:
+                Y_train = (Y_raw_train > 0).float().unsqueeze(1)
+                Y_val = (Y_raw_val > 0).float().unsqueeze(1)
+                loss_fn = nn.BCEWithLogitsLoss()
+            else:
+                n_classes = max(2, n_classes)
+                thresholds = torch.quantile(Y_raw_train, torch.linspace(0, 1, n_classes + 1)[1:-1])
+
+                def _quantize(vals: "torch.Tensor", thr: "torch.Tensor") -> "torch.Tensor":
+                    labels = torch.zeros(len(vals), dtype=torch.long)
+                    for _i, _t in enumerate(thr):
+                        labels[vals > _t] = _i + 1
+                    return labels
+
+                Y_train = _quantize(Y_raw_train, thresholds)
+                Y_val = _quantize(Y_raw_val, thresholds)
+                loss_fn = nn.CrossEntropyLoss()
+            is_class = True
+        else:
+            W_true = torch.randn(dims[0], dims[-1]) * 0.3
+            Y_train = X_train @ W_true + torch.randn(n_train, dims[-1]) * max(0.0, float(noise_level) + 0.1)
+            Y_val = X_val @ W_true + torch.randn(n_val, dims[-1]) * max(0.0, float(noise_level) + 0.1)
+            loss_fn = nn.MSELoss()
+            is_class = False
+
+    # ─── LR schedule ─────────────────────────────────────────────────────────
     scheduler = None
     lr_sched_name = str(lr_schedule).lower()
     if lr_sched_name == "warmup":
         warmup_steps = max(5, n_steps // 10)
-        scheduler = torch.optim.lr_scheduler.LinearLR(
-            opt, start_factor=0.1, end_factor=1.0, total_iters=warmup_steps
-        )
+        scheduler = torch.optim.lr_scheduler.LinearLR(opt, start_factor=0.1, end_factor=1.0, total_iters=warmup_steps)
     elif lr_sched_name == "cosine":
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=n_steps)
 
+    # ─── Training loop ────────────────────────────────────────────────────────
     t0 = _t.perf_counter()
     loss_curve: list[dict] = []
     gradient_norms: list[dict] = []
@@ -205,7 +284,6 @@ def train_model(
     last_train_loss = 0.0
 
     for step in range(n_steps):
-        # Random minibatch each step
         idx = torch.randint(0, n_train, (bs,))
         x_b = X_train[idx]
         y_b = Y_train[idx]
@@ -235,6 +313,14 @@ def train_model(
 
     dt = _t.perf_counter() - t0
     final_val = val_losses[-1] if val_losses else round(last_train_loss, 6)
+
+    # Compute accuracy for classification tasks
+    val_accuracy = None
+    if is_class and accuracy_mode:
+        with torch.no_grad():
+            preds = net(X_val).argmax(dim=1)
+            val_accuracy = float((preds == Y_val).float().mean().item())
+
     tid = f"{model_id}:trained"
     put_model(tid, {
         "kind": "mlp_trained",
@@ -244,17 +330,19 @@ def train_model(
         "final_val_loss": final_val,
     })
 
-    return ToolResult(
-        success=True,
-        output={
-            "loss_curve": loss_curve,
-            "val_losses": val_losses,
-            "gradient_norms": gradient_norms,
-            "final_train_loss": round(last_train_loss, 6),
-            "final_val_loss": final_val,
-            "final_metric": final_val,
-            "total_time_sec": round(dt, 4),
-            "steps_per_sec": round(n_steps / max(dt, 1e-6), 2),
-            "trained_model_id": tid,
-        },
-    )
+    output = {
+        "loss_curve": loss_curve,
+        "val_losses": val_losses,
+        "gradient_norms": gradient_norms,
+        "final_train_loss": round(last_train_loss, 6),
+        "final_val_loss": final_val,
+        "final_metric": final_val,
+        "total_time_sec": round(dt, 4),
+        "steps_per_sec": round(n_steps / max(dt, 1e-6), 2),
+        "trained_model_id": tid,
+        "dataset_used": dataset_name,
+    }
+    if val_accuracy is not None:
+        output["val_accuracy"] = round(val_accuracy, 4)
+
+    return ToolResult(success=True, output=output)

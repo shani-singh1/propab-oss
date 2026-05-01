@@ -22,7 +22,12 @@ TOOL_SPEC = {
                  "description": "Hyperparameter grid. E.g. {'lr': [0.001, 0.01], 'batch_size': [16, 32]}"},
         "n_repeats": {"type": "int", "required": False, "default": 3},
         "maximize": {"type": "bool", "required": False, "default": False},
-        "n_steps": {"type": "int", "required": False, "default": 80},
+        "n_steps": {
+            "type": "int",
+            "required": False,
+            "default": 200,
+            "description": "Steps per config. Subtle effects need >=300; structural effects >=150; convergence >=500.",
+        },
         "task": {"type": "str", "required": False, "default": "classification"},
         "input_dim": {"type": "int", "required": False, "default": 16},
         "hidden_dims": {"type": "list[int]", "required": False, "default": [32, 16]},
@@ -102,7 +107,7 @@ def _real_train_score(
 
     n_train, n_val = 200, 60
     bs = max(8, min(bs, 128))
-    n_steps = max(20, min(int(n_steps), 200))
+    n_steps = max(20, min(int(n_steps), 1000))
 
     X_train = torch.randn(n_train, dims[0])
     X_val = torch.randn(n_val, dims[0])
@@ -214,7 +219,7 @@ def run_experiment_grid(
                 score, vl = _real_train_score(
                     cfg,
                     maximize=maximize,
-                    n_steps=max(30, min(int(n_steps), 150)),
+                    n_steps=max(30, min(int(n_steps), 1000)),
                     task=task,
                     input_dim=int(input_dim),
                     hidden_dims=hdims,

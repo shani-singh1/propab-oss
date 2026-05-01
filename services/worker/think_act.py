@@ -198,6 +198,20 @@ What should you do next? Rules:
 5. Good sequence: build_mlp → train_model → (train_model again with different config) →
    statistical_significance(results_a=val_losses_A, results_b=val_losses_B) → stop
 
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ADAPTIVE n_steps GUIDANCE — read before calling train_model or run_experiment_grid:
+• Subtle effects (activation functions, normalization placement, dropout): n_steps >= 300
+  These effects are real but small. Short runs will return inconclusive — NOT because
+  the hypothesis is false, but because the experiment wasn't long enough.
+• Structural effects (depth vs width, layer size, skip connections): n_steps >= 150
+  These produce larger effect sizes and are detectable in fewer steps.
+• Convergence speed / optimizer comparison: n_steps >= 500
+  You need to see the full curve to measure when each approach plateaus.
+• Default (if unsure): n_steps = 300
+• NEVER use n_steps < 100 for hypothesis testing — results will be underpowered.
+For real data: use dataset='mnist' for interpretable image classification experiments.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 Choose ONE action:
 - tool: call a specific tool
 - code: write custom Python code (describe what it computes)
