@@ -283,66 +283,79 @@ def train_model(
     val_losses: list[float] = []
     last_train_loss = 0.0
 
-    for step in range(n_steps):
-        idx = torch.randint(0, n_train, (bs,))
-        x_b = X_train[idx]
-        y_b = Y_train[idx]
+    try:
+        for step in range(n_steps):
+            idx = torch.randint(0, n_train, (bs,))
+            x_b = X_train[idx]
+            y_b = Y_train[idx]
 
-        opt.zero_grad()
-        logits = net(x_b)
-        loss = loss_fn(logits, y_b)
-        loss.backward()
-        gn = float(torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0))
-        opt.step()
-        if scheduler is not None:
-            scheduler.step()
+            opt.zero_grad()
+            logits = net(x_b)
+            loss = loss_fn(logits, y_b)
+            
+            # Robustness against NaN/Inf
+            if torch.isnan(loss) or torch.isinf(loss):
+                raise RuntimeError("Numerical result out of range (NaN or Inf loss). Try lowering learning_rate.")
+            
+            loss.backward()
+            gn = float(torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0))
+            opt.step()
+            if scheduler is not None:
+                scheduler.step()
 
-        last_train_loss = float(loss.detach())
+            last_train_loss = float(loss.detach())
 
-        if step % rec_every == 0:
+            if step % rec_every == 0:
+                with torch.no_grad():
+                    val_logits = net(X_val)
+                    val_loss = float(loss_fn(val_logits, Y_val).detach())
+                    if torch.isnan(torch.tensor(val_loss)) or torch.isinf(torch.tensor(val_loss)):
+                        raise RuntimeError("Numerical result out of range (NaN or Inf val_loss).")
+                val_losses.append(round(val_loss, 6))
+                loss_curve.append({
+                    "step": step,
+                    "train_loss": round(last_train_loss, 6),
+                    "val_loss": round(val_loss, 6),
+                })
+                gradient_norms.append({"step": step, "grad_norm": round(gn, 6)})
+
+        dt = _t.perf_counter() - t0
+        final_val = val_losses[-1] if val_losses else round(last_train_loss, 6)
+
+        # Compute accuracy for classification tasks
+        val_accuracy = None
+        if is_class and accuracy_mode:
             with torch.no_grad():
-                val_logits = net(X_val)
-                val_loss = float(loss_fn(val_logits, Y_val).detach())
-            val_losses.append(round(val_loss, 6))
-            loss_curve.append({
-                "step": step,
-                "train_loss": round(last_train_loss, 6),
-                "val_loss": round(val_loss, 6),
-            })
-            gradient_norms.append({"step": step, "grad_norm": round(gn, 6)})
+                preds = net(X_val).argmax(dim=1)
+                val_accuracy = float((preds == Y_val).float().mean().item())
 
-    dt = _t.perf_counter() - t0
-    final_val = val_losses[-1] if val_losses else round(last_train_loss, 6)
+        tid = f"{model_id}:trained"
+        put_model(tid, {
+            "kind": "mlp_trained",
+            "base": model_id,
+            "dims": dims,
+            "val_losses": val_losses,
+            "final_val_loss": final_val,
+        })
 
-    # Compute accuracy for classification tasks
-    val_accuracy = None
-    if is_class and accuracy_mode:
-        with torch.no_grad():
-            preds = net(X_val).argmax(dim=1)
-            val_accuracy = float((preds == Y_val).float().mean().item())
+        output = {
+            "loss_curve": loss_curve,
+            "val_losses": val_losses,
+            "gradient_norms": gradient_norms,
+            "final_train_loss": round(last_train_loss, 6),
+            "final_val_loss": final_val,
+            "final_metric": final_val,
+            "total_time_sec": round(dt, 4),
+            "steps_per_sec": round(n_steps / max(dt, 1e-6), 2),
+            "trained_model_id": tid,
+            "dataset_used": dataset_name,
+        }
+        if val_accuracy is not None:
+            output["val_accuracy"] = round(val_accuracy, 4)
 
-    tid = f"{model_id}:trained"
-    put_model(tid, {
-        "kind": "mlp_trained",
-        "base": model_id,
-        "dims": dims,
-        "val_losses": val_losses,
-        "final_val_loss": final_val,
-    })
-
-    output = {
-        "loss_curve": loss_curve,
-        "val_losses": val_losses,
-        "gradient_norms": gradient_norms,
-        "final_train_loss": round(last_train_loss, 6),
-        "final_val_loss": final_val,
-        "final_metric": final_val,
-        "total_time_sec": round(dt, 4),
-        "steps_per_sec": round(n_steps / max(dt, 1e-6), 2),
-        "trained_model_id": tid,
-        "dataset_used": dataset_name,
-    }
-    if val_accuracy is not None:
-        output["val_accuracy"] = round(val_accuracy, 4)
-
-    return ToolResult(success=True, output=output)
+        return ToolResult(success=True, output=output)
+    except Exception as exc:
+        return ToolResult(
+            success=False, 
+            error=ToolError(type="execution_error", message=f"Training failed: {str(exc)}. Try lowering learning rate or checking dimensions.")
+        )

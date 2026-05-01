@@ -146,14 +146,21 @@ def _run_opt(name: str, lr: float, n_steps: int, dims: list[int], task: str) -> 
         opt.zero_grad()
         out = net(X_train)
         loss = loss_fn(out, Y_train)
+        if torch.isnan(loss) or torch.isinf(loss):
+            curve.append(float("inf"))
+            val_losses.append(float("inf"))
+            return curve, val_losses, float("inf")
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0)
         opt.step()
         curve.append(float(loss.detach()))
         if step % max(1, n_steps // 20) == 0:
             with torch.no_grad():
                 vout = net(X_val)
-                vloss = loss_fn(vout, Y_val)
-                val_losses.append(float(vloss.detach()))
+                vloss = float(loss_fn(vout, Y_val).detach())
+                if torch.isnan(torch.tensor(vloss)) or torch.isinf(torch.tensor(vloss)):
+                    vloss = float("inf")
+                val_losses.append(vloss)
 
     return curve, val_losses, curve[-1]
 

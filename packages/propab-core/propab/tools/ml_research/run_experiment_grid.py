@@ -147,13 +147,18 @@ def _real_train_score(
     for step in range(n_steps):
         idx = torch.randint(0, n_train, (bs,))
         opt.zero_grad()
-        loss = loss_fn(net(X_train[idx]), Y_train[idx])
+        logits = net(X_train[idx])
+        loss = loss_fn(logits, Y_train[idx])
+        if torch.isnan(loss) or torch.isinf(loss):
+            return float("inf") if not maximize else float("-inf"), val_losses
         loss.backward()
         torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0)
         opt.step()
         if step % record_every == 0:
             with torch.no_grad():
                 vl = float(loss_fn(net(X_val), Y_val).detach())
+                if torch.isnan(torch.tensor(vl)) or torch.isinf(torch.tensor(vl)):
+                    vl = float("inf")
             val_losses.append(round(vl, 6))
 
     final_val = val_losses[-1] if val_losses else 1.0

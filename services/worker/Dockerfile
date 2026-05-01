@@ -18,4 +18,4 @@ COPY migrations ./migrations
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -e . --no-deps
 
-CMD ["celery", "-A", "services.worker.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+CMD ["celery", "-A", "services.worker.celery_app", "worker", "--loglevel=info", "--concurrency=8"]
