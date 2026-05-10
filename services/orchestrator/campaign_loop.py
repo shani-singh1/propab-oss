@@ -78,6 +78,36 @@ def _campaign_ledger_from_tree(tree: HypothesisTree) -> dict[str, Any]:
     }
 
 
+def build_campaign_synthesis_payload(campaign: ResearchCampaign) -> dict[str, Any]:
+    """Synthesis dict for paper generation — single source of truth with tree ledger."""
+    ledger = _campaign_ledger_from_tree(campaign.hypothesis_tree)
+    return {
+        "campaign_id": campaign.id,
+        "status": campaign.status,
+        "total_hypotheses_tested": campaign.total_hypotheses,
+        "total_confirmed": ledger["total_confirmed"],
+        "total_refuted": ledger["total_refuted"],
+        "total_inconclusive": ledger["total_inconclusive"],
+        "ledger": ledger,
+        "best_finding": campaign.best_finding,
+        "baseline_metric": campaign.baseline_metric,
+        "best_metric": campaign.best_metric,
+        "improvement_pct_over_baseline": round(campaign.improvement_pct * 100, 2),
+        "metric_name": campaign.breakthrough_criteria.metric_name,
+        "tree_summary": campaign.hypothesis_tree.summary(),
+        "confirmed_findings": [
+            {
+                "node_id": nid,
+                "text": campaign.hypothesis_tree.nodes[nid].text,
+                "evidence": campaign.hypothesis_tree.nodes[nid].evidence_summary,
+                "depth": campaign.hypothesis_tree.nodes[nid].depth,
+            }
+            for nid in campaign.hypothesis_tree.confirmed[:10]
+            if nid in campaign.hypothesis_tree.nodes
+        ],
+    }
+
+
 def _db_float(row: Mapping[str, Any], key: str, default: float = 0.0) -> float:
     """Read a float from a DB row without treating 0.0 as missing (unlike ``x or 0.0``)."""
     v = row.get(key)
@@ -1044,32 +1074,7 @@ async def run_campaign_loop(
         await db_save_campaign(campaign, session_factory)
 
         # Write a paper with whatever we found
-        ledger = _campaign_ledger_from_tree(campaign.hypothesis_tree)
-        synthesis = {
-            "campaign_id": campaign.id,
-            "status": campaign.status,
-            "total_hypotheses_tested": campaign.total_hypotheses,
-            "total_confirmed": ledger["total_confirmed"],
-            "total_refuted": ledger["total_refuted"],
-            "total_inconclusive": ledger["total_inconclusive"],
-            "ledger": ledger,
-            "best_finding": campaign.best_finding,
-            "baseline_metric": campaign.baseline_metric,
-            "best_metric": campaign.best_metric,
-            "improvement_pct_over_baseline": round(campaign.improvement_pct * 100, 2),
-            "metric_name": campaign.breakthrough_criteria.metric_name,
-            "tree_summary": campaign.hypothesis_tree.summary(),
-            "confirmed_findings": [
-                {
-                    "node_id": nid,
-                    "text": campaign.hypothesis_tree.nodes[nid].text,
-                    "evidence": campaign.hypothesis_tree.nodes[nid].evidence_summary,
-                    "depth": campaign.hypothesis_tree.nodes[nid].depth,
-                }
-                for nid in campaign.hypothesis_tree.confirmed[:10]
-                if nid in campaign.hypothesis_tree.nodes
-            ],
-        }
+        synthesis = build_campaign_synthesis_payload(campaign)
         await write_paper_minimal(
             session_id=campaign.id,
             session_factory=session_factory,

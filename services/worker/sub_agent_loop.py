@@ -27,6 +27,10 @@ from services.worker.domain_router import route_domain
 from services.worker.failure_classify import classify_exception
 from services.worker.peer_findings import poll_peer_findings
 from services.worker.sandbox import run_sandboxed_python
+from services.worker.sandbox_code_rewrite import (
+    looks_like_heavy_training_code,
+    rewrite_sandbox_code_after_timeout,
+)
 from services.worker.significance import (
     any_significance_tool_ran,
     check_significance,
@@ -688,19 +692,26 @@ async def run_sub_agent_async(payload: dict) -> dict:
             nonlocal sandbox_ok
             step_id = str(uuid4())
             t0 = time.perf_counter()
-            max_attempts = max(1, int(settings.sandbox_code_max_retries))
+            base_max = max(1, int(settings.sandbox_code_max_retries))
+            allow_rewrite = bool(getattr(settings, "sandbox_after_timeout_llm_rewrite", True)) and can_llm
+            hard_cap = base_max + (1 if allow_rewrite else 0)
+            code_cur = code
             parsed = None
             sandbox_out: dict = {}
+            inv = 0
+            rewrite_used = False
 
             await emitter.emit(
                 session_id=session_id,
                 event_type=EventType.CODE_GENERATED,
                 step=f"experiment.{hypothesis_id}.step_{step_index}",
-                payload={"code": code},
+                payload={"code": code_cur, "rewrite_after_timeout": False},
                 hypothesis_id=hypothesis_id,
             )
 
-            for attempt in range(max_attempts):
+            sandbox_ok = False
+            while inv < hard_cap:
+                inv += 1
                 await emitter.emit(
                     session_id=session_id,
                     event_type=EventType.CODE_SUBMITTED,
@@ -709,13 +720,14 @@ async def run_sub_agent_async(payload: dict) -> dict:
                         "memory_mb": settings.sandbox_memory_mb,
                         "timeout_sec": sandbox_timeout_sec,
                         "domain": domain,
-                        "attempt": attempt + 1,
-                        "max_attempts": max_attempts,
+                        "attempt": inv,
+                        "max_attempts": hard_cap,
+                        "llm_rewrite_slot": allow_rewrite,
                     },
                     hypothesis_id=hypothesis_id,
                 )
                 sandbox_out = await asyncio.to_thread(
-                    run_sandboxed_python, code,
+                    run_sandboxed_python, code_cur,
                     timeout_sec=sandbox_timeout_sec, memory_mb=settings.sandbox_memory_mb,
                 )
                 parsed = sandbox_out.get("parsed") if isinstance(sandbox_out, dict) else None
@@ -730,7 +742,12 @@ async def run_sub_agent_async(payload: dict) -> dict:
                         session_id=session_id,
                         event_type=EventType.CODE_RESULT,
                         step=f"experiment.{hypothesis_id}.step_{step_index}",
-                        payload={"stdout_json": parsed, "stdout": sandbox_out.get("stdout"), "attempt": attempt + 1},
+                        payload={
+                            "stdout_json": parsed,
+                            "stdout": sandbox_out.get("stdout"),
+                            "attempt": inv,
+                            "rewrite_after_timeout": rewrite_used,
+                        },
                         hypothesis_id=hypothesis_id,
                     )
                     break
@@ -744,16 +761,41 @@ async def run_sub_agent_async(payload: dict) -> dict:
                         "timeout_sec": sandbox_timeout_sec,
                         "memory_mb": settings.sandbox_memory_mb,
                         "error": sandbox_out,
-                        "retry": attempt + 1,
-                        "max_attempts": max_attempts,
+                        "attempt": inv,
+                        "max_attempts": hard_cap,
                     },
                     hypothesis_id=hypothesis_id,
                 )
-                if is_timeout:
-                    sandbox_ok = False
-                    break
-            else:
-                sandbox_ok = False
+                if (
+                    is_timeout
+                    and allow_rewrite
+                    and not rewrite_used
+                    and looks_like_heavy_training_code(code_cur)
+                ):
+                    new_code = await rewrite_sandbox_code_after_timeout(
+                        llm,
+                        session_id=session_id,
+                        hypothesis_id=hypothesis_id,
+                        code=code_cur,
+                        sandbox_timeout_sec=int(sandbox_timeout_sec),
+                        domain=str(domain or ""),
+                    )
+                    if new_code:
+                        code_cur = new_code
+                        rewrite_used = True
+                        await emitter.emit(
+                            session_id=session_id,
+                            event_type=EventType.CODE_GENERATED,
+                            step=f"experiment.{hypothesis_id}.step_{step_index}",
+                            payload={
+                                "code": code_cur,
+                                "rewrite_after_timeout": True,
+                                "after_attempt": inv,
+                            },
+                            hypothesis_id=hypothesis_id,
+                        )
+                        continue
+                break
 
             duration_ms = int((time.perf_counter() - t0) * 1000)
             await _insert_experiment_step_code(
@@ -761,7 +803,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
                 step_id=step_id,
                 hypothesis_id=hypothesis_id,
                 step_index=step_index,
-                code=code,
+                code=code_cur,
                 parsed_output=parsed,
                 sandbox_out=sandbox_out,
                 duration_ms=duration_ms,

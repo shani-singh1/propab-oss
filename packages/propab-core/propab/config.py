@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     sandbox_timeout_sec: int = 120
     sandbox_memory_mb: int = 512
     sandbox_code_max_retries: int = 3
+    # After a sandbox wall-timeout on heavy code, one LLM rewrite + one extra execution (if LLM available).
+    sandbox_after_timeout_llm_rewrite: bool = True
     literature_answer_similarity: float = 0.92
     # Think-act agent budgets
     agent_max_steps: int = 12
