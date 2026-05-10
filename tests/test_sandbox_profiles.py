@@ -5,6 +5,11 @@ def test_domain_default_deep_learning() -> None:
     assert effective_sandbox_timeout_sec("deep_learning", 30) == 300
 
 
+def test_global_can_raise_above_domain_table_floor() -> None:
+    """Settings.sandbox_timeout_sec should not be clamped down by the domain default."""
+    assert effective_sandbox_timeout_sec("deep_learning", 480) == 480
+
+
 def test_unknown_domain_uses_global() -> None:
     assert effective_sandbox_timeout_sec("chemistry", 45) == 45
 

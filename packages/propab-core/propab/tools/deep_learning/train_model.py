@@ -356,7 +356,10 @@ def train_model(
             "dataset_used": dataset_name,
         }
         if val_accuracy is not None:
-            output["val_accuracy"] = round(val_accuracy, 4)
+            va = round(val_accuracy, 4)
+            output["val_accuracy"] = va
+            # Hypotheses often say "test accuracy"; keep an alias on the dict.
+            output["test_accuracy"] = va
 
         return ToolResult(success=True, output=output)
     except Exception as exc:

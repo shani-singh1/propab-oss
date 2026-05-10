@@ -5,6 +5,7 @@ Poll campaign progress via GET /campaigns/{id} and session snapshot.
 Reads campaign_id from --state-file (written by start_campaign_v1.py) or --campaign-id.
 
 Example:
+  python scripts/monitor_campaign.py --log artifacts/campaign_v1_live.txt
   python scripts/monitor_campaign.py --state-file artifacts/campaign_v1_latest.json
   python scripts/monitor_campaign.py --campaign-id <uuid> --interval 60 --log artifacts/campaign_v1_live.txt
 
@@ -24,6 +25,9 @@ import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_DEFAULT_STATE_FILE = _REPO_ROOT / "artifacts" / "campaign_v1_latest.json"
 
 try:
     from services.worker.failure_classify import compact_failure_summary
@@ -54,12 +58,14 @@ def fmt_summary(blob: dict) -> str:
     s = blob.get("summary") or {}
     sess = blob.get("research_session") or {}
     tree = s.get("tree") or {}
+    imp_raw = s.get("improvement_pct")
+    imp_disp = "n/a" if imp_raw is None else f"{imp_raw}%"
     lines = [
         f"session_status={sess.get('status', '?')} stage={sess.get('stage', '?')}",
         f"campaign_status={s.get('status', '?')}",
         f"hypotheses_tested={s.get('total_hypotheses', 0)} confirmed={s.get('total_confirmed', 0)}",
         f"baseline_metric={s.get('baseline_metric')} best_metric={s.get('best_metric')} "
-        f"improvement_pct={s.get('improvement_pct')}% (threshold {s.get('breakthrough_threshold_pct')}%)",
+        f"improvement_pct={imp_disp} (threshold {s.get('breakthrough_threshold_pct')}%)",
         f"elapsed_sec={s.get('elapsed_sec')} remaining_sec={s.get('remaining_sec')}",
         f"tree_nodes={tree.get('total_nodes')} frontier={tree.get('frontier_size')} "
         f"max_depth={tree.get('max_depth')}",
@@ -158,8 +164,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--campaign-id", default="", help="Campaign UUID")
     p.add_argument(
         "--state-file",
-        default="",
-        help="JSON file with campaign_id (from start_campaign_v1.py)",
+        default=str(_DEFAULT_STATE_FILE),
+        help="JSON file with campaign_id (default: artifacts/campaign_v1_latest.json from start_campaign_v1.py)",
     )
     p.add_argument("--interval", type=float, default=30.0, help="Seconds between polls")
     p.add_argument("--once", action="store_true", help="Single snapshot then exit")
@@ -179,13 +185,27 @@ def main() -> None:
     api = args.api.rstrip("/")
 
     cid = args.campaign_id.strip()
-    if not cid and args.state_file:
+    if not cid:
         path = Path(args.state_file)
         if path.is_file():
-            with path.open(encoding="utf-8") as f:
-                cid = json.load(f).get("campaign_id") or ""
+            try:
+                raw = path.read_text(encoding="utf-8").strip()
+                if raw:
+                    cid = (json.loads(raw).get("campaign_id") or "").strip()
+            except (json.JSONDecodeError, OSError) as exc:
+                print(f"Cannot read campaign_id from {path}: {exc}", file=sys.stderr)
+                sys.exit(2)
+        elif path == _DEFAULT_STATE_FILE:
+            pass  # fall through to message below
+        else:
+            print(f"--state-file not found: {path}", file=sys.stderr)
+            sys.exit(2)
     if not cid:
-        print("Provide --campaign-id or --state-file with campaign_id.", file=sys.stderr)
+        print(
+            "No campaign_id: pass --campaign-id, or run scripts/start_campaign_v1.py first "
+            f"(writes {_DEFAULT_STATE_FILE}).",
+            file=sys.stderr,
+        )
         sys.exit(2)
 
     log_fh = open(args.log, "a", encoding="utf-8") if args.log else None

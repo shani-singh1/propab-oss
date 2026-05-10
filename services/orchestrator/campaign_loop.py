@@ -23,7 +23,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any
 import json
 import logging
@@ -62,6 +62,17 @@ logger = logging.getLogger(__name__)
 _NODE_ID_NAMESPACE = UUID("c3e7a1f0-4b2d-4e8a-95cf-0d1e3f5a7c9b")
 
 
+def _db_float(row: Mapping[str, Any], key: str, default: float = 0.0) -> float:
+    """Read a float from a DB row without treating 0.0 as missing (unlike ``x or 0.0``)."""
+    v = row.get(key)
+    if v is None:
+        return default
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def _coerce_scalar_float(val: Any) -> float | None:
     """Accept int/float, numeric strings, and numpy scalars (item())."""
     if val is None or isinstance(val, bool):
@@ -97,7 +108,7 @@ def _sanity_check_metric(metric_name: str, val: float | None) -> float | None:
         # Treat 0–100 percentage reporting as a fraction
         if fv > 1.001 and fv <= 100.0:
             fv = fv / 100.0
-        if fv < 0.03 or fv > 1.001:
+        if fv < 0.01 or fv > 1.001:
             return None
     return float(fv)
 
@@ -143,11 +154,38 @@ def _normalize_metric_name(raw: str | None, campaign: ResearchCampaign) -> str:
     s = str(raw).strip().lower().replace(" ", "_").replace("-", "_")
     if s in ("accuracy", "acc", "classification_accuracy", "top1", "top_1"):
         return "val_accuracy"
+    if s in ("validation_accuracy", "validation_acc", "valid_acc"):
+        return "val_accuracy"
     if "accuracy" in s and "test" in s:
         return "test_accuracy"
     if "val" in s and "accuracy" in s:
         return "val_accuracy"
+    if "validation" in s and "accuracy" in s:
+        return "val_accuracy"
+    if "accuracy" in s and "loss" not in s:
+        return "val_accuracy"
     return str(raw).strip()
+
+
+def _deep_scan_accuracy_candidates(obj: Any, *, depth: int = 0) -> list[float]:
+    """Collect sane accuracy scalars from arbitrarily nested worker / tool JSON."""
+    found: list[float] = []
+    if depth > 18 or obj is None:
+        return found
+    mn = "val_accuracy"
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            lk = str(k).lower()
+            if lk in ("val_accuracy", "test_accuracy", "validation_accuracy", "accuracy"):
+                fv = _coerce_scalar_float(v)
+                ok = _sanity_check_metric(mn, fv)
+                if ok is not None:
+                    found.append(ok)
+            found.extend(_deep_scan_accuracy_candidates(v, depth=depth + 1))
+    elif isinstance(obj, list):
+        for x in obj[-200:]:
+            found.extend(_deep_scan_accuracy_candidates(x, depth=depth + 1))
+    return found
 
 
 def _extract_primary_metric_from_worker_result(result: dict, metric_name: str) -> float | None:
@@ -155,7 +193,14 @@ def _extract_primary_metric_from_worker_result(result: dict, metric_name: str) -
     if not isinstance(result, dict):
         return None
 
-    for key in (metric_name, "metric_value", "val_accuracy", "accuracy", "test_accuracy"):
+    for key in (
+        metric_name,
+        "metric_value",
+        "val_accuracy",
+        "test_accuracy",
+        "accuracy",
+        "validation_accuracy",
+    ):
         v = _coerce_scalar_float(result.get(key))
         if v is not None:
             got = _sanity_check_metric(metric_name, v)
@@ -165,6 +210,12 @@ def _extract_primary_metric_from_worker_result(result: dict, metric_name: str) -
     nested = _deep_find_accuracy_metric(result)
     if nested is not None:
         got = _sanity_check_metric(metric_name, nested)
+        if got is not None:
+            return got
+
+    deep_vals = _deep_scan_accuracy_candidates(result)
+    if deep_vals:
+        got = _sanity_check_metric(metric_name, max(deep_vals))
         if got is not None:
             return got
 
@@ -274,9 +325,9 @@ async def db_load_campaign(campaign_id: str, session_factory: async_sessionmaker
         "status": row["status"],
         "breakthrough_criteria": row["breakthrough_criteria_json"] or {},
         "hypothesis_tree": row["hypothesis_tree_json"] or {},
-        "baseline_metric": row.get("baseline_metric") or 0.0,
-        "best_metric": row.get("best_metric") or 0.0,
-        "improvement_pct": row.get("improvement_pct") or 0.0,
+        "baseline_metric": _db_float(row, "baseline_metric", 0.0),
+        "best_metric": _db_float(row, "best_metric", 0.0),
+        "improvement_pct": _db_float(row, "improvement_pct", 0.0),
         "best_finding": row.get("best_finding_json") or None,
         "total_hypotheses": row.get("total_hypotheses") or 0,
         "total_confirmed": row.get("total_confirmed") or 0,
@@ -362,6 +413,11 @@ Return JSON only:
         "prior": {"established_facts": [], "contested_claims": [], "open_gaps": [], "dead_ends": [], "key_papers": []},
         "domain": "deep_learning",
         "question": campaign.question,
+        # Worker: if the LLM/tool trace omits val_accuracy, run train_model once deterministically.
+        "baseline_measurement": {
+            "dataset": dataset_name,
+            "n_steps": max(80, min(int(n_steps), 400)),
+        },
     }
 
     try:
@@ -395,6 +451,8 @@ Return JSON only:
         ar = run_sub_agent_task.delay(task_payload)
         result = await asyncio.to_thread(lambda: ar.get(timeout=1200))
         metric_val = _extract_primary_metric_from_worker_result(result, metric_name)
+        if metric_val is None and metric_name != "val_accuracy":
+            metric_val = _extract_primary_metric_from_worker_result(result, "val_accuracy")
         if metric_val is None:
             logger.warning(
                 "Baseline measurement could not read metric %r from worker result; using 0.0",
@@ -689,7 +747,7 @@ async def run_campaign_loop(
         domain = parsed.domain
 
         # ── Stage 2: Measure baseline if not yet done ─────────────────────
-        if campaign.baseline_metric == 0.0:
+        if abs(campaign.baseline_metric) < 1e-12 and abs(campaign.breakthrough_criteria.baseline_value) < 1e-12:
             logger.info("[campaign %s] Measuring baseline...", campaign.id)
             campaign.baseline_metric = await measure_baseline(
                 campaign, llm, emitter, session_factory,

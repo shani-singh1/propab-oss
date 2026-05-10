@@ -1,5 +1,6 @@
-"""
-Campaign model — the persistent, long-running research primitive.
+from __future__ import annotations
+
+"""Campaign model — the persistent, long-running research primitive.
 
 A campaign wraps the session loop with:
 - A HypothesisTree that grows as findings accumulate
@@ -7,8 +8,8 @@ A campaign wraps the session loop with:
 - A measured baseline (never assumed)
 - Checkpoint/resume via the research_campaigns DB table
 """
-from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -64,6 +65,8 @@ class BreakthroughCriteria:
         except (TypeError, ValueError):
             return False
         base = self.baseline_value
+        if abs(base) < 1e-12:
+            return False
         denom = max(abs(base), 1e-9)
         improvement = (metric_val - base) / denom
         if self.direction == "higher_is_better":
@@ -72,8 +75,10 @@ class BreakthroughCriteria:
             return improvement <= -self.improvement_threshold
 
     def improvement_pct(self, metric_value: float) -> float:
-        """Return signed % improvement over baseline (positive = better for higher_is_better)."""
+        """Return signed fractional improvement over baseline (positive = better for higher_is_better)."""
         base = self.baseline_value
+        if abs(base) < 1e-12:
+            return 0.0
         denom = max(abs(base), 1e-9)
         raw = (metric_value - base) / denom
         return raw if self.direction == "higher_is_better" else -raw
@@ -278,18 +283,47 @@ class ResearchCampaign:
         # Preserve elapsed wall-clock budget accounting when loading from DB.
         used = float(data.get("compute_seconds_used", 0) or 0)
         c._start_mono = time.monotonic() - max(0.0, used)
+        c._sync_baseline_fields()
         return c
 
+    def _sync_baseline_fields(self) -> None:
+        """Keep DB column breakthrough_criteria.baseline_value and baseline_metric aligned."""
+        bm = float(self.baseline_metric)
+        bv = float(self.breakthrough_criteria.baseline_value)
+        if bv > 1e-12 and abs(bm) < 1e-12:
+            self.baseline_metric = bv
+        elif bm > 1e-12 and abs(bv) < 1e-12:
+            self.breakthrough_criteria.baseline_value = bm
+
+    def _resolved_baseline_metric(self) -> float:
+        self._sync_baseline_fields()
+        bm, bv = float(self.baseline_metric), float(self.breakthrough_criteria.baseline_value)
+        if abs(bm) > 1e-12:
+            return bm
+        return bv
+
     def summary(self) -> dict[str, Any]:
+        self._sync_baseline_fields()
+        base_ok = (
+            abs(self.baseline_metric) > 1e-12 or abs(self.breakthrough_criteria.baseline_value) > 1e-12
+        )
+        imp_pct = None
+        if base_ok:
+            frac = (
+                self.improvement_pct
+                if math.isfinite(self.improvement_pct)
+                else 0.0
+            )
+            imp_pct = round(frac * 100, 2)
         return {
             "id": self.id,
             "question": self.question[:120],
             "status": self.status,
             "total_hypotheses": self.total_hypotheses,
             "total_confirmed": self.total_confirmed,
-            "baseline_metric": self.baseline_metric,
+            "baseline_metric": self._resolved_baseline_metric(),
             "best_metric": self.best_metric,
-            "improvement_pct": round(self.improvement_pct * 100, 2),
+            "improvement_pct": imp_pct,
             "elapsed_sec": round(self.elapsed_seconds(), 1),
             "remaining_sec": round(self.remaining_seconds(), 1),
             "tree": self.hypothesis_tree.summary(),

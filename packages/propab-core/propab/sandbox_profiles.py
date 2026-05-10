@@ -46,4 +46,4 @@ def effective_sandbox_timeout_sec(domain: str, global_default: int) -> int:
             return max(5, min(int(raw.strip()), 7200))
         except ValueError:
             pass
-    return max(5, min(base, 7200))
+    return max(5, min(max(base, g), 7200))
