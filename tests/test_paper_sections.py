@@ -31,6 +31,31 @@ def test_compile_references_empty_prior() -> None:
     assert "References" in tex
 
 
+def test_generate_prose_sections_nonempty_ledger_matches_confirmed_count() -> None:
+    """Abstract must report the same confirmed count as ledger (campaign paper path)."""
+
+    async def _run() -> None:
+        confirmed = [f"h{i}" for i in range(22)]
+        out = await generate_prose_sections(
+            llm=None,
+            session_id="00000000-0000-0000-0000-000000000003",
+            question="Short synthetic campaign question.",
+            prior={"key_papers": []},
+            synthesis={
+                "total_confirmed": 22,
+                "total_refuted": 2,
+                "total_inconclusive": 0,
+                "ledger": {"confirmed": confirmed, "refuted": ["r1", "r2"], "inconclusive": []},
+            },
+        )
+
+        assert "confirmed=22" in out["abstract"]
+        assert "refuted=2" in out["abstract"]
+        assert "No hypothesis met the platform confirmation bar" not in out["abstract"]
+
+    asyncio.run(_run())
+
+
 def test_generate_prose_sections_uses_total_confirmed_when_ledger_empty() -> None:
     async def _run() -> None:
         out = await generate_prose_sections(

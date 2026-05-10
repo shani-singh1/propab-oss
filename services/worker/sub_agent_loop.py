@@ -179,6 +179,8 @@ def _primary_metric_from_tool_output(out: dict[str, Any]) -> float | None:
         if not isinstance(val, (int, float)) or isinstance(val, bool):
             continue
         fv = float(val)
+        if any(s in pl for s in _ACCURACY_KEY_SUBSTR) and fv > 1.01 and fv <= 100.0:
+            fv = fv / 100.0
         if fv < 0.0 or fv > 1.0:
             continue
         if any(s in pl for s in _ACCURACY_KEY_SUBSTR):
@@ -454,6 +456,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
     peer_findings: list[dict] = payload.get("peer_findings") or []
     learned_from: str | None = payload.get("learned_from") or None
     baseline = payload.get("baseline") if isinstance(payload.get("baseline"), dict) else {}
+    baseline_lit_compare_safe = bool(baseline.get("lit_compare_safe", False))
     baseline_value = (
         float(baseline.get("metric_value"))
         if isinstance(baseline.get("metric_value"), (int, float))
@@ -568,21 +571,45 @@ async def run_sub_agent_async(payload: dict) -> dict:
         successful_tool_outputs: list[dict[str, Any]] = []
         successful_tool_names: list[str] = []
         step_counter = 0
+        max_tc = max(0, int(getattr(settings, "agent_max_tool_calls", 0) or 0))
+        tool_calls_done = 0
 
         # ── Shared tool execution helper (inline, no external function needed) ─
 
         async def run_tool_step(tool_name: str, params: dict, step_index: int) -> bool:
-            nonlocal any_tool_success, last_tool_name, last_tool_step_index
+            nonlocal any_tool_success, last_tool_name, last_tool_step_index, tool_calls_done
             last_tool_name = tool_name
             last_tool_step_index = step_index
             step_id = str(uuid4())
             t0 = time.perf_counter()
 
+            if max_tc > 0 and tool_calls_done >= max_tc:
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.TOOL_ERROR,
+                    step=f"experiment.{hypothesis_id}.step_{step_index}",
+                    payload={
+                        "tool": tool_name,
+                        "failure_kind": "agent_max_tool_calls",
+                        "error": {
+                            "type": "budget_exceeded",
+                            "detail": (
+                                f"agent_max_tool_calls={max_tc} exhausted; refusing further tools."
+                            ),
+                        },
+                    },
+                    hypothesis_id=hypothesis_id,
+                )
+                return False
+            tool_calls_done += 1
+
             call_params = dict(params or {})
             if (
                 tool_name == "literature_baseline_compare"
                 and call_params.get("baseline_value") is None
+                and baseline_lit_compare_safe
                 and baseline_value is not None
+                and abs(float(baseline_value)) >= 1e-12
             ):
                 call_params["baseline_value"] = float(baseline_value)
 
@@ -787,6 +814,20 @@ async def run_sub_agent_async(payload: dict) -> dict:
 
             # Think-act loop
             while not should_stop(agent_ctx):
+                if max_tc > 0 and tool_calls_done >= max_tc:
+                    logger.info(
+                        "Agent %s hit agent_max_tool_calls=%s before next think step.",
+                        hypothesis_id,
+                        max_tc,
+                    )
+                    await emitter.emit(
+                        session_id=session_id,
+                        event_type=EventType.AGENT_STEP_COMPLETED,
+                        step=f"experiment.{hypothesis_id}.budget",
+                        payload={"reason": "agent_max_tool_calls", "limit": max_tc},
+                        hypothesis_id=hypothesis_id,
+                    )
+                    break
                 # Poll peer channel non-blocking — inject new findings into context
                 try:
                     new_peers = await poll_peer_findings(redis, hypothesis_id=hypothesis_id)

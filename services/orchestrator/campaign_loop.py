@@ -657,12 +657,13 @@ async def _iter_campaign_batch_results(
                 "metric_name": campaign.breakthrough_criteria.metric_name,
                 "metric_value": campaign.baseline_metric,
                 "description": "Campaign baseline measured at start.",
+                "lit_compare_safe": abs(float(campaign.baseline_metric)) >= 1e-12,
             },
             "prior": prior_dict,
             "domain": domain,
             "question": campaign.question,
         })
-        pending.append({"ar": ar, "nid": node.id, "db_hid": db_hid})
+        pending.append({"ar": ar, "nid": node.id, "db_hid": db_hid, "enq_mono": time.monotonic()})
 
     # Wait long enough for parallel Celery sub-agents (MNIST runs can be 15–40+ min each).
     remaining = max(60.0, float(campaign.remaining_seconds()))
@@ -671,6 +672,8 @@ async def _iter_campaign_batch_results(
         max(1800.0, float(len(batch)) * 2700.0),
     )
     completed_ids: set[str] = set()
+    last_progress_mono = time.monotonic()
+    evict_after = max(0, int(getattr(settings, "campaign_frontier_evict_idle_sec", 0)))
 
     _redis = None
     try:
@@ -703,6 +706,7 @@ async def _iter_campaign_batch_results(
                 result.get("campaign_node_id") or nid
             )
             completed_ids.add(nid)
+            last_progress_mono = time.monotonic()
             yield result
 
             still_running_db = [
@@ -714,6 +718,64 @@ async def _iter_campaign_batch_results(
                 await publish_peer_finding(
                     _redis, target_hypothesis_ids=still_running_db, finding=finding_payload
                 )
+
+        stalled = pending and evict_after > 0 and (time.monotonic() - last_progress_mono) >= evict_after
+        if stalled:
+            idle_candidates = []
+            for item in pending:
+                ar_live = item["ar"]
+                rdy_live = await asyncio.to_thread(ar_live.ready)
+                if not rdy_live:
+                    idle_candidates.append(item)
+            idle_candidates.sort(key=lambda x: float(x.get("enq_mono", time.monotonic())))
+            if idle_candidates:
+                victim = idle_candidates[0]
+                pending.remove(victim)
+                try:
+                    await asyncio.to_thread(
+                        lambda ar_=victim["ar"]: ar_.revoke(terminate=True)
+                    )
+                except Exception as exc:
+                    logger.warning("[campaign %s] Celery revoke failed for %s: %s", campaign.id, victim["nid"], exc)
+                ev_note = (
+                    f"Frontier idle exceeded {evict_after}s — sub-agent revoked (timeout_eviction). "
+                    "Another hypothesis was blocking the scheduled batch."
+                )
+                eviction_result = {
+                    "hypothesis_id": victim["db_hid"],
+                    "campaign_node_id": victim["nid"],
+                    "verdict": "inconclusive",
+                    "confidence": 0.0,
+                    "evidence_summary": ev_note,
+                    "key_finding": None,
+                    "metric_value": None,
+                    "failure_reason": "timeout_eviction",
+                }
+                completed_ids.add(victim["nid"])
+                last_progress_mono = time.monotonic()
+                await emitter.emit(
+                    session_id=campaign.id,
+                    event_type=EventType.CAMPAIGN_SUB_AGENT_EVICTED,
+                    step="campaign.sub_agent_evict",
+                    payload={
+                        "node_id": victim["nid"],
+                        "idle_sec_threshold": evict_after,
+                        "reason": ev_note,
+                    },
+                    hypothesis_id=victim["db_hid"],
+                )
+                yield eviction_result
+
+                still_running_db = [
+                    hid for hid, tree_id in zip(all_db_hids, all_node_ids, strict=True)
+                    if tree_id not in completed_ids
+                ]
+                if still_running_db and _redis is not None:
+                    finding_payload = build_peer_finding_payload(eviction_result)
+                    await publish_peer_finding(
+                        _redis, target_hypothesis_ids=still_running_db, finding=finding_payload
+                    )
+                continue
 
         if not progressed and pending:
             await asyncio.sleep(0.15)

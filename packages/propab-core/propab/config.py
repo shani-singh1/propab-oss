@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     agent_max_steps: int = 12
     agent_min_steps: int = 4
     agent_max_seconds: int = 600
+    # Hard cap on tool invocations per sub-agent hypothesis (0 = unlimited). Independent of agent_max_seconds.
+    agent_max_tool_calls: int = 40
     # httpx read/connect timeout for OpenAI / external LLM HTTP (seconds)
     llm_http_timeout_sec: float = 180.0
     max_code_steps_per_hypothesis: int = 1
@@ -71,6 +73,8 @@ class Settings(BaseSettings):
     campaign_expand_on_confirmed: bool = True       # expand tree on confirmed findings
     campaign_expand_on_refuted: bool = True         # generate alternatives on refuted
     campaign_max_tree_depth: int = 8                # max hypothesis depth in tree
+    # If a batch has unfinished Celery sub-agents and no completions for this many seconds, revoke the oldest.
+    campaign_frontier_evict_idle_sec: int = 900       # 0 disables eviction
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -165,6 +169,8 @@ def _apply_profile(s: Settings) -> None:
             "campaign_breakthrough_threshold": 0.05,
             "campaign_min_confidence": 0.85,
             "campaign_min_replications": 3,
+            "campaign_frontier_evict_idle_sec": 600,
+            "agent_max_tool_calls": 48,
         },
     }
     selected = profiles.get(profile, profiles["dev"])

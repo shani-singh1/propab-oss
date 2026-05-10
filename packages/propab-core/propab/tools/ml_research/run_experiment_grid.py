@@ -304,8 +304,10 @@ def run_experiment_grid(
                     error=ToolError(
                         type="zero_variance",
                         message=(
-                            "All grid replicates produced bitwise-identical scores — likely stale/cached execution, "
-                            "not independent runs. Bump seeds or shrink the grid before testing significance."
+                            "**Suspected cache collision** — all grid replicates are bitwise-identical (zero real "
+                            "variance), not independent runs. Try different hyperparameters, seeds, or "
+                            "`n_repeats` before running statistical_significance; retrying the same grid will "
+                            "keep failing."
                         ),
                     ),
                 )

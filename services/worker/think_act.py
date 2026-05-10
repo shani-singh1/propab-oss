@@ -212,6 +212,8 @@ What should you do next? Rules:
 
 SANDBOX AND AGENT WALL CLOCK (critical for train_model / run_experiment_grid / any code step):
 • Each sandbox run is capped at sandbox_timeout_sec={sandbox_timeout_sec} seconds (Docker, no GPU).
+• Sandbox code receives injected helpers: SANDBOX_WALL_SEC (seconds budget) and SANDBOX_REMAINING_SEC().
+  If generating custom loops, exit early when SANDBOX_REMAINING_SEC() drops below ~30 seconds.
 • This entire hypothesis agent may run at most ~agent_wall_budget_sec={agent_wall_budget_sec} seconds wall-clock total.
 • Choose conservative n_steps / small grids so experiments finish inside the sandbox ceiling; oversized runs only produce timeouts.
 

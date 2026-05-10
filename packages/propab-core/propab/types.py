@@ -94,6 +94,7 @@ class EventType(str, Enum):
     CAMPAIGN_COMPLETED = "campaign.completed"
     # Baseline measurement
     BASELINE_MEASURED = "campaign.baseline_measured"
+    CAMPAIGN_SUB_AGENT_EVICTED = "campaign.sub_agent_evicted"
     # Hypothesis tree
     HYPO_TREE_EXPANDED = "hypothesis.tree_expanded"
     HYPO_TREE_PRUNED = "hypothesis.tree_pruned"

@@ -8,6 +8,19 @@ from typing import Any
 import docker
 
 
+def _sandbox_prepended_budget(timeout_sec: int) -> str:
+    """Expose wall budget inside user code so training loops can early-exit before Docker SIGKILL."""
+    wall = max(15, int(timeout_sec))
+    return (
+        "# propab sandbox: bounded wall-clock budget (leave these names for custom training code)\n"
+        "import time as _propab_sandbox_time\n"
+        f"SANDBOX_WALL_SEC = {wall}\n"
+        "_PROPAB_T0_MONO = _propab_sandbox_time.monotonic()\n"
+        "def SANDBOX_REMAINING_SEC() -> float:\n"
+        "    return SANDBOX_WALL_SEC - (_propab_sandbox_time.monotonic() - _PROPAB_T0_MONO)\n\n"
+    )
+
+
 def run_sandboxed_python(
     code: str,
     *,
@@ -18,9 +31,12 @@ def run_sandboxed_python(
     """
     Run Python in an isolated Docker container (no network), per ARCHITECTURE §8.4.
     Code should print JSON to stdout as the last line.
+
+    Prepends SANDBOX_WALL_SEC and SANDBOX_REMAINING_SEC() helpers so codegen can throttle work.
     """
     client = docker.from_env()
-    payload = base64.b64encode(code.encode("utf-8")).decode("ascii")
+    full_src = _sandbox_prepended_budget(timeout_sec) + code
+    payload = base64.b64encode(full_src.encode("utf-8")).decode("ascii")
     inner = (
         "import base64,sys,json;"
         f"exec(compile(base64.b64decode('{payload}').decode('utf-8'), '<sandbox>', 'exec'))"
