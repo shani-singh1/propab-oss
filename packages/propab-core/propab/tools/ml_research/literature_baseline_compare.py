@@ -12,7 +12,11 @@ TOOL_SPEC = {
     "description": "Compare repeated experimental results to a literature baseline (t-test vs baseline mean). Produces p_value and effect_size.",
     "params": {
         "our_results": {"type": "list[float]", "required": True},
-        "baseline_value": {"type": "float", "required": True},
+        "baseline_value": {
+            "type": "float",
+            "required": False,
+            "description": "Literature/population baseline mean; required for a valid comparison.",
+        },
         "baseline_std": {"type": "float", "required": False},
         "metric_direction": {"type": "str", "required": False, "default": "lower_is_better"},
         "claim": {"type": "str", "required": False},
@@ -38,7 +42,7 @@ TOOL_SPEC = {
 
 def literature_baseline_compare(
     our_results: list[float],
-    baseline_value: float,
+    baseline_value: float | None = None,
     baseline_std: float | None = None,
     metric_direction: str = "lower_is_better",
     claim: str | None = None,
@@ -49,6 +53,17 @@ def literature_baseline_compare(
             return ToolResult(
                 success=False,
                 error=ToolError(type="validation_error", message="Need at least two values in our_results."),
+            )
+        if baseline_value is None:
+            return ToolResult(
+                success=False,
+                error=ToolError(
+                    type="validation_error",
+                    message=(
+                        "baseline_value is required (literature/population baseline mean). "
+                        "Pass baseline_value explicitly or use baseline from campaign context."
+                    ),
+                ),
             )
         b = float(baseline_value)
         md = str(metric_direction).lower()

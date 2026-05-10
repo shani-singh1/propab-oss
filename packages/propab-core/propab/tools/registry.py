@@ -26,6 +26,7 @@ _PARAM_SYNONYMS: dict[str, list[str]] = {
     "weight_decay": ["l2_reg", "l2", "wd", "regularization"],
     "our_results": ["results", "our_values", "experiment_results"],
     "baseline_results": ["baseline_values", "baseline", "reference_results"],
+    "baseline_value": ["literature_mean", "baseline_mean", "population_mean", "reference_value"],
     "ci": ["confidence", "confidence_level", "alpha_level", "conf_level", "confidence_percent"],
     "n_bootstrap": ["n_boot", "bootstrap_samples", "num_bootstrap"],
     "experiment_code": ["code", "experiment", "script"],

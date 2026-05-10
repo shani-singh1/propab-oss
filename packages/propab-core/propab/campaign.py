@@ -64,6 +64,14 @@ class BreakthroughCriteria:
             metric_val = float(metric_val)
         except (TypeError, ValueError):
             return False
+        # Near-perfect reported accuracy from a sandbox MLP is usually a instrumentation bug —
+        # do not declare campaign breakthrough on it.
+        if (
+            self.direction == "higher_is_better"
+            and "accuracy" in (self.metric_name or "").lower()
+            and metric_val >= 0.999
+        ):
+            return False
         base = self.baseline_value
         if abs(base) < 1e-12:
             return False
@@ -205,6 +213,13 @@ class ResearchCampaign:
         try:
             metric_val = float(metric_val)
         except (TypeError, ValueError):
+            return False
+
+        if (
+            crit.direction == "higher_is_better"
+            and "accuracy" in (crit.metric_name or "").lower()
+            and metric_val >= 0.999
+        ):
             return False
 
         is_better = (

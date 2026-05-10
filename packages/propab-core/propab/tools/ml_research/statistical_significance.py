@@ -42,6 +42,22 @@ def _cohens_d(a: np.ndarray, b: np.ndarray) -> float:
     return float((np.mean(a) - np.mean(b)) / pooled)
 
 
+def _has_zero_within_group_variance(a: np.ndarray, b: np.ndarray) -> bool:
+    """True when a group is constant (including bitwise-identical cached replicates)."""
+    if a.size < 2 or b.size < 2:
+        return False
+    sa = float(np.std(a, ddof=1))
+    sb = float(np.std(b, ddof=1))
+    identical_a = bool(np.all(a == a[0]))
+    identical_b = bool(np.all(b == b[0]))
+    return (
+        sa < 1e-14
+        and sb < 1e-14
+        and identical_a
+        and identical_b
+    )
+
+
 def _effect_label(d: float) -> str:
     ad = abs(d)
     if ad < 0.2:
@@ -98,6 +114,18 @@ def statistical_significance(
         b = np.array([float(x) for x in results_b], dtype=np.float64)
         if len(a) < 2 or len(b) < 2:
             return ToolResult(success=False, error=ToolError(type="validation_error", message="Need at least 2 samples per group."))
+        if _has_zero_within_group_variance(a, b):
+            return ToolResult(
+                success=False,
+                error=ToolError(
+                    type="zero_variance",
+                    message=(
+                        "Both samples are bitwise-constant across replicates (zero within-group variance). "
+                        "This usually means memoized/stale measurements, not independent runs — "
+                        "refuse fake p-values; rerun experiments with distinct seeds/configs."
+                    ),
+                ),
+            )
         alt = alternative if alternative in ("two_sided", "greater", "less") else "two_sided"
         scipy_alt = "two-sided" if alt == "two_sided" else alt
         test_l = str(test).lower()
@@ -118,7 +146,22 @@ def statistical_significance(
                 r = stats.mannwhitneyu(a, b, alternative=scipy_alt)
                 used = "mannwhitneyu"
             else:
-                r = stats.wilcoxon(a, b, alternative=scipy_alt)
+                try:
+                    r = stats.wilcoxon(a, b, alternative=scipy_alt)
+                except ValueError as exc:
+                    msg = str(exc).lower()
+                    if "zero" in msg or "identical" in msg:
+                        return ToolResult(
+                            success=False,
+                            error=ToolError(
+                                type="zero_variance",
+                                message=(
+                                    "Wilcoxon unavailable: paired differences are all zero "
+                                    "(identical repeats / cache collision suspected)."
+                                ),
+                            ),
+                        )
+                    raise
             stat, p = float(r.statistic), float(r.pvalue)
         elif test_l == "bootstrap":
             rng = np.random.default_rng(42)

@@ -31,6 +31,28 @@ def test_compile_references_empty_prior() -> None:
     assert "References" in tex
 
 
+def test_generate_prose_sections_uses_total_confirmed_when_ledger_empty() -> None:
+    async def _run() -> None:
+        out = await generate_prose_sections(
+            llm=None,
+            session_id="00000000-0000-0000-0000-000000000002",
+            question="Campaign question.",
+            prior={"key_papers": []},
+            synthesis={
+                "total_confirmed": 3,
+                "total_refuted": 1,
+                "total_inconclusive": 2,
+                "ledger": {},
+            },
+        )
+
+        assert "confirmed=3" in out["abstract"]
+        assert "refuted=1" in out["abstract"]
+        assert "inconclusive=2" in out["abstract"]
+
+    asyncio.run(_run())
+
+
 def test_generate_prose_sections_no_llm_honest_abstract_when_zero_confirmed() -> None:
     async def _run() -> None:
         out = await generate_prose_sections(

@@ -62,6 +62,22 @@ logger = logging.getLogger(__name__)
 _NODE_ID_NAMESPACE = UUID("c3e7a1f0-4b2d-4e8a-95cf-0d1e3f5a7c9b")
 
 
+def _campaign_ledger_from_tree(tree: HypothesisTree) -> dict[str, Any]:
+    """Ledger shape aligned with AccumulatedLedger.summary() for paper_sections / gates."""
+    confirmed = list(tree.confirmed)
+    refuted = [nid for nid, n in tree.nodes.items() if n.verdict == "refuted"]
+    inconclusive = [nid for nid, n in tree.nodes.items() if n.verdict == "inconclusive"]
+    return {
+        "confirmed": confirmed,
+        "refuted": refuted,
+        "inconclusive": inconclusive,
+        "total_confirmed": len(confirmed),
+        "total_refuted": len(refuted),
+        "total_inconclusive": len(inconclusive),
+        "rounds_completed": 0,
+    }
+
+
 def _db_float(row: Mapping[str, Any], key: str, default: float = 0.0) -> float:
     """Read a float from a DB row without treating 0.0 as missing (unlike ``x or 0.0``)."""
     v = row.get(key)
@@ -306,6 +322,42 @@ async def db_save_campaign(campaign: ResearchCampaign, session_factory: async_se
                 "compute_budget_seconds": campaign.compute_budget_seconds,
                 "started_at": _parse_started_at(campaign.started_at),
             },
+        )
+        await db.commit()
+
+
+async def db_mark_research_session_completed(
+    session_id: str,
+    session_factory: async_sessionmaker,
+) -> None:
+    """
+    Campaign shares ``research_sessions.id`` with the orchestrator session row.
+    Keeps GET /campaigns and monitors aligned with the multi-round research loop.
+    """
+    async with session_factory() as db:
+        await db.execute(
+            text("""
+                UPDATE research_sessions
+                SET status = 'completed', stage = 'completed', completed_at = NOW()
+                WHERE id = CAST(:id AS uuid)
+            """),
+            {"id": session_id},
+        )
+        await db.commit()
+
+
+async def db_mark_research_session_failed(
+    session_id: str,
+    session_factory: async_sessionmaker,
+) -> None:
+    async with session_factory() as db:
+        await db.execute(
+            text("""
+                UPDATE research_sessions
+                SET status = 'failed', stage = COALESCE(stage, 'campaign'), completed_at = NOW()
+                WHERE id = CAST(:id AS uuid)
+            """),
+            {"id": session_id},
         )
         await db.commit()
 
@@ -930,11 +982,15 @@ async def run_campaign_loop(
         await db_save_campaign(campaign, session_factory)
 
         # Write a paper with whatever we found
+        ledger = _campaign_ledger_from_tree(campaign.hypothesis_tree)
         synthesis = {
             "campaign_id": campaign.id,
             "status": campaign.status,
             "total_hypotheses_tested": campaign.total_hypotheses,
-            "total_confirmed": campaign.total_confirmed,
+            "total_confirmed": ledger["total_confirmed"],
+            "total_refuted": ledger["total_refuted"],
+            "total_inconclusive": ledger["total_inconclusive"],
+            "ledger": ledger,
             "best_finding": campaign.best_finding,
             "baseline_metric": campaign.baseline_metric,
             "best_metric": campaign.best_metric,
@@ -968,9 +1024,14 @@ async def run_campaign_loop(
             step="campaign.complete",
             payload=campaign.summary(),
         )
+        await db_mark_research_session_completed(campaign.id, session_factory)
 
     except Exception as exc:
         logger.exception("[campaign %s] Fatal error: %s", campaign.id, exc)
+        try:
+            await db_mark_research_session_failed(campaign.id, session_factory)
+        except Exception:
+            pass
         try:
             await db_save_campaign(campaign, session_factory)
         except Exception:

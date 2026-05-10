@@ -210,6 +210,11 @@ What should you do next? Rules:
 8. If you are about to write code to train/evaluate/compare models, use tools instead:
    train_model, run_experiment_grid, compare_optimizers, statistical_significance.
 
+SANDBOX AND AGENT WALL CLOCK (critical for train_model / run_experiment_grid / any code step):
+• Each sandbox run is capped at sandbox_timeout_sec={sandbox_timeout_sec} seconds (Docker, no GPU).
+• This entire hypothesis agent may run at most ~agent_wall_budget_sec={agent_wall_budget_sec} seconds wall-clock total.
+• Choose conservative n_steps / small grids so experiments finish inside the sandbox ceiling; oversized runs only produce timeouts.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ADAPTIVE n_steps GUIDANCE — read before calling train_model or run_experiment_grid:
 • Subtle effects (activation functions, normalization placement, dropout): n_steps >= 300
@@ -323,6 +328,9 @@ async def decide_next_action(
     llm: LLMClient,
     session_id: str,
     hypothesis_id: str,
+    *,
+    sandbox_timeout_sec: int = 120,
+    agent_wall_budget_sec: int = 600,
 ) -> AgentAction:
     """
     Core think step. LLM observes all context including extracted numeric values
@@ -357,6 +365,8 @@ async def decide_next_action(
         used_code_steps=_count_code_steps(context.tool_names_run),
         n_steps_default=int(getattr(settings, "n_steps_default", 150)),
         classification_default_dataset=str(getattr(settings, "classification_default_dataset", "mnist")),
+        sandbox_timeout_sec=int(sandbox_timeout_sec),
+        agent_wall_budget_sec=int(agent_wall_budget_sec),
     )
 
     raw = await llm.call(

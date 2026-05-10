@@ -298,6 +298,18 @@ def run_experiment_grid(
                 rep_scores.append(score)
                 rep_val_losses.extend(vl[-3:] if len(vl) >= 3 else vl)
 
+            if n_rep > 1 and len(rep_scores) == n_rep and float(np.ptp(rep_scores)) < 1e-12:
+                return ToolResult(
+                    success=False,
+                    error=ToolError(
+                        type="zero_variance",
+                        message=(
+                            "All grid replicates produced bitwise-identical scores — likely stale/cached execution, "
+                            "not independent runs. Bump seeds or shrink the grid before testing significance."
+                        ),
+                    ),
+                )
+
             mean_s = float(np.mean(rep_scores))
             std_s = float(np.std(rep_scores, ddof=1)) if n_rep > 1 else 0.0
             results.append({

@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from propab.config import settings
+from propab.tools.types import ToolError, ToolResult
 from propab.paper_gate import SUBSTANTIVE_TOOL_NAMES
 from propab.sandbox_profiles import effective_sandbox_timeout_sec
 from propab.db import create_engine, create_redis, create_session_factory
@@ -577,15 +578,28 @@ async def run_sub_agent_async(payload: dict) -> dict:
             step_id = str(uuid4())
             t0 = time.perf_counter()
 
+            call_params = dict(params or {})
+            if (
+                tool_name == "literature_baseline_compare"
+                and call_params.get("baseline_value") is None
+                and baseline_value is not None
+            ):
+                call_params["baseline_value"] = float(baseline_value)
+
             await emitter.emit(
                 session_id=session_id,
                 event_type=EventType.TOOL_CALLED,
                 step=f"experiment.{hypothesis_id}.step_{step_index}",
-                payload={"tool": tool_name, "params": params},
+                payload={"tool": tool_name, "params": call_params},
                 hypothesis_id=hypothesis_id,
             )
-
-            result = registry.call(tool_name, params)
+            try:
+                result = registry.call(tool_name, call_params)
+            except TypeError as exc:
+                result = ToolResult(
+                    success=False,
+                    error=ToolError(type="validation_error", message=str(exc)),
+                )
             duration_ms = int((time.perf_counter() - t0) * 1000)
 
             if result.success:
@@ -611,7 +625,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
                 err_d = result.error.to_dict() if result.error else {}
                 fk = "tool_execution_error"
                 et = str((err_d or {}).get("type") or "")
-                if et in ("validation_error", "missing_dependency", "auto_build_error"):
+                if et in ("validation_error", "missing_dependency", "auto_build_error", "zero_variance"):
                     fk = et
                 elif "timeout" in str((err_d or {}).get("message", "")).lower():
                     fk = "tool_timeout_or_resource"
@@ -636,7 +650,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
                 hypothesis_id=hypothesis_id,
                 step_index=step_index,
                 tool_name=tool_name,
-                params=params,
+                params=call_params,
                 result_output=result.output,
                 result_error=result.error.to_dict() if result.error else None,
                 duration_ms=duration_ms,
@@ -708,6 +722,9 @@ async def run_sub_agent_async(payload: dict) -> dict:
                     },
                     hypothesis_id=hypothesis_id,
                 )
+                if is_timeout:
+                    sandbox_ok = False
+                    break
             else:
                 sandbox_ok = False
 
@@ -787,6 +804,8 @@ async def run_sub_agent_async(payload: dict) -> dict:
                     llm=llm,
                     session_id=session_id,
                     hypothesis_id=hypothesis_id,
+                    sandbox_timeout_sec=int(sandbox_timeout_sec),
+                    agent_wall_budget_sec=int(settings.agent_max_seconds),
                 )
 
                 await emitter.emit(

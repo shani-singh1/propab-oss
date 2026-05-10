@@ -43,11 +43,32 @@ def render_paper_tex(
 
 
 def _confirmed_hypothesis_count(synthesis: dict[str, Any] | None) -> int:
-    ledger = (synthesis or {}).get("ledger")
-    if not isinstance(ledger, dict):
-        return 0
-    confirmed = ledger.get("confirmed")
-    return len(confirmed) if isinstance(confirmed, list) else 0
+    syn = synthesis or {}
+    ledger = syn.get("ledger")
+    if isinstance(ledger, dict):
+        confirmed = ledger.get("confirmed")
+        if isinstance(confirmed, list) and confirmed:
+            return len(confirmed)
+    tc = syn.get("total_confirmed")
+    if isinstance(tc, int) and tc > 0:
+        return tc
+    return 0
+
+
+def _ledger_counts(synthesis: dict[str, Any]) -> tuple[int, int, int]:
+    """Confirmed/refuted/inconclusive counts: prefer synthesis['ledger'], else top-level totals."""
+    syn = synthesis or {}
+    ledger = syn.get("ledger")
+    if isinstance(ledger, dict):
+        n_c = len(ledger["confirmed"]) if isinstance(ledger.get("confirmed"), list) else 0
+        n_r = len(ledger["refuted"]) if isinstance(ledger.get("refuted"), list) else 0
+        n_i = len(ledger["inconclusive"]) if isinstance(ledger.get("inconclusive"), list) else 0
+        if n_c or n_r or n_i:
+            return n_c, n_r, n_i
+    n_c = int(syn["total_confirmed"]) if isinstance(syn.get("total_confirmed"), int) else 0
+    n_r = int(syn["total_refuted"]) if isinstance(syn.get("total_refuted"), int) else 0
+    n_i = int(syn["total_inconclusive"]) if isinstance(syn.get("total_inconclusive"), int) else 0
+    return n_c, n_r, n_i
 
 
 def _fallback_from_context(question: str, prior: dict[str, Any], synthesis: dict[str, Any] | None) -> dict[str, str]:
@@ -77,12 +98,7 @@ def _fallback_from_context(question: str, prior: dict[str, Any], synthesis: dict
         f"Prior retrieval surfaced {len(kpapers)} seed papers"
         + (f", including ``{cite}''." if cite else ".")
     )
-    ledger = syn.get("ledger") or {}
-    if not isinstance(ledger, dict):
-        ledger = {}
-    n_c = len(ledger.get("confirmed") or [])
-    n_r = len(ledger.get("refuted") or [])
-    n_i = len(ledger.get("inconclusive") or [])
+    n_c, n_r, n_i = _ledger_counts(syn)
     abs_plain = (
         f"This session investigated: {question[:700]}. "
         f"Automated sub-agent runs produced stored traces summarized in Results "

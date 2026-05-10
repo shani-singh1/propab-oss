@@ -151,8 +151,10 @@ def _apply_profile(s: Settings) -> None:
             "research_max_seconds_per_round": 1800,
             "agent_max_steps": 14,
             "agent_min_steps": 5,
-            "agent_max_seconds": 900,
+            # Must exceed worst-case sandbox wait (sandbox_timeout × retries); see fixes.md §agent vs sandbox.
+            "agent_max_seconds": 1800,
             "sandbox_timeout_sec": 480,
+            "sandbox_code_max_retries": 1,
             "n_steps_default": 300,
             "max_code_steps_per_hypothesis": 2,
             "classification_default_dataset": "mnist",
