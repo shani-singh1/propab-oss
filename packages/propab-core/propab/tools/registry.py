@@ -147,8 +147,9 @@ class ToolRegistry:
                 list(remaining.keys()),
             )
 
-        # Fill missing required params from spec's example params (prevents "missing required arg" crashes)
-        if spec:
+        # Fill missing required params from spec examples only for non–significance tools.
+        # Filling results_a/results_b from TOOL_SPEC leaks identical p-values across experiments.
+        if spec and not spec.get("significance_capable"):
             example_params = (spec.get("example") or {}).get("params") or {}
             for name, p in sig.parameters.items():
                 if (
@@ -163,7 +164,8 @@ class ToolRegistry:
                     result[name] = example_params[name]
                     logger.debug(
                         "Tool %s: filled missing required param %r from spec example",
-                        tool_name, name,
+                        tool_name,
+                        name,
                     )
 
         return result

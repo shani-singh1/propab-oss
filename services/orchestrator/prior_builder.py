@@ -35,15 +35,54 @@ def _prior_fallback(question: str, papers: list[dict[str, Any]]) -> Prior:
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
-    text = text.strip()
+    """Parse LLM JSON; models often wrap JSON in fences or prepend markdown."""
+    text = (text or "").strip()
+    if not text:
+        return None
+
+    for marker in ("```json", "```JSON", "```"):
+        if marker in text:
+            after = text.split(marker, 1)[1]
+            inner = after.split("```", 1)[0].strip()
+            if inner.startswith("{") or inner.startswith("["):
+                try:
+                    obj = json.loads(inner)
+                    if isinstance(obj, dict):
+                        return obj
+                except json.JSONDecodeError:
+                    pass
+
     try:
-        return json.loads(text)
+        obj = json.loads(text)
+        return obj if isinstance(obj, dict) else None
     except json.JSONDecodeError:
         pass
+
+    # Outermost balanced {...} slice (handles prose before/after the object).
+    start = text.find("{")
+    if start != -1:
+        depth = 0
+        for i in range(start, len(text)):
+            c = text[i]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    chunk = text[start : i + 1]
+                    try:
+                        obj = json.loads(chunk)
+                        if isinstance(obj, dict):
+                            return obj
+                    except json.JSONDecodeError:
+                        break
+                    break
+
     match = re.search(r"\{[\s\S]*\}\s*$", text)
     if match:
         try:
-            return json.loads(match.group(0))
+            obj = json.loads(match.group(0))
+            return obj if isinstance(obj, dict) else None
         except json.JSONDecodeError:
             return None
     return None

@@ -53,6 +53,26 @@ def _effect_label(d: float) -> str:
     return "large"
 
 
+# Known leaked placeholder from tool-spec / registry fills (three identical draws × 3 metrics).
+_SPEC_LEAK_VECTORS: tuple[tuple[float, ...], ...] = (
+    (
+        79.648735,
+        79.648735,
+        79.648735,
+        54.044083,
+        54.044083,
+        54.044083,
+        63.826187,
+        63.826187,
+        63.826187,
+    ),
+)
+
+
+def _tuple_rounded(vals: list, nd: int = 6) -> tuple[float, ...]:
+    return tuple(round(float(x), nd) for x in vals)
+
+
 def statistical_significance(
     results_a: list,
     results_b: list,
@@ -61,6 +81,19 @@ def statistical_significance(
     alternative: str = "two_sided",
 ) -> ToolResult:
     try:
+        ta = _tuple_rounded(list(results_a))
+        tb = _tuple_rounded(list(results_b))
+        if ta in _SPEC_LEAK_VECTORS or tb in _SPEC_LEAK_VECTORS:
+            return ToolResult(
+                success=False,
+                error=ToolError(
+                    type="validation_error",
+                    message=(
+                        "Detected known placeholder metric vector (spec/registry leak). "
+                        "Pass real measurements from train_model / run_experiment_grid output."
+                    ),
+                ),
+            )
         a = np.array([float(x) for x in results_a], dtype=np.float64)
         b = np.array([float(x) for x in results_b], dtype=np.float64)
         if len(a) < 2 or len(b) < 2:

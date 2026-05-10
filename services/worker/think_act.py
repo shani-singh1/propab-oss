@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,6 +38,9 @@ class AgentContext:
     steps_taken: int
     max_steps: int
     min_steps: int
+    # Wall-clock cap (monotonic deadline). None = no deadline beyond max_steps.
+    deadline_monotonic: float | None = None
+    time_budget_exceeded: bool = False
 
     def significance_status(self) -> SignificanceResult:
         return check_significance(self.results_so_far)
@@ -513,6 +517,10 @@ def should_stop(context: AgentContext) -> bool:
     Decide whether the agent should stop collecting evidence.
     Called before each think step — if True, skip the LLM call and finalize.
     """
+    dl = context.deadline_monotonic
+    if dl is not None and time.monotonic() >= dl:
+        context.time_budget_exceeded = True
+        return True
     if context.steps_taken >= context.max_steps:
         return True
     return False

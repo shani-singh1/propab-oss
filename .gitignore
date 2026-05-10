@@ -9,4 +9,12 @@ frontend/dist/
 test_que.md
 artifacts/agent_forensics_q1_q4.md
 artifacts/questions_audit_report.json
+artifacts/run*_log.txt
+artifacts/run*_live_monitor.txt
+artifacts/run*_forensic_report.md
+artifacts/run_*_sessions.json
 fixes.md
+
+# Campaign v1 local run pointers / live tail (machine-specific)
+artifacts/campaign_v1_latest.json
+artifacts/campaign_v1_live_monitor.txt

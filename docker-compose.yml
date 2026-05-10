@@ -25,7 +25,8 @@ services:
       - EMBED_MODEL=${EMBED_MODEL:-text-embedding-3-small}
       - ORCHESTRATOR_URL=http://orchestrator:8010
       - ORCHESTRATOR_INTERNAL_TOKEN=${ORCHESTRATOR_INTERNAL_TOKEN:-}
-      - PROPAB_PROFILE=${PROPAB_PROFILE:-dev}
+      - PROPAB_PROFILE=${PROPAB_PROFILE:-campaign}
+    restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
@@ -62,7 +63,8 @@ services:
       - EMBED_PROVIDER=${EMBED_PROVIDER:-openai}
       - EMBED_MODEL=${EMBED_MODEL:-text-embedding-3-small}
       - ORCHESTRATOR_INTERNAL_TOKEN=${ORCHESTRATOR_INTERNAL_TOKEN:-}
-      - PROPAB_PROFILE=${PROPAB_PROFILE:-dev}
+      - PROPAB_PROFILE=${PROPAB_PROFILE:-campaign}
+    restart: unless-stopped
     volumes:
       - propab_data:/data/propab
     depends_on:
@@ -93,7 +95,8 @@ services:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://127.0.0.1:11434}
       - EMBED_PROVIDER=${EMBED_PROVIDER:-openai}
       - EMBED_MODEL=${EMBED_MODEL:-text-embedding-3-small}
-      - PROPAB_PROFILE=${PROPAB_PROFILE:-dev}
+      - PROPAB_PROFILE=${PROPAB_PROFILE:-campaign}
+    restart: unless-stopped
     volumes:
       - propab_data:/data/propab
       - /var/run/docker.sock:/var/run/docker.sock
@@ -125,6 +128,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql
+      - ./migrations/006_campaigns.sql:/docker-entrypoint-initdb.d/006_campaigns.sql
 
   redis:
     image: redis:7-alpine

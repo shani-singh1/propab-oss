@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 import json
+import math
 import re
 from typing import Any
 from xml.etree import ElementTree
@@ -11,6 +12,8 @@ import httpx
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from propab.config import settings
+from propab.embeddings import embed_texts
 from propab.events import EventEmitter
 from propab.llm import LLMClient
 from propab.types import EventType
@@ -253,6 +256,74 @@ async def _download_pdf_bytes(client: httpx.AsyncClient, pdf_url: str) -> bytes:
     return response.content
 
 
+def _cosine_question_paper(qv: list[float], pv: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(qv, pv))
+    nq = math.sqrt(sum(x * x for x in qv))
+    np_ = math.sqrt(sum(x * x for x in pv))
+    if nq == 0.0 or np_ == 0.0:
+        return 0.0
+    return dot / (nq * np_)
+
+
+async def _filter_papers_by_question_relevance(
+    question: str,
+    papers: list[dict[str, Any]],
+    *,
+    session_id: str,
+    emitter: EventEmitter,
+    threshold: float = 0.4,
+) -> list[dict[str, Any]]:
+    """Drop papers whose title+abstract embedding similarity to the question is below *threshold*."""
+    if not papers:
+        return []
+    api_key = (settings.embed_api_secret or "").strip()
+    if not api_key:
+        return papers
+
+    texts = [question[:8000]] + [
+        f"{p.get('title') or ''}\n{p.get('abstract') or ''}"[:8000] for p in papers
+    ]
+    try:
+        vectors = await asyncio.wait_for(
+            embed_texts(
+                texts=texts,
+                api_key=api_key,
+                model=settings.embed_model,
+                provider=settings.embed_provider,
+            ),
+            timeout=90.0,
+        )
+    except Exception:
+        return papers
+    if not vectors or len(vectors) != len(texts):
+        return papers
+
+    qvec = vectors[0]
+    kept: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for paper, pvec in zip(papers, vectors[1:], strict=True):
+        sim = _cosine_question_paper(qvec, pvec)
+        if sim >= threshold:
+            kept.append(paper)
+        else:
+            dropped.append(
+                {"paper_id": paper.get("id"), "title": paper.get("title"), "similarity": round(sim, 4)}
+            )
+
+    await emitter.emit(
+        session_id=session_id,
+        event_type=EventType.LIT_PAPERS_RELEVANCE_FILTER,
+        step="literature.relevance_filter",
+        payload={
+            "threshold": threshold,
+            "kept_count": len(kept),
+            "dropped_count": len(dropped),
+            "dropped": dropped[:24],
+        },
+    )
+    return kept
+
+
 async def _enrich_papers_with_pdf(
     papers: list[dict[str, Any]],
     *,
@@ -349,6 +420,14 @@ async def build_prior(
 
     await _enrich_papers_with_pdf(papers, session_id=session_id, emitter=emitter, session_factory=session_factory)
 
+    papers = await _filter_papers_by_question_relevance(
+        parsed.text,
+        papers,
+        session_id=session_id,
+        emitter=emitter,
+        threshold=0.4,
+    )
+
     retrieval_chunks = await run_hybrid_retrieval(
         session_id=session_id,
         question=parsed.text,
@@ -357,6 +436,8 @@ async def build_prior(
         emitter=emitter,
         session_factory=session_factory,
     )
+    kept_ids = {str(p.get("id")) for p in papers if p.get("id")}
+    retrieval_chunks = [c for c in retrieval_chunks if str(c.get("paper_id")) in kept_ids]
 
     return await synthesize_prior_from_papers(
         llm=llm,

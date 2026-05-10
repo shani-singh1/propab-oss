@@ -28,6 +28,9 @@
 17. [Failure Handling](#17-failure-handling)
 18. [Build Roadmap](#18-build-roadmap)
 19. [Repository Structure](#19-repository-structure)
+20. [Campaign Model](#20-campaign-model)
+21. [Hypothesis Tree](#21-hypothesis-tree)
+22. [Breakthrough Detection](#22-breakthrough-detection)
 
 ---
 
@@ -1727,6 +1730,20 @@ docker compose up
 - [ ] Ollama / local model support (chat adapter already written)
 - [ ] Community tool plugin submission process
 
+### Phase 6 — Campaign Model (Active)
+- [x] `ResearchCampaign` schema + `BreakthroughCriteria` (`propab/campaign.py`)
+- [x] `HypothesisTree` data structure with expansion, frontier, pruning (`propab/hypothesis_tree.py`)
+- [x] `campaign_loop()` — baseline measurement, tree-guided batch dispatch, breakthrough detection
+- [x] `research_campaigns` table + migration (`migrations/006_campaigns.sql`)
+- [x] `POST /campaigns` API endpoint
+- [x] New event types: `CAMPAIGN_STARTED/PROGRESS/BREAKTHROUGH/BUDGET_EXHAUSTED`, `BASELINE_MEASURED`, `HYPO_TREE_EXPANDED/PRUNED`
+- [x] `campaign` profile in `config.py` (4-hour budget, 500-hypothesis cap)
+- [ ] **Campaign v1 first run**: single hard question, 4-hour budget, measured baseline, tree to 50+ hypotheses
+- [ ] Interim paper writing at 10% hypothesis budget milestone
+- [ ] `GET /campaigns/{id}` endpoint — query live campaign state, tree summary, best finding
+- [ ] `POST /campaigns/{id}/pause` + `POST /campaigns/{id}/resume`
+- [ ] Evidence requirement scaling: claim-size → experiment-size mapping in think-act planner
+
 ---
 
 ## 19. Repository Structure
@@ -1790,6 +1807,431 @@ propab/
         ├── Results.tsx           # updated: multi-round results
         └── KnowledgeBase.tsx     # new: KB explorer
 ```
+
+---
+
+---
+
+## 20. Campaign Model
+
+A **campaign** is the long-running research primitive — it persists indefinitely (days or weeks) where a session is ephemeral (one run, minutes to hours). The session model remains unchanged for short queries; the campaign model wraps and extends it for serious R&D work.
+
+### 20.1 Campaign vs Session
+
+| Dimension | Session | Campaign |
+|---|---|---|
+| Lifetime | Single process run | Persists across restarts, days, weeks |
+| Hypothesis source | Generated fresh per round | Grown from a `HypothesisTree` |
+| Stopping criterion | Budget / diminishing returns | Breakthrough threshold OR budget |
+| Baseline | Inferred from prior literature | Measured by system at campaign start |
+| Paper trigger | Any confirmed findings | Breakthrough OR budget exhausted |
+| Scale | 5–50 hypotheses | 500–18,000+ hypotheses |
+
+### 20.2 ResearchCampaign Schema
+
+```python
+@dataclass
+class ResearchCampaign:
+    """
+    A campaign is a long-running research effort that persists indefinitely.
+    Unlike a session, it has no natural end — it runs until breakthrough or budget.
+    """
+    id:               str
+    question:         str
+    status:           str    # active | paused | breakthrough | budget_exhausted
+    started_at:       str    # ISO 8601
+
+    # Accumulated across all rounds, all days
+    hypothesis_tree:  HypothesisTree
+    breakthrough_criteria: BreakthroughCriteria
+    total_hypotheses: int           # could reach 18,000
+    total_confirmed:  int
+    best_finding:     dict | None
+    baseline_metric:  float         # measured at campaign start, not assumed
+    best_metric:      float         # best achieved so far
+    improvement_pct:  float         # vs baseline
+
+    # Budget tracking
+    compute_seconds_used:   int
+    compute_budget_seconds: int     # e.g. 4 hours = 14400
+    wall_clock_days:        float
+
+    # Checkpointing
+    last_checkpoint:  str           # ISO 8601
+    checkpoint_every: int           # seconds between DB checkpoints
+
+    def should_stop(self) -> bool:
+        if self.status in ("breakthrough", "budget_exhausted", "paused"):
+            return True
+        if self.compute_seconds_used >= self.compute_budget_seconds:
+            return True
+        return False
+```
+
+### 20.3 Campaign Loop
+
+```python
+async def campaign_loop(campaign_id: str, session_factory, emitter) -> None:
+    """Runs indefinitely until breakthrough or budget exhausted."""
+
+    campaign = await db_load_campaign(campaign_id, session_factory)
+    emit(CAMPAIGN_STARTED, {"campaign_id": campaign_id, "question": campaign.question})
+
+    # Step 0: Measure baseline if not yet measured
+    if campaign.baseline_metric == 0.0:
+        campaign.baseline_metric = await measure_baseline(campaign, session_factory, emitter)
+        emit(BASELINE_MEASURED, {
+            "metric_name": campaign.breakthrough_criteria.metric_name,
+            "baseline_value": campaign.baseline_metric,
+        })
+
+    while not campaign.should_stop():
+        await db_checkpoint_campaign(campaign, session_factory)
+
+        # Get next batch from hypothesis tree frontier
+        batch = campaign.hypothesis_tree.next_batch(
+            size=campaign_batch_size(campaign),
+            strategy="highest_expected_value",
+        )
+
+        if not batch:
+            # Frontier exhausted — generate new seed hypotheses from accumulated prior
+            batch = await expand_frontier(campaign, session_factory, emitter)
+
+        # Run experiments (reuses existing session-level experiment infrastructure)
+        results = await run_campaign_round(batch, campaign, session_factory, emitter)
+
+        # Update tree and check for breakthrough
+        breakthrough_found = False
+        for result in results:
+            campaign.hypothesis_tree.update_node(
+                result["hypothesis_id"], result["verdict"], result["confidence"],
+            )
+            campaign.total_hypotheses += 1
+            if result["verdict"] == "confirmed":
+                campaign.total_confirmed += 1
+                children = await campaign.hypothesis_tree.expand(
+                    result["hypothesis_id"], result["evidence_summary"], llm,
+                )
+                campaign.hypothesis_tree.add_to_frontier(children)
+
+                # Update best metric
+                metric_val = _extract_metric(result, campaign.breakthrough_criteria.metric_name)
+                if metric_val is not None and _is_better(
+                    metric_val, campaign.best_metric, campaign.breakthrough_criteria.direction
+                ):
+                    campaign.best_metric = metric_val
+                    campaign.best_finding = result
+                    campaign.improvement_pct = _improvement_pct(
+                        campaign.baseline_metric, metric_val,
+                        campaign.breakthrough_criteria.direction,
+                    )
+
+                if campaign.breakthrough_criteria.is_breakthrough(result):
+                    breakthrough_found = True
+
+        emit(CAMPAIGN_PROGRESS, {
+            "campaign_id": campaign_id,
+            "hypotheses_tested": campaign.total_hypotheses,
+            "confirmed": campaign.total_confirmed,
+            "best_improvement_pct": campaign.improvement_pct,
+            "frontier_size": len(campaign.hypothesis_tree.frontier),
+        })
+
+        if breakthrough_found:
+            campaign.status = "breakthrough"
+            emit(CAMPAIGN_BREAKTHROUGH, {
+                "campaign_id": campaign_id,
+                "best_finding": campaign.best_finding,
+                "improvement_pct": campaign.improvement_pct,
+            })
+            await write_campaign_paper(campaign, session_factory, emitter)
+            break
+
+    if campaign.status != "breakthrough":
+        campaign.status = "budget_exhausted"
+        emit(CAMPAIGN_BUDGET_EXHAUSTED, {"campaign_id": campaign_id})
+        await write_campaign_paper(campaign, session_factory, emitter)
+```
+
+### 20.4 Baseline Measurement Protocol
+
+The baseline is always measured by the system itself at campaign start, not provided by the user. The system runs the standard approach on the target problem (e.g. train a vanilla 784-60-10 MLP on MNIST for 150 steps), records the metric, and uses that as the reference. This guarantees that all hypothesis experiments are compared under identical experimental conditions.
+
+```python
+async def measure_baseline(campaign: ResearchCampaign, ...) -> float:
+    """
+    Run the standard approach once, record the primary metric.
+    The baseline config is derived from the campaign question via LLM.
+    """
+    # LLM extracts: dataset, architecture, optimizer, n_steps from question
+    baseline_config = await extract_baseline_config(campaign.question, llm)
+    result = await run_baseline_experiment(baseline_config, ...)
+    return result[campaign.breakthrough_criteria.metric_name]
+```
+
+### 20.5 Budget Types
+
+| Budget type | Config key | Default | Description |
+|---|---|---|---|
+| Compute seconds | `campaign_compute_budget_seconds` | `14400` (4h) | Wall-clock time for the full campaign |
+| Hypothesis budget | `campaign_max_hypotheses` | `500` | Hard cap on total hypotheses tested |
+| Cost budget | `campaign_max_cost_usd` | `0` (no limit) | API cost cap |
+| Breakthrough threshold | `BreakthroughCriteria.improvement_threshold` | `0.05` (5%) | Minimum improvement to declare success |
+
+### 20.6 Database Schema
+
+```sql
+CREATE TABLE research_campaigns (
+    id                       UUID PRIMARY KEY,
+    question                 TEXT NOT NULL,
+    status                   TEXT NOT NULL DEFAULT 'active',
+    breakthrough_criteria_json JSONB NOT NULL,
+    hypothesis_tree_json     JSONB,
+    baseline_metric          FLOAT,
+    best_metric              FLOAT,
+    improvement_pct          FLOAT,
+    best_finding_json        JSONB,
+    total_hypotheses         INT DEFAULT 0,
+    total_confirmed          INT DEFAULT 0,
+    compute_seconds_used     INT DEFAULT 0,
+    compute_budget_seconds   INT NOT NULL DEFAULT 14400,
+    started_at               TIMESTAMPTZ DEFAULT NOW(),
+    last_checkpoint_at       TIMESTAMPTZ,
+    completed_at             TIMESTAMPTZ
+);
+```
+
+---
+
+## 21. Hypothesis Tree
+
+The hypothesis tree is the mechanism that grows the hypothesis space from 5 seed hypotheses to 18,000+ without generating them all upfront. It is a guided tree search over the space of possible research directions, where confirmed findings are the branches worth expanding and refuted ones prune the tree.
+
+### 21.1 Data Structures
+
+```python
+@dataclass
+class HypothesisNode:
+    id:          str
+    text:        str
+    parent_id:   str | None      # None for root/seed hypotheses
+    depth:       int             # how many generations from seed
+    verdict:     str             # pending | confirmed | refuted | inconclusive
+    confidence:  float
+    children:    list[str]       # IDs of child hypotheses generated from this one
+    generation:  int             # which campaign round spawned this
+    evidence_summary: str | None # from experiment result
+
+@dataclass
+class HypothesisTree:
+    nodes:     dict[str, HypothesisNode]
+    frontier:  list[str]   # hypothesis IDs ready to be tested next
+    confirmed: list[str]   # confirmed — children may be generated
+    exhausted: list[str]   # tested, no children worth generating
+```
+
+### 21.2 Expansion Strategies
+
+When a hypothesis is **confirmed**, the tree expands in three directions:
+
+```
+CONFIRMED: "Bottleneck architecture (784-32-64-10) beats 784-60-10 by +3% accuracy"
+    │
+    ├── Boundary probing:
+    │   "Does the accuracy gain hold at a 25k-parameter budget, not just 50k?"
+    │
+    ├── Mechanistic investigation:
+    │   "Is the gain driven by the bottleneck compression or by the expansion layer?"
+    │
+    └── Generalization testing:
+        "Does bottleneck architecture outperform single hidden layer on Fashion-MNIST too?"
+```
+
+When a hypothesis is **refuted**:
+```
+REFUTED: "Adding a second hidden layer improves accuracy under 50k-param budget"
+    │
+    └── Alternative generation:
+        "If layer count doesn't help, do skip connections help instead?"
+        "Does width matter more than depth under this parameter constraint?"
+```
+
+When a hypothesis is **inconclusive**:
+```
+INCONCLUSIVE: "Batch normalization improves test accuracy" (confidence 0.28, partial signal)
+    │
+    └── Better-powered retest:
+        "Run same experiment with 10+ seeds and proper bootstrap confidence interval"
+```
+
+### 21.3 Expansion Prompt
+
+```python
+EXPAND_PROMPT = """
+This hypothesis was {verdict} with confidence {confidence:.2f}.
+
+Hypothesis: {parent_text}
+
+Finding: {evidence_summary}
+
+Generate 3-5 child hypotheses that:
+{expansion_instructions}
+
+Rules:
+- Do not repeat the parent hypothesis
+- Each child must be more specific than the parent, not broader
+- Each child must name its expected test methodology
+- Depth {depth} hypothesis: scope to what can be answered in a single experiment
+
+Return JSON array only:
+[{{"id": "...", "text": "...", "test_methodology": "...", "expansion_type": "boundary|mechanistic|generalization|alternative|retest"}}]
+"""
+
+EXPANSION_INSTRUCTIONS = {
+    "confirmed": """
+1. Probe the BOUNDARY CONDITIONS: where does this effect break down?
+2. Ask WHY: what mechanism drives this effect?
+3. Ask HOW FAR: does this generalize to other architectures/datasets?
+4. Test whether this finding enables a downstream improvement""",
+    "refuted": """
+1. Generate ALTERNATIVE approaches: what else could achieve the goal?
+2. Ask WHAT IF: change the variable that caused refutation""",
+    "inconclusive": """
+1. Design a BETTER-POWERED version of the same experiment
+2. Add more replications, tighter controls, or a direct baseline comparison""",
+}
+```
+
+### 21.4 Frontier Prioritization
+
+The `next_batch` method selects hypotheses from the frontier using an expected-value score:
+
+```python
+def _expected_value_score(self, node: HypothesisNode) -> float:
+    """
+    Score a hypothesis for prioritization.
+    Confirmed parents, shallow depth, and specific methodology score higher.
+    """
+    # Reward shallow depth (closer to a confirmed finding is more promising)
+    depth_score = 1.0 / (1.0 + node.depth * 0.3)
+
+    # Reward if parent was confirmed (confirmed lineage)
+    lineage_score = 1.0
+    if node.parent_id and node.parent_id in self.confirmed:
+        lineage_score = 1.5
+
+    # Reward specific methodology mention (heuristic: longer = more specific)
+    methodology_len = len((node.text or ""))
+    specificity_score = min(1.0, methodology_len / 200.0)
+
+    return depth_score * lineage_score * 0.5 + specificity_score * 0.5
+```
+
+### 21.5 Pruning Rules
+
+A branch stops expanding when:
+
+| Condition | Action |
+|---|---|
+| Depth ≥ 8 | Mark node `exhausted`, do not generate children |
+| Node refuted AND all siblings refuted | Mark subtree `exhausted` |
+| Node inconclusive for 2nd time in same lineage | Mark node `exhausted` (no more retests) |
+| Parent confirmed but children all inconclusive × 2 | Mark children `exhausted`, still keep parent `confirmed` |
+
+### 21.6 Tree Serialization
+
+The full tree is serialized to JSON and checkpointed to the `research_campaigns.hypothesis_tree_json` column after every campaign round. This makes it possible to resume the campaign from the exact tree state after any interruption.
+
+---
+
+## 22. Breakthrough Detection
+
+A breakthrough is a quantitative claim: the system found something that improves the target metric by at least the threshold over the measured baseline, with sufficient statistical confidence and replication. This must be defined at campaign start, measured rigorously during the run, and declared only when all criteria are met.
+
+### 22.1 BreakthroughCriteria Schema
+
+```python
+@dataclass
+class BreakthroughCriteria:
+    metric_name:           str     # "val_accuracy" | "loss" | "flops_per_token" | custom
+    baseline_value:        float   # measured at campaign start, not assumed
+    improvement_threshold: float   # 0.05 = 5% improvement required
+    direction:             str     # "higher_is_better" | "lower_is_better"
+    min_confidence:        float   # 0.85 — don't declare breakthrough without strong evidence
+    min_replications:      int     # 3 — must replicate before declaring
+
+    def is_breakthrough(self, finding: dict) -> bool:
+        if finding.get("confidence", 0) < self.min_confidence:
+            return False
+        if finding.get("replication_count", 1) < self.min_replications:
+            return False
+        metric_val = finding.get("metric_value") or finding.get(self.metric_name)
+        if metric_val is None:
+            return False
+        improvement = (metric_val - self.baseline_value) / max(abs(self.baseline_value), 1e-9)
+        if self.direction == "higher_is_better":
+            return improvement >= self.improvement_threshold
+        else:
+            return improvement <= -self.improvement_threshold
+```
+
+### 22.2 Evidence Requirements by Claim Size
+
+The think-act planner scales experiment design to match the claim being made:
+
+| Claim | Required evidence |
+|---|---|
+| "this technique improves accuracy" | 5+ independent runs, proper train/val/test split, comparison against baseline, p < 0.05, effect size > 0.2 |
+| "this technique generalizes across architectures" | Test on MLP + CNN + Transformer, same finding in all three, p < 0.05 in each |
+| "+40% improvement over baseline" | Baseline measured by same system, 10+ replications, p < 0.001, effect size > 1.0, ablation showing which component drives it |
+
+The planner receives the `BreakthroughCriteria` in its context so it knows whether the current hypothesis is a candidate for a breakthrough-level claim and can design accordingly.
+
+### 22.3 Replication Tracking
+
+Before a breakthrough can be declared, the finding must be replicated. The campaign loop tracks replications across hypotheses that share the same parent lineage:
+
+```python
+def count_replications(self, hypothesis_id: str) -> int:
+    """
+    Count how many confirmed hypotheses in the same lineage produced the same direction of effect.
+    Used to check min_replications before declaring breakthrough.
+    """
+    node = self.hypothesis_tree.nodes.get(hypothesis_id)
+    if node is None or node.parent_id is None:
+        return 1
+    # Count confirmed siblings (same parent, same direction)
+    parent = self.hypothesis_tree.nodes[node.parent_id]
+    confirmed_siblings = [
+        c for c in parent.children
+        if self.hypothesis_tree.nodes.get(c, HypothesisNode(...)).verdict == "confirmed"
+    ]
+    return len(confirmed_siblings)
+```
+
+### 22.4 Progressive Paper Writing
+
+The system does not wait for a breakthrough to write. At each milestone it produces an interim summary:
+
+| Trigger | Output |
+|---|---|
+| Campaign starts | Baseline paper: "Measuring X on Y, baseline = Z" |
+| 10% of hypothesis budget used | Interim findings: top confirmed hypotheses so far |
+| Breakthrough detected | Full paper: background, methods, findings, discussion |
+| Budget exhausted (no breakthrough) | Progress paper: best finding, improvement achieved, open questions |
+
+The paper writer receives the full `ResearchCampaign` state and the `HypothesisTree` so it can reconstruct the evolution of the investigation — which seeds grew into findings, which branches were pruned, and what the most promising direction turned out to be.
+
+### 22.5 Campaign v1 Target
+
+The first campaign to run after implementing this infrastructure:
+
+> **Question:** Find the optimal MLP architecture for MNIST under a 50,000 parameter budget that maximizes test accuracy.
+> **Baseline:** 784-60-10 single hidden layer (measured by system).
+> **Breakthrough threshold:** +5% accuracy improvement over baseline.
+> **Budget:** 4 hours compute.
+> **Success signal:** Tree reaches 50+ hypotheses, best finding improves baseline by >3%.
 
 ---
 

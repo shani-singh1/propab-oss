@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from itertools import groupby
 from typing import Any
 
 from sqlalchemy import text
@@ -151,16 +152,26 @@ async def compile_methods_section(session_factory: async_sessionmaker, hypothesi
     return "\n".join(lines) if lines else "No automated experiment steps were recorded for this hypothesis."
 
 
+def _human_round_num(round_number_0_indexed: int | None) -> int:
+    """DB stores round_number starting at 0; paper displays Round 1, Round 2, …"""
+    base = 0 if round_number_0_indexed is None else int(round_number_0_indexed)
+    return base + 1
+
+
 async def compile_session_methods_latex(session_factory: async_sessionmaker, session_id: str) -> dict[str, Any]:
     async with session_factory() as session:
         hyp_rows = (
             await session.execute(
                 text(
                     """
-                    SELECT id, text, rank
-                    FROM hypotheses
-                    WHERE session_id = :session_id
-                    ORDER BY rank ASC
+                    SELECT h.id, h.text, h.rank,
+                           COALESCE(r.round_number, 0) AS round_number
+                    FROM hypotheses h
+                    LEFT JOIN research_rounds r ON r.id = h.round_id
+                    WHERE h.session_id = CAST(:session_id AS uuid)
+                    ORDER BY COALESCE(r.round_number, 0) ASC,
+                             h.rank ASC NULLS LAST,
+                             h.created_at ASC
                     """
                 ),
                 {"session_id": session_id},
@@ -169,30 +180,48 @@ async def compile_session_methods_latex(session_factory: async_sessionmaker, ses
 
     sections: list[str] = []
     per_hypothesis: dict[str, str] = {}
-    for hyp in hyp_rows:
-        hid = str(hyp["id"])
-        body = await compile_methods_section(session_factory, hid)
-        label = f"h{hyp['rank']}"
-        hyp_text = _latex_escape(str(hyp["text"] or ""))
-        # 0-step hypotheses: note exclusion in methods but don't render a full section
-        has_steps = "No automated experiment steps" not in body
-        if not has_steps:
-            section = (
-                f"\\subsection{{Hypothesis {label}}}\\label{{subsec:{hid}}}\n"
-                f"\\textit{{{hyp_text}}}\\\\\n"
-                "\\textit{{Note: No experiment steps were executed for this hypothesis; "
-                "excluded from methods and results analysis.}}\n"
+    if not hyp_rows:
+        return {
+            "combined_latex": "\\section{Methods}\nNo hypotheses were executed.\n",
+            "per_hypothesis": {},
+        }
+
+    sections.append("\\section{Methods}")
+    for rn_key, group_iter in groupby(hyp_rows, key=lambda row: int(row["round_number"])):
+        group = list(group_iter)
+        hr = _human_round_num(rn_key)
+        if hr >= 2:
+            sections.append(
+                f"\\subsection{{Round {hr} hypotheses \\textit{{(informed by prior rounds)}}}}\n"
             )
         else:
-            section = (
-                f"\\subsection{{Hypothesis {label}}}\\label{{subsec:{hid}}}\n"
-                f"\\textit{{{hyp_text}}}\\\\\n"
-                f"{body}\n"
-            )
-        sections.append(section)
-        per_hypothesis[hid] = body
+            sections.append(f"\\subsection{{Round {hr} hypotheses}}\n")
 
-    combined = "\\section{Methods}\n" + "\n".join(sections) if sections else "\\section{Methods}\nNo hypotheses were executed.\n"
+        for hyp in group:
+            hid = str(hyp["id"])
+            body = await compile_methods_section(session_factory, hid)
+            label_rank = hyp["rank"] if hyp.get("rank") is not None else "?"
+            hyp_text = _latex_escape(str(hyp["text"] or ""))
+            short_head = hyp_text[:100] + ("..." if len(hyp_text) > 100 else "")
+            title = _latex_escape(f"Round {hr} -- Hypothesis {label_rank}: {short_head}")
+            has_steps = "No automated experiment steps" not in body
+            if not has_steps:
+                section = (
+                    f"\\subsubsection{{{title}}}\\label{{subsec:{hid}}}\n"
+                    f"\\textit{{{hyp_text}}}\\\\\n"
+                    "\\textit{{Note: No experiment steps were executed for this hypothesis; "
+                    "excluded from methods and results analysis.}}\n"
+                )
+            else:
+                section = (
+                    f"\\subsubsection{{{title}}}\\label{{subsec:{hid}}}\n"
+                    f"\\textit{{{hyp_text}}}\\\\\n"
+                    f"{body}\n"
+                )
+            sections.append(section)
+            per_hypothesis[hid] = body
+
+    combined = "\n".join(sections)
     return {"combined_latex": combined, "per_hypothesis": per_hypothesis}
 
 
@@ -214,6 +243,47 @@ def collect_figure_object_ids(synthesis: dict[str, Any] | None) -> list[str]:
     return out
 
 
+def _results_block_for_row(row: Any) -> str:
+    """One hypothesis result block (subsubsection body) with shared formatting."""
+    label_rank = row["rank"] if row.get("rank") is not None else str(row["id"])[:8]
+    hr = _human_round_num(row.get("round_number"))
+    title = _latex_escape(f"Round {hr} -- Hypothesis {label_rank}")
+    raw_verdict = str(row.get("verdict") or "pending")
+    verdict = _latex_escape(raw_verdict)
+    conf = row.get("confidence")
+    conf_s = f"{float(conf):.2f}" if conf is not None else "n/a"
+    ev = _latex_escape(_format_evidence_for_paper(str(row.get("evidence_summary") or "")))
+    kf = row.get("key_finding")
+    kf_s = _latex_escape(str(kf))[:500] if kf else ""
+    trace = _latex_escape(str(row.get("tool_trace_id") or ""))
+    hyp = _latex_escape(str(row.get("text") or "")[:900])
+    steps = int(row.get("step_count") or 0)
+    n_metric_steps = _extract_metric_steps_from_evidence(str(row.get("evidence_summary") or ""))
+    if steps == 0:
+        return (
+            f"\\subsubsection{{{title}}}\n"
+            f"\\textbf{{Statement:}} {hyp}\\\\\n"
+            "\\textbf{Status:} excluded from analysis (no experiment steps executed).\\\\\n"
+            "\\textbf{Note:} This hypothesis was generated but never executed, so it is not included in conclusions."
+        )
+    if raw_verdict.lower() == "confirmed" and n_metric_steps == 0:
+        return (
+            f"\\subsubsection{{{title}}}\n"
+            f"\\textbf{{Statement:}} {hyp}\\\\\n"
+            "\\textbf{Status:} excluded from analysis (confirmed without metric evidence).\\\\\n"
+            "\\textbf{Note:} Confirmation requires metric-bearing evidence; this row is excluded pending rerun."
+        )
+    return (
+        f"\\subsubsection{{{title}}}\n"
+        f"\\textbf{{Statement:}} {hyp}\\\\\n"
+        f"\\textbf{{Verdict:}} {verdict} (confidence {conf_s}). "
+        f"Recorded {steps} experiment step(s).\\\\\n"
+        f"\\textbf{{Evidence:}} {ev}\\\\\n"
+        + (f"\\textbf{{Key finding:}} {kf_s}\\\\\n" if kf_s else "")
+        + (f"\\textbf{{Trace id:}} \\texttt{{{trace}}}\n" if trace else "")
+    )
+
+
 async def compile_session_results_latex(session_factory: async_sessionmaker, session_id: str) -> str:
     """Deterministic results from hypothesis verdicts and step counts (no LLM)."""
     async with session_factory() as session:
@@ -223,10 +293,14 @@ async def compile_session_results_latex(session_factory: async_sessionmaker, ses
                     """
                     SELECT h.id, h.rank, h.text, h.verdict, h.confidence, h.evidence_summary, h.key_finding,
                            h.tool_trace_id,
+                           COALESCE(r.round_number, 0) AS round_number,
                            (SELECT COUNT(*) FROM experiment_steps e WHERE e.hypothesis_id = h.id) AS step_count
                     FROM hypotheses h
-                    WHERE h.session_id = :session_id
-                    ORDER BY h.rank ASC NULLS LAST, h.created_at ASC
+                    LEFT JOIN research_rounds r ON r.id = h.round_id
+                    WHERE h.session_id = CAST(:session_id AS uuid)
+                    ORDER BY COALESCE(r.round_number, 0) ASC,
+                             h.rank ASC NULLS LAST,
+                             h.created_at ASC
                     """
                 ),
                 {"session_id": session_id},
@@ -237,43 +311,17 @@ async def compile_session_results_latex(session_factory: async_sessionmaker, ses
         return "\\section{Results}\nNo hypotheses were recorded for this session.\n"
 
     parts: list[str] = ["\\section{Results}"]
-    for row in rows:
-        label = f"h{row['rank']}" if row.get("rank") is not None else str(row["id"])[:8]
-        verdict = _latex_escape(str(row.get("verdict") or "pending"))
-        conf = row.get("confidence")
-        conf_s = f"{float(conf):.2f}" if conf is not None else "n/a"
-        ev = _latex_escape(_format_evidence_for_paper(str(row.get("evidence_summary") or "")))
-        kf = row.get("key_finding")
-        kf_s = _latex_escape(str(kf))[:500] if kf else ""
-        trace = _latex_escape(str(row.get("tool_trace_id") or ""))
-        hyp = _latex_escape(str(row.get("text") or "")[:900])
-        steps = int(row.get("step_count") or 0)
-        n_metric_steps = _extract_metric_steps_from_evidence(str(row.get("evidence_summary") or ""))
-        if steps == 0:
+    for rn_key, group_iter in groupby(rows, key=lambda row: int(row["round_number"])):
+        group = list(group_iter)
+        hr = _human_round_num(rn_key)
+        if hr >= 2:
             parts.append(
-                f"\\subsection{{Hypothesis {label}}}\n"
-                f"\\textbf{{Statement:}} {hyp}\\\\\n"
-                "\\textbf{Status:} excluded from analysis (no experiment steps executed).\\\\\n"
-                "\\textbf{Note:} This hypothesis was generated but never executed, so it is not included in conclusions."
+                f"\\subsection{{Round {hr} results \\textit{{(following Round {hr - 1})}}}}\n"
             )
-            continue
-        if verdict.lower() == "confirmed" and n_metric_steps == 0:
-            parts.append(
-                f"\\subsection{{Hypothesis {label}}}\n"
-                f"\\textbf{{Statement:}} {hyp}\\\\\n"
-                "\\textbf{Status:} excluded from analysis (confirmed without metric evidence).\\\\\n"
-                "\\textbf{Note:} Confirmation requires metric-bearing evidence; this row is excluded pending rerun."
-            )
-            continue
-        parts.append(
-            f"\\subsection{{Hypothesis {label}}}\n"
-            f"\\textbf{{Statement:}} {hyp}\\\\\n"
-            f"\\textbf{{Verdict:}} {verdict} (confidence {conf_s}). "
-            f"Recorded {steps} experiment step(s).\\\\\n"
-            f"\\textbf{{Evidence:}} {ev}\\\\\n"
-            + (f"\\textbf{{Key finding:}} {kf_s}\\\\\n" if kf_s else "")
-            + (f"\\textbf{{Trace id:}} \\texttt{{{trace}}}\n" if trace else "")
-        )
+        else:
+            parts.append(f"\\subsection{{Round {hr} results}}\n")
+        for row in group:
+            parts.append(_results_block_for_row(row))
     return "\n".join(parts)
 
 

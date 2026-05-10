@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     agent_max_steps: int = 12
     agent_min_steps: int = 4
     agent_max_seconds: int = 600
+    # httpx read/connect timeout for OpenAI / external LLM HTTP (seconds)
+    llm_http_timeout_sec: float = 180.0
     max_code_steps_per_hypothesis: int = 1
     n_steps_default: int = 150
     classification_default_dataset: str = "mnist"
@@ -58,6 +60,17 @@ class Settings(BaseSettings):
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    # Campaign mode — long-running research over days
+    campaign_compute_budget_seconds: int = 14400    # 4 hours default
+    campaign_max_hypotheses: int = 500              # hard cap on tree size
+    campaign_batch_size: int = 5                    # hypotheses per campaign round
+    campaign_checkpoint_every: int = 300            # checkpoint interval (seconds)
+    campaign_breakthrough_threshold: float = 0.05   # 5% improvement to declare success
+    campaign_min_confidence: float = 0.85           # min confidence for breakthrough
+    campaign_min_replications: int = 3              # min confirmed replications
+    campaign_expand_on_confirmed: bool = True       # expand tree on confirmed findings
+    campaign_expand_on_refuted: bool = True         # generate alternatives on refuted
+    campaign_max_tree_depth: int = 8                # max hypothesis depth in tree
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -94,13 +107,16 @@ def _apply_profile(s: Settings) -> None:
         "dev": {
             "research_max_rounds": 2,
             "research_max_hypotheses": 15,
-            "agent_max_steps": 8,
+            "agent_max_steps": 10,
             "agent_min_steps": 3,
-            "agent_max_seconds": 300,
-            "sandbox_timeout_sec": 60,
-            "n_steps_default": 120,
-            "max_code_steps_per_hypothesis": 1,
+            # Match research wall budget so dev runs fewer surprise timeouts than 300s cap.
+            "agent_max_seconds": 600,
+            # MNIST / sandbox training needs far more than 60s wall time in Docker.
+            "sandbox_timeout_sec": 420,
+            "n_steps_default": 180,
+            "max_code_steps_per_hypothesis": 2,
             "classification_default_dataset": "mnist",
+            "llm_http_timeout_sec": 240.0,
         },
         "research": {
             "research_max_rounds": 4,
@@ -108,10 +124,11 @@ def _apply_profile(s: Settings) -> None:
             "agent_max_steps": 12,
             "agent_min_steps": 4,
             "agent_max_seconds": 600,
-            "sandbox_timeout_sec": 300,
+            "sandbox_timeout_sec": 420,
             "n_steps_default": 300,
             "max_code_steps_per_hypothesis": 1,
             "classification_default_dataset": "mnist",
+            "llm_http_timeout_sec": 300.0,
         },
         "deep": {
             "research_max_rounds": 6,
@@ -123,6 +140,29 @@ def _apply_profile(s: Settings) -> None:
             "n_steps_default": 500,
             "max_code_steps_per_hypothesis": 2,
             "classification_default_dataset": "mnist",
+            "llm_http_timeout_sec": 420.0,
+        },
+        # Campaign v1: 4-hour budget, hypothesis tree, breakthrough detection.
+        # Designed for a single hard question (e.g. optimal MLP for MNIST).
+        "campaign": {
+            "research_max_rounds": 50,
+            "research_max_hypotheses": 500,
+            "research_max_hours": 4.0,
+            "research_max_seconds_per_round": 1800,
+            "agent_max_steps": 14,
+            "agent_min_steps": 5,
+            "agent_max_seconds": 900,
+            "sandbox_timeout_sec": 480,
+            "n_steps_default": 300,
+            "max_code_steps_per_hypothesis": 2,
+            "classification_default_dataset": "mnist",
+            "llm_http_timeout_sec": 300.0,
+            "campaign_compute_budget_seconds": 14400,
+            "campaign_batch_size": 5,
+            "campaign_max_hypotheses": 500,
+            "campaign_breakthrough_threshold": 0.05,
+            "campaign_min_confidence": 0.85,
+            "campaign_min_replications": 3,
         },
     }
     selected = profiles.get(profile, profiles["dev"])

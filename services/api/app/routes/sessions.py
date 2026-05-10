@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -35,6 +35,12 @@ async def get_session_state(
 @router.get("/{session_id}/events")
 async def get_session_events(
     session_id: str,
+    limit: int | None = Query(
+        default=None,
+        ge=1,
+        le=2000,
+        description="If set, return only the most recent N events (chronological order).",
+    ),
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> dict:
     async with session_factory() as session:
@@ -46,19 +52,39 @@ async def get_session_events(
         ).scalar_one_or_none()
         if exists is None:
             raise HTTPException(status_code=404, detail="Session not found")
-        rows = (
-            await session.execute(
-                text(
-                    """
-                    SELECT id, event_type, source, step, hypothesis_id, parent_event_id, payload_json, created_at
-                    FROM events
-                    WHERE session_id = :session_id
-                    ORDER BY created_at ASC
-                    """
-                ),
-                {"session_id": session_id},
-            )
-        ).mappings().all()
+        if limit is None:
+            rows = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT id, event_type, source, step, hypothesis_id, parent_event_id, payload_json, created_at
+                        FROM events
+                        WHERE session_id = :session_id
+                        ORDER BY created_at ASC
+                        """
+                    ),
+                    {"session_id": session_id},
+                )
+            ).mappings().all()
+        else:
+            rows = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT id, event_type, source, step, hypothesis_id, parent_event_id, payload_json, created_at
+                        FROM (
+                            SELECT id, event_type, source, step, hypothesis_id, parent_event_id, payload_json, created_at
+                            FROM events
+                            WHERE session_id = :session_id
+                            ORDER BY created_at DESC
+                            LIMIT :lim
+                        ) sub
+                        ORDER BY created_at ASC
+                        """
+                    ),
+                    {"session_id": session_id, "lim": limit},
+                )
+            ).mappings().all()
     return {"session_id": session_id, "events": [dict(row) for row in rows]}
 
 

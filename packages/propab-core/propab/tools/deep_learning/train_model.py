@@ -178,7 +178,6 @@ def train_model(
     rec_every = max(1, int(record_every))
 
     dataset_name = str(dataset).strip().lower()
-    accuracy_mode = False
 
     # ─── Dataset loading ─────────────────────────────────────────────────────
     if dataset_name == "mnist":
@@ -207,7 +206,6 @@ def train_model(
             n_train, n_val = len(X_train), len(X_val)
             loss_fn: nn.Module = nn.CrossEntropyLoss()
             is_class = True
-            accuracy_mode = True
 
             # If model dims don't match MNIST (784 in, 10 out), rebuild
             if dims[0] != 784 or dims[-1] != 10:
@@ -322,12 +320,19 @@ def train_model(
         dt = _t.perf_counter() - t0
         final_val = val_losses[-1] if val_losses else round(last_train_loss, 6)
 
-        # Compute accuracy for classification tasks
+        # Validation accuracy for all classification runs (MNIST + synthetic).
+        # Synthetic runs previously omitted val_accuracy, so campaign baselines saw metric_value=None.
         val_accuracy = None
-        if is_class and accuracy_mode:
+        if is_class:
             with torch.no_grad():
-                preds = net(X_val).argmax(dim=1)
-                val_accuracy = float((preds == Y_val).float().mean().item())
+                logits = net(X_val)
+                if isinstance(loss_fn, nn.BCEWithLogitsLoss):
+                    preds = (logits.squeeze(-1) > 0).float()
+                    y = Y_val.squeeze(-1).float()
+                    val_accuracy = float((preds == y).float().mean().item())
+                else:
+                    preds = logits.argmax(dim=1)
+                    val_accuracy = float((preds == Y_val.long()).float().mean().item())
 
         tid = f"{model_id}:trained"
         put_model(tid, {

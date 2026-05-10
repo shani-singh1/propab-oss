@@ -95,7 +95,9 @@ class LLMClient:
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.2,
         }
-        async with httpx.AsyncClient(timeout=40) as client:
+        tout = float(getattr(settings, "llm_http_timeout_sec", 180.0))
+        timeout = httpx.Timeout(tout, connect=min(60.0, tout))
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(url, headers=headers, json=payload)
         response.raise_for_status()
         body = response.json()
@@ -109,7 +111,8 @@ class LLMClient:
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
         }
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        tout = max(120.0, float(getattr(settings, "llm_http_timeout_sec", 180.0)))
+        async with httpx.AsyncClient(timeout=httpx.Timeout(tout, connect=min(60.0, tout))) as client:
             response = await client.post(url, json=payload)
         response.raise_for_status()
         body = response.json()
@@ -142,7 +145,8 @@ class LLMClient:
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.2},
         }
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        tout = max(120.0, float(getattr(settings, "llm_http_timeout_sec", 180.0)))
+        async with httpx.AsyncClient(timeout=httpx.Timeout(tout, connect=min(60.0, tout))) as client:
             response = await client.post(url, params=params, json=payload)
         response.raise_for_status()
         body = response.json()

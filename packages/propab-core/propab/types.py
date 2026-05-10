@@ -21,6 +21,7 @@ class EventType(str, Enum):
     LIT_RETRIEVAL_QUERY = "literature.retrieval_query"
     LIT_RETRIEVAL_RESULTS = "literature.retrieval_results"
     LIT_RETRIEVAL_RERANKED = "literature.retrieval_reranked"
+    LIT_PAPERS_RELEVANCE_FILTER = "literature.papers_relevance_filter"
     LIT_PRIOR_BUILT = "literature.prior_built"
     LIT_ANSWER_FOUND = "literature.answer_found"
     HYPO_GENERATED = "hypothesis.generated"
@@ -33,6 +34,7 @@ class EventType(str, Enum):
     AGENT_STEP_FAILED = "agent.step_failed"
     AGENT_COMPLETED = "agent.completed"
     AGENT_FAILED = "agent.failed"
+    AGENT_TIME_BUDGET_EXCEEDED = "agent.time_budget_exceeded"
     TOOL_SELECTED = "tool.selected"
     TOOL_CALLED = "tool.called"
     TOOL_RESULT = "tool.result"
@@ -76,6 +78,26 @@ class EventType(str, Enum):
     MEMORY_KB_WRITTEN = "memory.kb_written"
     # Session resume
     SESSION_RESUMED = "session.resumed"
+    # Significance gate (think-act)
+    SIG_GATE_PASSED = "significance.gate_passed"
+    SIG_GATE_FAILED = "significance.gate_failed"
+    SIG_GATE_BYPASSED = "significance.gate_bypassed"
+    AGENT_DECIDED_NEXT_STEP = "agent.decided_next_step"
+    AGENT_DECIDED_STOP = "agent.decided_stop"
+    # Campaign lifecycle
+    CAMPAIGN_STARTED = "campaign.started"
+    CAMPAIGN_PROGRESS = "campaign.progress"
+    CAMPAIGN_PAUSED = "campaign.paused"
+    CAMPAIGN_RESUMED = "campaign.resumed"
+    CAMPAIGN_BREAKTHROUGH = "campaign.breakthrough"
+    CAMPAIGN_BUDGET_EXHAUSTED = "campaign.budget_exhausted"
+    CAMPAIGN_COMPLETED = "campaign.completed"
+    # Baseline measurement
+    BASELINE_MEASURED = "campaign.baseline_measured"
+    # Hypothesis tree
+    HYPO_TREE_EXPANDED = "hypothesis.tree_expanded"
+    HYPO_TREE_PRUNED = "hypothesis.tree_pruned"
+    HYPO_TREE_FRONTIER_EMPTY = "hypothesis.tree_frontier_empty"
 
 
 @dataclass(slots=True)

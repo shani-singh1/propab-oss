@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from services.worker.think_act import (
@@ -29,6 +31,12 @@ def _make_ctx(**kwargs) -> AgentContext:
 def test_should_stop_at_max_steps():
     ctx = _make_ctx(steps_taken=10, max_steps=10)
     assert should_stop(ctx) is True
+
+
+def test_should_stop_when_deadline_elapsed():
+    ctx = _make_ctx(steps_taken=0, max_steps=100, deadline_monotonic=time.monotonic() - 1.0)
+    assert should_stop(ctx) is True
+    assert ctx.time_budget_exceeded is True
 
 
 def test_should_not_stop_before_max():
