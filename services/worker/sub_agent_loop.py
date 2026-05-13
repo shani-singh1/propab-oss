@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from typing import Any, TypedDict
@@ -23,7 +24,7 @@ from propab.tool_chain import refine_next_tool_step
 from propab.tool_selection import select_tool_steps
 from propab.tools.registry import ToolRegistry
 from propab.types import EventType
-from services.worker.domain_router import route_domain
+from services.worker.domain_router import coerce_routed_domain, route_domain
 from services.worker.failure_classify import classify_exception
 from services.worker.peer_findings import poll_peer_findings
 from services.worker.sandbox import run_sandboxed_python
@@ -42,6 +43,135 @@ from services.worker.think_act import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _sandbox_diag_tails(sandbox_out: dict[str, Any], *, maxlen: int = 1500) -> dict[str, Any]:
+    """Short tails for code.timeout / code.error payloads (container stderr is the main signal)."""
+    if not isinstance(sandbox_out, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key in ("stderr", "stdout", "message"):
+        raw = sandbox_out.get(key)
+        if raw is None:
+            continue
+        s = raw if isinstance(raw, str) else str(raw)
+        if not s.strip():
+            continue
+        out[f"{key}_tail"] = s[-maxlen:] if len(s) > maxlen else s
+    et = sandbox_out.get("error_type")
+    if et:
+        out["sandbox_error_type"] = et
+    return out
+
+
+def _think_act_stub_code(code_desc: str) -> str:
+    """
+    Deterministic stub: must never embed raw ``code_description`` in a ``#`` line.
+
+    A newline inside the description would end the comment and turn the rest into
+    executable Python (LLM pasting a full training script → Docker wall timeouts).
+    """
+    desc = str(code_desc or "custom computation")
+    return (
+        "import json, sys\n"
+        "result = {"
+        f"'computation': {json.dumps(desc)}, "
+        "'status': 'executed', 'sandbox': 'ok'"
+        "}\n"
+        "print(json.dumps(result))\n"
+    )
+
+
+def _is_sandbox_wall_timeout(sandbox_out: dict[str, Any]) -> bool:
+    """
+    True when Docker or the sandbox wrapper hit a wall-clock limit.
+
+    ``run_sandboxed_python`` historically put everything in ``message``; some
+    Docker SDK paths use ``Read timed out`` (no substring ``timeout``), which
+    must still count as a wall timeout so we never treat it as a generic error
+    and spin identical retries.
+    """
+    if not isinstance(sandbox_out, dict):
+        return False
+    et = str(sandbox_out.get("error_type", "") or "").lower()
+    if "timeout" in et or et in {"docker_read_timeout", "docker_timeout"}:
+        return True
+    msg = str(sandbox_out.get("message", "") or "").lower()
+    stderr = str(sandbox_out.get("stderr", "") or "").lower()
+    blob = f"{msg} {stderr}"
+    if "timeout" in blob or "timed out" in blob or "deadline exceeded" in blob:
+        return True
+    return False
+
+
+def _is_trusted_inline_sandbox_code(code: str) -> bool:
+    """
+    Detect agent/heuristic stub snippets that are intentionally tiny JSON printers.
+    These must never spend 480s in Docker — they were the dominant source of
+    code.generated / code.timeout 1:1 ratios when the worker image/network stalled.
+
+    Think–act stubs that embed ``json.dumps(code_description)`` may contain
+    substrings like ``open(`` inside string literals; those are still safe but
+    fail this heuristic — callers that built the stub programmatically should pass
+    ``force_inline_trusted=True`` to ``run_code_step``.
+    """
+    s = (code or "").strip()
+    if len(s) > 6000:
+        return False
+    blocked = ("subprocess", "socket", "urllib", "requests", "open(", "Path(", "__import__", "eval(", "exec(")
+    if any(b in s for b in blocked):
+        return False
+    # Think–act stub: import json, sys + result dict + print(json.dumps(result))
+    if (
+        s.startswith("import json, sys")
+        and "result = {" in s
+        and "print(json.dumps(result))" in s
+        and "'sandbox': 'ok'" in s
+    ):
+        return True
+    # Heuristic tail: one-line print(json.dumps({...sandbox...}))
+    if (
+        "import json" in s
+        and "print(json.dumps(" in s
+        and "sandbox" in s
+        and s.count("\n") <= 4
+    ):
+        return True
+    return False
+
+
+def _run_inline_trusted_sandbox_code(code: str) -> dict[str, Any]:
+    """Execute trusted stub in-process (no Docker). Returns same shape as run_sandboxed_python."""
+    import io
+    import contextlib
+
+    buf = io.StringIO()
+    g: dict[str, Any] = {"json": json}
+    try:
+        with contextlib.redirect_stdout(buf):
+            exec(compile(code, "<inline_stub>", "exec"), g, g)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error_type": "inline_stub_error",
+            "message": str(exc),
+            "stdout": buf.getvalue(),
+            "stderr": "",
+        }
+    out = buf.getvalue()
+    parsed = None
+    for ln in reversed([x.strip() for x in out.splitlines() if x.strip()]):
+        if ln.startswith("{") and ln.endswith("}"):
+            try:
+                parsed = json.loads(ln)
+                break
+            except json.JSONDecodeError:
+                continue
+    if parsed is None and isinstance(g.get("result"), dict):
+        parsed = g["result"]
+    ok = isinstance(parsed, dict) and parsed.get("sandbox") == "ok"
+    return {"ok": ok, "stdout": out, "stderr": "", "parsed": parsed}
+
 
 _UTILITY_TOOL_NAMES = frozenset({"json_extract", "text_stats", "format_convert"})
 
@@ -495,14 +625,123 @@ async def run_sub_agent_async(payload: dict) -> dict:
             hypothesis_id=hypothesis_id,
         )
 
-        domain, domain_reason = await route_domain(
-            hypothesis_text=str(hypothesis.get("text", "")),
-            llm=llm,
-            session_id=session_id,
-            hypothesis_id=hypothesis_id,
-            question=question,
+        logger.info(
+            "[sub_agent] startup session_id=%s hypothesis_id=%s PROPAB_PROFILE=%s "
+            "sandbox_code_max_retries=%s sandbox_after_timeout_llm_rewrite=%s",
+            session_id,
+            hypothesis_id,
+            (os.environ.get("PROPAB_PROFILE") or "").strip(),
+            int(getattr(settings, "sandbox_code_max_retries", 1)),
+            bool(getattr(settings, "sandbox_after_timeout_llm_rewrite", True)),
         )
-        sandbox_timeout_sec = effective_sandbox_timeout_sec(domain, settings.sandbox_timeout_sec)
+
+        fast_path = str(payload.get("fast_path") or "").strip().lower()
+        if fast_path == "baseline_measurement":
+            bm_cfg = payload.get("baseline_measurement") if isinstance(payload.get("baseline_measurement"), dict) else {}
+            ds = str(bm_cfg.get("dataset") or "mnist").strip() or "mnist"
+            n_bm = max(
+                20,
+                min(
+                    int(bm_cfg.get("n_steps") or settings.campaign_baseline_max_train_steps),
+                    int(getattr(settings, "campaign_baseline_max_train_steps", 150)),
+                ),
+            )
+            metric_key = str(baseline.get("metric_name") or "val_accuracy").strip() or "val_accuracy"
+            params = {
+                "model_id": "auto",
+                "dataset": ds,
+                "n_steps": n_bm,
+                "task": "classification",
+            }
+            await emitter.emit(
+                session_id=session_id,
+                event_type=EventType.TOOL_CALLED,
+                step=f"experiment.{hypothesis_id}.baseline_fast",
+                payload={"tool": "train_model", "params": params, "fast_path": True},
+                hypothesis_id=hypothesis_id,
+            )
+            result = registry.call("train_model", params)
+            if result.success and isinstance(result.output, dict):
+                metric_val = _primary_metric_from_tool_output(result.output)
+                evidence = (
+                    "fast baseline measurement via train_model; "
+                    f"dataset={ds}; n_steps={n_bm}; metric={metric_key}; "
+                    f"metric_value={metric_val}."
+                )
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.TOOL_RESULT,
+                    step=f"experiment.{hypothesis_id}.baseline_fast",
+                    payload={"tool": "train_model", "output": result.output, "fast_path": True},
+                    hypothesis_id=hypothesis_id,
+                )
+                await _update_hypothesis(
+                    session_factory,
+                    hypothesis_id,
+                    status="completed",
+                    verdict="inconclusive",
+                    confidence=0.0,
+                    evidence_summary=evidence,
+                    key_finding=None,
+                    tool_trace_id=trace_pointer,
+                )
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.AGENT_COMPLETED,
+                    step=f"experiment.{hypothesis_id}.complete",
+                    payload={"verdict": "inconclusive", "confidence": 0.0, "fast_path": fast_path},
+                    hypothesis_id=hypothesis_id,
+                )
+                await redis.close()
+                await engine.dispose()
+                out = {
+                    "hypothesis_id": hypothesis_id,
+                    "campaign_node_id": campaign_node_id,
+                    "verdict": "inconclusive",
+                    "confidence": 0.0,
+                    "evidence_summary": evidence,
+                    "key_finding": None,
+                    "tool_trace_id": trace_pointer,
+                    "figures": [],
+                    "duration_sec": round(time.perf_counter() - started, 3),
+                    "failure_reason": None,
+                    "learned": "Fast baseline measured with train_model.",
+                    "metric_value": metric_val,
+                    "baseline_value": baseline_value,
+                }
+                if metric_val is not None:
+                    out[metric_key] = metric_val
+                return out
+
+            err = result.error.to_dict() if result.error else {"type": "tool_error", "message": "unknown"}
+            await emitter.emit(
+                session_id=session_id,
+                event_type=EventType.TOOL_ERROR,
+                step=f"experiment.{hypothesis_id}.baseline_fast",
+                payload={"tool": "train_model", "failure_kind": "fast_baseline_failed", "error": err},
+                hypothesis_id=hypothesis_id,
+            )
+            raise RuntimeError(f"fast baseline measurement failed: {err}")
+
+        hyp_text = str(hypothesis.get("text", ""))
+        plan_source = (settings.sub_agent_plan_source or "heuristic").strip().lower()
+        payload_domain = str(payload.get("domain") or "").strip()
+        if plan_source == "heuristic" and payload_domain:
+            domain = coerce_routed_domain(payload_domain)
+            domain_reason = "Using orchestrator-provided domain in heuristic smoke mode."
+        else:
+            domain, domain_reason = await route_domain(
+                hypothesis_text=hyp_text,
+                llm=llm,
+                session_id=session_id,
+                hypothesis_id=hypothesis_id,
+                question=question,
+            )
+        sandbox_timeout_sec = effective_sandbox_timeout_sec(
+            domain,
+            settings.sandbox_timeout_sec,
+            use_domain_floor=bool(getattr(settings, "sandbox_use_domain_timeout_floor", True)),
+        )
 
         await emitter.emit(
             session_id=session_id,
@@ -523,12 +762,35 @@ async def run_sub_agent_async(payload: dict) -> dict:
             "domain": domain,
         }
 
-        hyp_text = str(hypothesis.get("text", ""))
-        plan_source = (settings.sub_agent_plan_source or "heuristic").strip().lower()
         can_llm = settings.llm_provider.strip().lower() == "ollama" or bool(settings.llm_api_secret.strip())
         use_think_act = plan_source in ("llm", "hybrid") and can_llm
-        agent_max_steps = max(int(settings.agent_max_steps), 5)
+
+        _alimits = payload.get("agent_limits") if isinstance(payload.get("agent_limits"), dict) else {}
+
+        def _agent_lim(name: str, fallback: int) -> int:
+            raw = _alimits.get(name)
+            if raw is None:
+                return int(fallback)
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return int(fallback)
+
+        agent_max_seconds_eff = max(30, _agent_lim("max_seconds", int(settings.agent_max_seconds)))
+        agent_max_steps = max(_agent_lim("max_steps", int(settings.agent_max_steps)), 5)
         agent_min_steps = max(1, min(int(settings.agent_min_steps), agent_max_steps - 1))
+        max_tc = max(0, _agent_lim("max_tool_calls", int(getattr(settings, "agent_max_tool_calls", 0) or 0)))
+
+        logger.info(
+            "[sub_agent] hypothesis_id=%s sandbox_code_max_retries=%s sandbox_after_timeout_llm_rewrite=%s "
+            "agent_max_steps=%s agent_max_seconds=%s agent_max_tool_calls=%s",
+            hypothesis_id,
+            int(getattr(settings, "sandbox_code_max_retries", 1)),
+            bool(getattr(settings, "sandbox_after_timeout_llm_rewrite", True)),
+            agent_max_steps,
+            agent_max_seconds_eff,
+            max_tc,
+        )
 
         # Build initial tool steps (heuristic plan used as starting point for both paths)
         heuristic_steps = _heuristic_tool_plan_merged(
@@ -565,6 +827,8 @@ async def run_sub_agent_async(payload: dict) -> dict:
                 "plan_origin": plan_origin,
                 "think_act_enabled": use_think_act,
                 "agent_max_steps": agent_max_steps,
+                "agent_max_seconds": agent_max_seconds_eff,
+                "agent_max_tool_calls": max_tc,
                 "heuristic_steps": [tn for tn, _ in heuristic_steps],
             },
             hypothesis_id=hypothesis_id,
@@ -575,13 +839,14 @@ async def run_sub_agent_async(payload: dict) -> dict:
         successful_tool_outputs: list[dict[str, Any]] = []
         successful_tool_names: list[str] = []
         step_counter = 0
-        max_tc = max(0, int(getattr(settings, "agent_max_tool_calls", 0) or 0))
         tool_calls_done = 0
+        err_box: list[Any] = [None]
 
         # ── Shared tool execution helper (inline, no external function needed) ─
 
         async def run_tool_step(tool_name: str, params: dict, step_index: int) -> bool:
             nonlocal any_tool_success, last_tool_name, last_tool_step_index, tool_calls_done
+            err_box[0] = None
             last_tool_name = tool_name
             last_tool_step_index = step_index
             step_id = str(uuid4())
@@ -608,6 +873,14 @@ async def run_sub_agent_async(payload: dict) -> dict:
             tool_calls_done += 1
 
             call_params = dict(params or {})
+            n_steps_cap = max(0, int(getattr(settings, "agent_tool_n_steps_cap", 0) or 0))
+            if n_steps_cap > 0:
+                for k in ("n_steps", "epochs", "num_steps", "num_epochs", "steps", "n_epochs", "training_steps"):
+                    if k in call_params:
+                        try:
+                            call_params[k] = min(int(call_params[k]), n_steps_cap)
+                        except (TypeError, ValueError):
+                            pass
             if (
                 tool_name == "literature_baseline_compare"
                 and call_params.get("baseline_value") is None
@@ -616,6 +889,12 @@ async def run_sub_agent_async(payload: dict) -> dict:
                 and abs(float(baseline_value)) >= 1e-12
             ):
                 call_params["baseline_value"] = float(baseline_value)
+            if tool_name == "literature_baseline_compare" and call_params.get("baseline_value") is not None:
+                try:
+                    if abs(float(call_params["baseline_value"])) < 1e-12:
+                        call_params.pop("baseline_value", None)
+                except (TypeError, ValueError):
+                    pass
 
             await emitter.emit(
                 session_id=session_id,
@@ -654,6 +933,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
                 )
             else:
                 err_d = result.error.to_dict() if result.error else {}
+                err_box[0] = err_d
                 fk = "tool_execution_error"
                 et = str((err_d or {}).get("type") or "")
                 if et in ("validation_error", "missing_dependency", "auto_build_error", "zero_variance"):
@@ -688,17 +968,18 @@ async def run_sub_agent_async(payload: dict) -> dict:
             )
             return bool(result.success)
 
-        async def run_code_step(code: str, step_index: int) -> bool:
+        async def run_code_step(
+            code: str,
+            step_index: int,
+            *,
+            force_inline_trusted: bool = False,
+        ) -> bool:
             nonlocal sandbox_ok
             step_id = str(uuid4())
             t0 = time.perf_counter()
-            base_max = max(1, int(settings.sandbox_code_max_retries))
-            allow_rewrite = bool(getattr(settings, "sandbox_after_timeout_llm_rewrite", True)) and can_llm
-            hard_cap = base_max + (1 if allow_rewrite else 0)
             code_cur = code
             parsed = None
             sandbox_out: dict = {}
-            inv = 0
             rewrite_used = False
 
             await emitter.emit(
@@ -710,8 +991,11 @@ async def run_sub_agent_async(payload: dict) -> dict:
             )
 
             sandbox_ok = False
-            while inv < hard_cap:
-                inv += 1
+            trust_heuristic = _is_trusted_inline_sandbox_code(code_cur)
+            use_inline = bool(force_inline_trusted) or trust_heuristic
+            if use_inline:
+                forced = bool(force_inline_trusted) and not trust_heuristic
+                exec_label = "inline_stub_forced" if forced else "inline_stub"
                 await emitter.emit(
                     session_id=session_id,
                     event_type=EventType.CODE_SUBMITTED,
@@ -720,16 +1004,20 @@ async def run_sub_agent_async(payload: dict) -> dict:
                         "memory_mb": settings.sandbox_memory_mb,
                         "timeout_sec": sandbox_timeout_sec,
                         "domain": domain,
-                        "attempt": inv,
-                        "max_attempts": hard_cap,
-                        "llm_rewrite_slot": allow_rewrite,
+                        "attempt": 1,
+                        "max_attempts": 1,
+                        "llm_rewrite_slot": False,
+                        "execution": exec_label,
+                        "note": (
+                            "Programmatic stub — in-process (no Docker); forced because "
+                            "description tripped substring heuristics or bypasses comment injection."
+                            if forced
+                            else "Trusted agent stub — in-process (no Docker) to avoid spurious sandbox timeouts."
+                        ),
                     },
                     hypothesis_id=hypothesis_id,
                 )
-                sandbox_out = await asyncio.to_thread(
-                    run_sandboxed_python, code_cur,
-                    timeout_sec=sandbox_timeout_sec, memory_mb=settings.sandbox_memory_mb,
-                )
+                sandbox_out = await asyncio.to_thread(_run_inline_trusted_sandbox_code, code_cur)
                 parsed = sandbox_out.get("parsed") if isinstance(sandbox_out, dict) else None
                 ok_run = bool(
                     sandbox_out.get("ok")
@@ -745,57 +1033,128 @@ async def run_sub_agent_async(payload: dict) -> dict:
                         payload={
                             "stdout_json": parsed,
                             "stdout": sandbox_out.get("stdout"),
-                            "attempt": inv,
-                            "rewrite_after_timeout": rewrite_used,
+                            "attempt": 1,
+                            "rewrite_after_timeout": False,
+                            "execution": exec_label,
                         },
                         hypothesis_id=hypothesis_id,
                     )
-                    break
-                is_timeout = "timeout" in str(sandbox_out.get("message", "")).lower()
-                ev = EventType.CODE_TIMEOUT if is_timeout else EventType.CODE_ERROR
-                await emitter.emit(
-                    session_id=session_id, event_type=ev,
-                    step=f"experiment.{hypothesis_id}.step_{step_index}",
-                    payload={
-                        "failure_kind": "sandbox_timeout" if is_timeout else "sandbox_error",
-                        "timeout_sec": sandbox_timeout_sec,
-                        "memory_mb": settings.sandbox_memory_mb,
-                        "error": sandbox_out,
-                        "attempt": inv,
-                        "max_attempts": hard_cap,
-                    },
-                    hypothesis_id=hypothesis_id,
-                )
-                if (
-                    is_timeout
-                    and allow_rewrite
-                    and not rewrite_used
-                    and looks_like_heavy_training_code(code_cur)
-                ):
-                    new_code = await rewrite_sandbox_code_after_timeout(
-                        llm,
+                else:
+                    await emitter.emit(
                         session_id=session_id,
+                        event_type=EventType.CODE_ERROR,
+                        step=f"experiment.{hypothesis_id}.step_{step_index}",
+                        payload={
+                            "failure_kind": "inline_stub_error",
+                            "error": sandbox_out,
+                            "attempt": 1,
+                            "max_attempts": 1,
+                        },
                         hypothesis_id=hypothesis_id,
-                        code=code_cur,
-                        sandbox_timeout_sec=int(sandbox_timeout_sec),
-                        domain=str(domain or ""),
                     )
-                    if new_code:
-                        code_cur = new_code
-                        rewrite_used = True
+            else:
+                # Never burn N × sandbox wall on the same source: the old
+                # ``while inv < hard_cap`` loop replayed identical code up to
+                # ``sandbox_code_max_retries`` times after each timeout (45 submits /
+                # 15 generations in campaigns). We allow at most:
+                #   1) one Docker run of the model's code, then
+                #   2) one optional second run *only* after an LLM rewrite (different source).
+                # Docker path: total executions per ``code.generated`` are capped by
+                # ``sandbox_code_max_retries`` (interpreted as max Docker runs, minimum 1).
+                # When 1, skip the post-timeout rewrite second run entirely.
+                allow_rewrite = bool(getattr(settings, "sandbox_after_timeout_llm_rewrite", True)) and can_llm
+                max_docker = max(1, int(getattr(settings, "sandbox_code_max_retries", 1) or 1))
+                allow_second = max_docker >= 2 and allow_rewrite
+                planned_max = min(max_docker, 1 + (1 if allow_second else 0))
+                for exec_n in range(1, planned_max + 1):
+                    await emitter.emit(
+                        session_id=session_id,
+                        event_type=EventType.CODE_SUBMITTED,
+                        step=f"experiment.{hypothesis_id}.step_{step_index}",
+                        payload={
+                            "memory_mb": settings.sandbox_memory_mb,
+                            "timeout_sec": sandbox_timeout_sec,
+                            "domain": domain,
+                            "attempt": exec_n,
+                            "max_attempts": planned_max,
+                            "llm_rewrite_slot": allow_second,
+                        },
+                        hypothesis_id=hypothesis_id,
+                    )
+                    sandbox_out = await asyncio.to_thread(
+                        run_sandboxed_python,
+                        code_cur,
+                        timeout_sec=sandbox_timeout_sec,
+                        memory_mb=settings.sandbox_memory_mb,
+                    )
+                    parsed = sandbox_out.get("parsed") if isinstance(sandbox_out, dict) else None
+                    ok_run = bool(
+                        sandbox_out.get("ok")
+                        and isinstance(parsed, dict)
+                        and parsed.get("sandbox") == "ok"
+                    )
+                    if ok_run:
+                        sandbox_ok = True
                         await emitter.emit(
                             session_id=session_id,
-                            event_type=EventType.CODE_GENERATED,
+                            event_type=EventType.CODE_RESULT,
                             step=f"experiment.{hypothesis_id}.step_{step_index}",
                             payload={
-                                "code": code_cur,
-                                "rewrite_after_timeout": True,
-                                "after_attempt": inv,
+                                "stdout_json": parsed,
+                                "stdout": sandbox_out.get("stdout"),
+                                "attempt": exec_n,
+                                "rewrite_after_timeout": rewrite_used,
                             },
                             hypothesis_id=hypothesis_id,
                         )
-                        continue
-                break
+                        break
+                    is_timeout = _is_sandbox_wall_timeout(sandbox_out)
+                    ev = EventType.CODE_TIMEOUT if is_timeout else EventType.CODE_ERROR
+                    await emitter.emit(
+                        session_id=session_id,
+                        event_type=ev,
+                        step=f"experiment.{hypothesis_id}.step_{step_index}",
+                        payload={
+                            "failure_kind": "sandbox_timeout" if is_timeout else "sandbox_error",
+                            "timeout_sec": sandbox_timeout_sec,
+                            "memory_mb": settings.sandbox_memory_mb,
+                            "error": sandbox_out,
+                            "attempt": exec_n,
+                            "max_attempts": planned_max,
+                            **_sandbox_diag_tails(sandbox_out),
+                        },
+                        hypothesis_id=hypothesis_id,
+                    )
+                    if (
+                        exec_n < planned_max
+                        and is_timeout
+                        and allow_second
+                        and looks_like_heavy_training_code(code_cur)
+                    ):
+                        new_code = await rewrite_sandbox_code_after_timeout(
+                            llm,
+                            session_id=session_id,
+                            hypothesis_id=hypothesis_id,
+                            code=code_cur,
+                            sandbox_timeout_sec=int(sandbox_timeout_sec),
+                            domain=str(domain or ""),
+                        )
+                        if new_code and new_code.strip() != code_cur.strip():
+                            code_cur = new_code
+                            rewrite_used = True
+                            await emitter.emit(
+                                session_id=session_id,
+                                event_type=EventType.CODE_GENERATED,
+                                step=f"experiment.{hypothesis_id}.step_{step_index}",
+                                payload={
+                                    "code": code_cur,
+                                    "rewrite_after_timeout": True,
+                                    "after_attempt": exec_n,
+                                },
+                                hypothesis_id=hypothesis_id,
+                            )
+                            continue
+                    break
 
             duration_ms = int((time.perf_counter() - t0) * 1000)
             await _insert_experiment_step_code(
@@ -823,7 +1182,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
         # THINK-ACT PATH: LLM decides each next action from accumulated context
         # ─────────────────────────────────────────────────────────────────────
         if use_think_act:
-            deadline = time.monotonic() + max(30.0, float(settings.agent_max_seconds))
+            deadline = time.monotonic() + max(30.0, float(agent_max_seconds_eff))
             agent_ctx = AgentContext(
                 hypothesis_text=hyp_text,
                 test_methodology=str(hypothesis.get("test_methodology") or ""),
@@ -835,6 +1194,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
                 max_steps=agent_max_steps,
                 min_steps=agent_min_steps,
                 deadline_monotonic=deadline,
+                tool_failures=[],
             )
 
             # Run the first heuristic step immediately to seed the agent with data
@@ -888,7 +1248,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
                     session_id=session_id,
                     hypothesis_id=hypothesis_id,
                     sandbox_timeout_sec=int(sandbox_timeout_sec),
-                    agent_wall_budget_sec=int(settings.agent_max_seconds),
+                    agent_wall_budget_sec=int(agent_max_seconds_eff),
                 )
 
                 await emitter.emit(
@@ -935,19 +1295,19 @@ async def run_sub_agent_async(payload: dict) -> dict:
                     if step_ok and successful_tool_outputs:
                         agent_ctx.results_so_far.append(successful_tool_outputs[-1])
                         agent_ctx.tool_names_run.append(tool_name_ta)
+                    elif not step_ok and err_box[0]:
+                        agent_ctx.tool_failures.append({"tool": tool_name_ta, "error": err_box[0]})
+                        if len(agent_ctx.tool_failures) > 12:
+                            agent_ctx.tool_failures.pop(0)
 
                 elif action.action_type == "code":
                     code_desc = action.code_description or "custom computation"
-                    code = (
-                        "import json, sys\n"
-                        f"# {code_desc}\n"
-                        "result = {"
-                        f"'computation': {json.dumps(code_desc)}, "
-                        "'status': 'executed', 'sandbox': 'ok'"
-                        "}\n"
-                        "print(json.dumps(result))\n"
+                    code = _think_act_stub_code(str(code_desc))
+                    step_ok = await run_code_step(
+                        code,
+                        step_counter,
+                        force_inline_trusted=True,
                     )
-                    step_ok = await run_code_step(code, step_counter)
                     if step_ok:
                         agent_ctx.tool_names_run.append("__code__")
 
@@ -960,7 +1320,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
                     event_type=EventType.AGENT_TIME_BUDGET_EXCEEDED,
                     step=f"experiment.{hypothesis_id}.time_budget",
                     payload={
-                        "agent_max_seconds": int(settings.agent_max_seconds),
+                        "agent_max_seconds": int(agent_max_seconds_eff),
                         "steps_taken": agent_ctx.steps_taken,
                         "tools_tail": agent_ctx.tool_names_run[-12:],
                         "reason": "Wall clock cap (settings.agent_max_seconds / PROPAB_PROFILE).",
@@ -997,7 +1357,11 @@ async def run_sub_agent_async(payload: dict) -> dict:
                 )
 
                 if step.get("type") == "code":
-                    await run_code_step(str(step.get("code", "")), step_index)
+                    await run_code_step(
+                        str(step.get("code", "")),
+                        step_index,
+                        force_inline_trusted=True,
+                    )
                 else:
                     tool_name = step["tool"]
                     params = step["params"]

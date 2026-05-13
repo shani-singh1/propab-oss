@@ -57,7 +57,8 @@ _REWRITE_PROMPT = """The following Python hit the Docker sandbox wall-clock limi
 
 Your task: rewrite it to finish reliably inside that budget.
 Rules:
-- Reduce training: lower n_steps / epochs / iterations by 4–10× (or more if still heavy).
+- Never resubmit identical code: the next run must use fewer steps/epochs or a smaller model so wall time drops materially.
+- Cap inner optimization steps at roughly max(12, int(SANDBOX_WALL_SEC // 6)) unless the user explicitly needs more and SANDBOX_REMAINING_SEC() still allows it.
 - Prefer larger batch_size when it shortens the loop.
 - The sandbox prepends SANDBOX_WALL_SEC and SANDBOX_REMAINING_SEC() — you may call SANDBOX_REMAINING_SEC() in loops and break early if low.
 - Keep the same scientific intent (same dataset/model family if possible) but underpowered.

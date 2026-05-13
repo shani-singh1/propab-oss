@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-Start Campaign v1 (fixes.md): MNIST MLP under 50k params, +5% breakthrough, 4h budget.
+Start Campaign v2 — same research question as v1, for apples-to-apples comparison.
 
-Writes artifacts/campaign_v1_latest.json with campaign_id for monitor_campaign.py.
+Writes artifacts/campaign_v2_latest.json with campaign_id for monitor_campaign.py.
 
-Example:
-  set PROPAB_PROFILE=campaign   # optional; should match docker-compose (default campaign)
-  python scripts/start_campaign_v1.py --api http://localhost:8000
+Example (Windows PowerShell):
+  $env:PROPAB_PROFILE = 'campaign'
+  python scripts/start_campaign_v2.py --api http://localhost:8000 --hours 4
+
+Example (bash):
+  export PROPAB_PROFILE=campaign
+  python scripts/start_campaign_v2.py --api http://localhost:8000 --hours 4
 """
 from __future__ import annotations
 
@@ -17,8 +21,8 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-
-CAMPAIGN_V1_QUESTION = (
+# Identical question string to scripts/start_campaign_v1.py (Campaign v1 reference).
+CAMPAIGN_V2_QUESTION = (
     "Find the optimal MLP architecture for MNIST under a 50,000 parameter budget "
     "that maximizes test accuracy. Baseline: 784-60-10 single hidden layer. "
     "Breakthrough threshold: +5% accuracy improvement over baseline."
@@ -27,7 +31,7 @@ CAMPAIGN_V1_QUESTION = (
 
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
-    parser = argparse.ArgumentParser(description="POST /campaigns for Campaign v1 question.")
+    parser = argparse.ArgumentParser(description="POST /campaigns for Campaign v2 (same question as v1).")
     parser.add_argument("--api", default="http://localhost:8000", help="Propab API base URL")
     parser.add_argument(
         "--hours",
@@ -37,18 +41,16 @@ def main() -> None:
     )
     parser.add_argument(
         "--out",
-        default=str(root / "artifacts" / "campaign_v1_latest.json"),
+        default=str(root / "artifacts" / "campaign_v2_latest.json"),
         help="Write campaign_id + metadata here",
     )
     args = parser.parse_args()
     api = args.api.rstrip("/")
 
-    hours = args.hours
-
     body = json.dumps(
         {
-            "question": CAMPAIGN_V1_QUESTION,
-            "compute_budget_hours": hours,
+            "question": CAMPAIGN_V2_QUESTION,
+            "compute_budget_hours": args.hours,
             "breakthrough_criteria": {
                 "metric_name": "val_accuracy",
                 "improvement_threshold": 0.05,
@@ -83,8 +85,8 @@ def main() -> None:
         "stream_url": f"{api}/stream/{cid}",
         "state_url": f"{api}/campaigns/{cid}",
         "events_url": f"{api}/sessions/{cid}/events",
-        "question": CAMPAIGN_V1_QUESTION,
-        "compute_budget_hours": hours,
+        "question": CAMPAIGN_V2_QUESTION,
+        "compute_budget_hours": args.hours,
         "api": api,
     }
     out_path = Path(args.out)
@@ -92,7 +94,7 @@ def main() -> None:
     with out_path.open("w", encoding="utf-8") as f:
         json.dump(record, f, indent=2)
 
-    print("Campaign v1 started.")
+    print("Campaign v2 started.")
     print(json.dumps(record, indent=2))
     print(f"\nMonitor:  python scripts/monitor_campaign.py --state-file {out_path}")
     print(f"Or once:  python scripts/monitor_campaign.py --state-file {out_path} --once")

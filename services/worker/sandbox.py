@@ -7,6 +7,11 @@ from typing import Any
 
 import docker
 
+try:
+    import requests
+except ImportError:  # pragma: no cover
+    requests = None  # type: ignore[assignment]
+
 
 def _sandbox_prepended_budget(timeout_sec: int) -> str:
     """Expose wall budget inside user code so training loops can early-exit before Docker SIGKILL."""
@@ -65,7 +70,23 @@ def run_sandboxed_python(
         }
     except docker.errors.APIError as exc:
         return {"ok": False, "error_type": "docker_api", "message": str(exc), "stdout": "", "stderr": ""}
+    except TimeoutError as exc:
+        return {
+            "ok": False,
+            "error_type": "docker_timeout",
+            "message": f"sandbox_wall_timeout: {exc!s}",
+            "stdout": "",
+            "stderr": "",
+        }
     except Exception as exc:
+        if requests is not None and isinstance(exc, requests.exceptions.ReadTimeout):
+            return {
+                "ok": False,
+                "error_type": "docker_read_timeout",
+                "message": f"sandbox_wall_timeout: {exc!s}",
+                "stdout": "",
+                "stderr": "",
+            }
         return {"ok": False, "error_type": "execution_error", "message": str(exc), "stdout": "", "stderr": ""}
 
     stdout = output.decode("utf-8", errors="replace") if isinstance(output, (bytes, bytearray)) else str(output)

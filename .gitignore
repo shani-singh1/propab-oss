@@ -18,3 +18,11 @@ fixes.md
 # Campaign v1 local run pointers / live tail (machine-specific)
 artifacts/campaign_v1_latest.json
 artifacts/campaign_v1_live_monitor.txt
+
+# Campaign v2 / local verify pointers (machine-specific)
+artifacts/campaign_v2_latest.json
+artifacts/campaign_v2_live_monitor.txt
+artifacts/campaign_v2_30min_obs.txt
+artifacts/mini_campaign_verify_latest.json
+
+DESIGN.md

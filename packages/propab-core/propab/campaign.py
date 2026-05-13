@@ -17,6 +17,12 @@ from typing import Any
 from uuid import uuid4
 
 from propab.hypothesis_tree import HypothesisTree
+from propab.metric_normalize import normalize_accuracy_metric
+
+# Reported val_accuracy at or above this (after normalize_accuracy_metric) is treated as
+# instrumentation / unit confusion for typical sandboxed MNIST MLPs — do not
+# record as best_metric or count toward breakthrough (fixes false ~0.998 "wins").
+ACC_METRIC_PLAUSIBILITY_MAX = 0.975
 
 
 def _wall_seconds_since_started(started_at: str) -> float | None:
@@ -64,12 +70,15 @@ class BreakthroughCriteria:
             metric_val = float(metric_val)
         except (TypeError, ValueError):
             return False
+        metric_val = normalize_accuracy_metric(self.metric_name, metric_val)
+        if metric_val is None:
+            return False
         # Near-perfect reported accuracy from a sandbox MLP is usually a instrumentation bug —
         # do not declare campaign breakthrough on it.
         if (
             self.direction == "higher_is_better"
             and "accuracy" in (self.metric_name or "").lower()
-            and metric_val >= 0.999
+            and metric_val >= ACC_METRIC_PLAUSIBILITY_MAX
         ):
             return False
         base = self.baseline_value
@@ -84,11 +93,14 @@ class BreakthroughCriteria:
 
     def improvement_pct(self, metric_value: float) -> float:
         """Return signed fractional improvement over baseline (positive = better for higher_is_better)."""
+        mv = normalize_accuracy_metric(self.metric_name, float(metric_value))
+        if mv is None:
+            return 0.0
         base = self.baseline_value
         if abs(base) < 1e-12:
             return 0.0
         denom = max(abs(base), 1e-9)
-        raw = (metric_value - base) / denom
+        raw = (mv - base) / denom
         return raw if self.direction == "higher_is_better" else -raw
 
     def to_dict(self) -> dict[str, Any]:
@@ -214,11 +226,14 @@ class ResearchCampaign:
             metric_val = float(metric_val)
         except (TypeError, ValueError):
             return False
+        metric_val = normalize_accuracy_metric(crit.metric_name, metric_val)
+        if metric_val is None:
+            return False
 
         if (
             crit.direction == "higher_is_better"
             and "accuracy" in (crit.metric_name or "").lower()
-            and metric_val >= 0.999
+            and metric_val >= ACC_METRIC_PLAUSIBILITY_MAX
         ):
             return False
 

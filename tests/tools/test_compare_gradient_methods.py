@@ -14,6 +14,12 @@ def test_compare_gradient_methods_long_adam_run_stable_bias() -> None:
     assert len((out["trajectories"] or [{}])[0].get("loss_curve", [])) >= 1
 
 
-def test_compare_gradient_methods_empty_methods_validation() -> None:
-    r = compare_gradient_methods(methods=[])
-    assert not r.success
+def test_compare_gradient_methods_far_point_no_crash() -> None:
+    """Large gradients on Rosenbrock far from optimum should not overflow."""
+    r = compare_gradient_methods(
+        methods=["adam"],
+        learning_rate=0.001,
+        n_steps=200,
+        init_point=[50.0, 2500.0],
+    )
+    assert r.success

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -69,6 +70,40 @@ def _ledger_counts(synthesis: dict[str, Any]) -> tuple[int, int, int]:
     n_r = int(syn["total_refuted"]) if isinstance(syn.get("total_refuted"), int) else 0
     n_i = int(syn["total_inconclusive"]) if isinstance(syn.get("total_inconclusive"), int) else 0
     return n_c, n_r, n_i
+
+
+def _annotate_synthesis_blob_for_llm(synthesis: dict[str, Any] | None) -> str:
+    """Prefix synthesis JSON so the LLM sees authoritative ledger counts."""
+    n_c, n_r, n_i = _ledger_counts(synthesis or {})
+    if n_c or n_r or n_i:
+        header = (
+            "AUTHORITATIVE_LEDGER_COUNTS: "
+            f"confirmed={n_c}, refuted={n_r}, inconclusive={n_i}. "
+            "Use these exact integers when describing experiment outcomes.\n"
+        )
+        return header + json.dumps(synthesis or {}, ensure_ascii=False)[:4000]
+    return json.dumps(synthesis or {}, ensure_ascii=False)[:4000]
+
+
+def _merge_ledger_into_llm_abstract(abstract: str, synthesis: dict[str, Any] | None) -> str:
+    """LLM prose often hallucinates ``confirmed=0``; align with synthesis ledger."""
+    n_c, n_r, n_i = _ledger_counts(synthesis or {})
+    if not (n_c or n_r or n_i):
+        return abstract
+    fixed = abstract
+    fixed = re.sub(r"(?i)confirmed\s*=\s*\d+", f"confirmed={n_c}", fixed, count=1)
+    fixed = re.sub(r"(?i)refuted\s*=\s*\d+", f"refuted={n_r}", fixed, count=1)
+    fixed = re.sub(r"(?i)inconclusive\s*=\s*\d+", f"inconclusive={n_i}", fixed, count=1)
+    if (
+        re.search(rf"(?i)confirmed\s*=\s*{n_c}\b", fixed)
+        and re.search(rf"(?i)refuted\s*=\s*{n_r}\b", fixed)
+        and re.search(rf"(?i)inconclusive\s*=\s*{n_i}\b", fixed)
+    ):
+        return fixed
+    tag = _latex_escape(
+        f"[Hypothesis ledger (authoritative): {n_c} confirmed, {n_r} refuted, {n_i} inconclusive.] "
+    )
+    return tag + fixed
 
 
 def _fallback_from_context(question: str, prior: dict[str, Any], synthesis: dict[str, Any] | None) -> dict[str, str]:
@@ -150,7 +185,7 @@ async def generate_prose_sections(
         return _fallback_from_context(question, prior, synthesis)
 
     prior_blob = json.dumps(prior, ensure_ascii=False)[:6000]
-    syn_blob = json.dumps(synthesis or {}, ensure_ascii=False)[:4000]
+    syn_blob = _annotate_synthesis_blob_for_llm(synthesis)
 
     async def one(purpose: str, instruction: str) -> str:
         prompt = (
@@ -180,7 +215,7 @@ async def generate_prose_sections(
 
     fb = _fallback_from_context(question, prior, synthesis)
     return {
-        "abstract": abstract or fb["abstract"],
+        "abstract": _merge_ledger_into_llm_abstract(abstract or fb["abstract"], synthesis),
         "introduction": introduction or fb["introduction"],
         "discussion": discussion or fb["discussion"],
         "conclusion": conclusion or fb["conclusion"],

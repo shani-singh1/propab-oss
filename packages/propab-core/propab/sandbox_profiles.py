@@ -29,16 +29,22 @@ def _normalize_domain(domain: str) -> str:
     return re.sub(r"[^a-z0-9_]", "", d) or "general_computation"
 
 
-def effective_sandbox_timeout_sec(domain: str, global_default: int) -> int:
+def effective_sandbox_timeout_sec(
+    domain: str,
+    global_default: int,
+    *,
+    use_domain_floor: bool = True,
+) -> int:
     """
     Effective CPU timeout for sandboxed code for this routing domain.
 
     ``global_default`` comes from ``Settings.sandbox_timeout_sec`` and applies
     to domains not listed in the architecture table (e.g. ``chemistry``).
+    ``use_domain_floor=False`` is intended for fast smoke/debug profiles that
+    should not inherit the production deep_learning floor.
     """
     g = max(5, min(int(global_default), 7200))
     key = _normalize_domain(domain)
-    base = _DOMAIN_DEFAULT_SEC.get(key, g)
     env_name = f"SANDBOX_TIMEOUT_{key.upper()}"
     raw = os.environ.get(env_name)
     if raw is not None and raw.strip() != "":
@@ -46,4 +52,7 @@ def effective_sandbox_timeout_sec(domain: str, global_default: int) -> int:
             return max(5, min(int(raw.strip()), 7200))
         except ValueError:
             pass
+    if not use_domain_floor:
+        return g
+    base = _DOMAIN_DEFAULT_SEC.get(key, g)
     return max(5, min(max(base, g), 7200))

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from scipy import stats
 
@@ -66,6 +68,18 @@ def literature_baseline_compare(
                 ),
             )
         b = float(baseline_value)
+        if not math.isfinite(b) or abs(b) < 1e-12:
+            return ToolResult(
+                success=False,
+                error=ToolError(
+                    type="validation_error",
+                    message=(
+                        "baseline_value must be a non-zero finite literature baseline. "
+                        "Do not call this tool before the campaign baseline is measured, "
+                        "and do not pass 0.0 as a placeholder."
+                    ),
+                ),
+            )
         md = str(metric_direction).lower()
         if md not in ("lower_is_better", "higher_is_better"):
             return ToolResult(

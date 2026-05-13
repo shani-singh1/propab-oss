@@ -267,6 +267,7 @@ async def write_paper_minimal(
         "tex_url": tex_url,
         "methods_latex": methods_tex,
         "results_latex": results_tex,
+        "abstract_latex": prose["abstract"],
         "full_tex_chars": len(full_tex),
         "figures_embedded": len(figure_files),
     }

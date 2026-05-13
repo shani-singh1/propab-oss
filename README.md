@@ -13,6 +13,47 @@ docker compose up
 # → http://localhost:8010/health  (orchestrator stub, Phase 1 service map)
 ```
 
+### Fast debugging (no multi-hour campaign)
+
+Use two profiles only: **`campaign`** (real runs; default in `docker-compose.yml`) and **`dev`**
+(short sandbox, heuristic sub-agent, `fast_tool` baseline — see `packages/propab-core/propab/config.py`).
+
+After `pip install -e .` from the repo root, run infrastructure checks and a **single sub-agent in-process**
+(no Celery queue) to reproduce tool / sandbox / LLM issues in minutes:
+
+```bash
+set PROPAB_PROFILE=dev
+propab health
+propab agent --cleanup
+# Campaign-shaped harness (caps + baseline mode) without exporting env first:
+propab agent --profile campaign --cleanup
+```
+
+Without installing the `propab` script on your PATH, use: `python -m propab health` and `python -m propab agent --cleanup` (add `--profile campaign` to match production campaign settings).
+
+Optional: `propab health --with-train-smoke` runs a tiny `train_model` (needs a working sandbox).
+`propab health --with-celery` pings workers. **`propab bank --cleanup`** runs four fixed harness cases (tool/stat/grad paths) under a few minutes.
+**`propab replay --snapshot <path> --phase synthesis|abstract|paper`** rebuilds synthesis / stub abstract / full paper from a snapshot written under `PROPAB_DATA_DIR/campaign_snapshots/<campaign_id>/` at baseline, first confirmed, and pre-paper.
+**`propab trace-replay --hypothesis-id <uuid>`** replays stored `tool_calls` against the current registry.
+
+**Fast code iteration in Docker (no image rebuild for Python edits):**
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.mount-dev.yml up -d
+# API/orchestrator auto-reload; after worker code changes:
+docker compose -f docker-compose.yml -f docker-compose.mount-dev.yml restart worker
+```
+
+**Cold start (order of magnitude, MNIST campaign v1)** — `hypotheses_tested` stays 0 until the first worker returns a tree update:
+
+| Phase | `PROPAB_PROFILE=campaign` (typical) | `PROPAB_PROFILE=dev` |
+|--------|-------------------------------------|-------------------------|
+| Prior | up to ~180 s (`campaign_prior_timeout_sec`) | up to ~45 s |
+| Baseline | **`fast_tool`** train_model slice (often **~0.5–3 min**) | **`fast_tool`** train_model slice often **~0.5–3 min** |
+| First batch tick | first parallel completion often **~10–25+ min** after baseline | much smaller agents + wall caps (**minutes**) |
+
+For full campaign monitoring once the API is up: `python scripts/start_campaign_v1.py` then `python scripts/monitor_campaign.py`.
+
 ### Roadmap phases (`ARCHITECTURE.md` §16)
 
 | Phase | Scope | Repo status |

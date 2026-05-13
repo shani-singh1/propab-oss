@@ -97,6 +97,17 @@ def test_generate_prose_sections_no_llm_honest_abstract_when_zero_confirmed() ->
     asyncio.run(_run())
 
 
+def test_merge_ledger_into_llm_abstract_patches_wrong_counts() -> None:
+    from propab.paper_sections import _merge_ledger_into_llm_abstract
+
+    syn = {"total_confirmed": 7, "total_refuted": 0, "total_inconclusive": 1}
+    bad = "Outcomes: confirmed=0, refuted=0, inconclusive=0."
+    out = _merge_ledger_into_llm_abstract(bad, syn)
+    assert "confirmed=7" in out
+    assert "refuted=0" in out
+    assert "inconclusive=1" in out
+
+
 def test_collect_figure_object_ids_dedupes() -> None:
     ids = collect_figure_object_ids(
         {

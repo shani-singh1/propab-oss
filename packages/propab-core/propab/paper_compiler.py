@@ -63,6 +63,101 @@ def _format_params(params: Any) -> str:
     return blob[:280] + ("..." if len(blob) > 280 else "")
 
 
+def _latex_cell_scalarish(val: Any, max_len: int = 200) -> str:
+    """Single table cell: escape; nested structures as compact JSON."""
+    if val is None:
+        return ""
+    if isinstance(val, bool):
+        return "true" if val else "false"
+    if isinstance(val, (int, float)):
+        return _latex_escape(str(val))
+    if isinstance(val, str):
+        s = val.strip()
+        return _latex_escape(s[:max_len] + ("..." if len(s) > max_len else ""))
+    try:
+        blob = json.dumps(val, ensure_ascii=False)
+    except TypeError:
+        blob = str(val)
+    return _latex_escape(blob[:max_len] + ("..." if len(blob) > max_len else ""))
+
+
+def latex_tabular_from_jsonish(obj: Any, *, max_rows: int = 28, max_cols: int = 10) -> str | None:
+    """
+    Render dict / list-of-dicts / numeric list as a LaTeX ``tabular`` (article-safe, no extra packages).
+    Returns None when a plain prose/JSON one-liner is more appropriate.
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        if not obj:
+            return None
+        items = list(obj.items())[:max_rows]
+        lines = [
+            "\\begin{tabular}{|l|l|}",
+            "\\hline",
+            r"\textbf{Field} & \textbf{Value} \\",
+            "\\hline",
+        ]
+        for k, v in items:
+            lines.append(f"{_latex_escape(str(k))} & {_latex_cell_scalarish(v, max_len=360)} \\\\")
+        lines.extend(["\\hline", "\\end{tabular}"])
+        return "\n".join(lines)
+    if isinstance(obj, list) and obj:
+        if all(isinstance(x, (int, float)) for x in obj) and len(obj) >= 3:
+            rows = list(enumerate(obj))[:max_rows]
+            lines = [
+                "\\begin{tabular}{|r|l|}",
+                "\\hline",
+                r"\textbf{Index} & \textbf{Value} \\",
+                "\\hline",
+            ]
+            for i, v in rows:
+                lines.append(f"{i} & {_latex_cell_scalarish(v, max_len=80)} \\\\")
+            lines.extend(["\\hline", "\\end{tabular}"])
+            return "\n".join(lines)
+        if all(isinstance(x, dict) for x in obj) and obj:
+            sample = [d for d in obj[:12] if isinstance(d, dict) and d]
+            if not sample:
+                return None
+            keys: list[str] = []
+            for d in sample:
+                for kk in d:
+                    if kk not in keys:
+                        keys.append(kk)
+            keys = keys[:max_cols]
+            if not keys:
+                return None
+            colspec = "|" + "|".join(["l"] * len(keys)) + "|"
+            lines = [f"\\begin{{tabular}}{{{colspec}}}", "\\hline"]
+            lines.append(" & ".join(_latex_escape(str(k)) for k in keys) + r" \\")
+            lines.append("\\hline")
+            for d in obj[:max_rows]:
+                if not isinstance(d, dict):
+                    continue
+                cells = [_latex_cell_scalarish(d.get(k), max_len=140) for k in keys]
+                lines.append(" & ".join(cells) + r" \\")
+            lines.extend(["\\hline", "\\end{tabular}"])
+            return "\n".join(lines)
+    return None
+
+
+def _tabular_payload_from_tool_output(out: Any) -> Any:
+    """Prefer inner ``output`` / ``data`` for table rendering when the DB row is a wrapper dict."""
+    if not isinstance(out, dict) or not out:
+        return out
+    inner = out.get("output")
+    if isinstance(inner, dict) and inner:
+        return inner
+    if isinstance(inner, list) and inner:
+        return inner
+    data = out.get("data")
+    if isinstance(data, dict) and data:
+        return data
+    if isinstance(data, list) and data:
+        return data
+    return out
+
+
 def _format_evidence_for_paper(evidence_summary: str | None) -> str:
     text = (evidence_summary or "").strip()
     if not text:
@@ -134,10 +229,32 @@ async def compile_methods_section(session_factory: async_sessionmaker, hypothesi
             tool_name = _latex_escape(str(input_data.get("tool", "unknown_tool")))
             params = input_data.get("params")
             duration_ms = row["duration_ms"] or 0
-            lines.append(
-                f"Tool \\texttt{{{tool_name}}} was called with parameters {_latex_escape(_format_params(params))}. "
-                f"Execution completed in {duration_ms}ms."
-            )
+            out_json = row.get("output_json")
+            out_for_table = _tabular_payload_from_tool_output(out_json)
+            tab_p = latex_tabular_from_jsonish(params)
+            tab_o = latex_tabular_from_jsonish(out_for_table) if out_json not in (None, {}, []) else None
+            if tab_p:
+                lines.append(
+                    f"Tool \\texttt{{{tool_name}}} (completed in {duration_ms}ms). Parameters:\\\\\n"
+                    f"{tab_p}"
+                )
+            else:
+                lines.append(
+                    f"Tool \\texttt{{{tool_name}}} was called with parameters {_latex_escape(_format_params(params))}. "
+                    f"Execution completed in {duration_ms}ms."
+                )
+            if tab_o:
+                lines.append("Recorded tool output:\\\\\n" + tab_o)
+            elif out_json not in (None, {}, []):
+                blob = (
+                    json.dumps(out_json, ensure_ascii=False)
+                    if not isinstance(out_json, str)
+                    else out_json
+                )
+                lines.append(
+                    "Tool output (summary): "
+                    + _latex_escape(str(blob)[:400] + ("..." if len(str(blob)) > 400 else ""))
+                )
         elif step_type == "code_exec":
             mem = row["memory_mb"] if row["memory_mb"] is not None else "512"
             timeout = row["timeout_sec"] if row["timeout_sec"] is not None else "30"

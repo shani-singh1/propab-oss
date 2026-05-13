@@ -25,6 +25,17 @@ def test_literature_baseline_missing_baseline_value_is_validation_error() -> Non
     assert "baseline_value" in (r.error.message or "").lower()
 
 
+def test_literature_baseline_zero_baseline_rejected() -> None:
+    r = literature_baseline_compare(
+        our_results=[0.4, 0.41, 0.39],
+        baseline_value=0.0,
+        metric_direction="lower_is_better",
+    )
+    assert not r.success
+    assert r.error is not None
+    assert r.error.type == "validation_error"
+
+
 def test_literature_baseline_with_std() -> None:
     r = literature_baseline_compare(
         our_results=[1.0, 1.02, 0.99],

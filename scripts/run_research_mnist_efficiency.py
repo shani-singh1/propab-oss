@@ -1,10 +1,10 @@
 """
 Submit the MNIST parameter-efficiency research session from fixes.md.
 
-Requires stack running with PROPAB_PROFILE=research (see docker-compose env).
+Requires stack running with PROPAB_PROFILE=dev or campaign (see docker-compose env).
 
 Example:
-  set PROPAB_PROFILE=research & docker compose up -d --build
+  set PROPAB_PROFILE=dev & docker compose up -d --build
   python scripts/run_research_mnist_efficiency.py
 
 Then in another terminal:
@@ -39,7 +39,7 @@ def post_json(url: str, data: dict) -> dict:
 
 def main() -> None:
     print(
-        "Reminder: api/orchestrator/worker should run with PROPAB_PROFILE=research "
+        "Reminder: api/orchestrator/worker should run with PROPAB_PROFILE=dev (fast) or campaign "
         "(research_max_rounds=4 from profile; POST uses max_hypotheses=8).\n"
     )
     payload = {

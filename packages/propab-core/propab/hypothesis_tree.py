@@ -298,6 +298,32 @@ class HypothesisTree:
             candidates.sort(key=self._expected_value_score, reverse=True)
         return candidates[:size]
 
+    def next_dispatch_candidate(
+        self,
+        exclude_ids: set[str] | frozenset[str] | None = None,
+        *,
+        strategy: str = "highest_expected_value",
+    ) -> HypothesisNode | None:
+        """
+        Best next frontier node to dispatch, excluding ids already in-flight to Celery.
+
+        Used for pipelined campaign dispatch so we never double-dispatch the same node
+        while it remains on the frontier until ``update_node`` removes it.
+        """
+        ex: frozenset[str] = frozenset(exclude_ids or ())
+        candidates = [
+            self.nodes[nid]
+            for nid in self.frontier
+            if nid in self.nodes
+            and self.nodes[nid].verdict == "pending"
+            and nid not in ex
+        ]
+        if not candidates:
+            return None
+        if strategy == "highest_expected_value":
+            candidates.sort(key=self._expected_value_score, reverse=True)
+        return candidates[0]
+
     def _expected_value_score(self, node: HypothesisNode) -> float:
         depth_score = 1.0 / (1.0 + node.depth * 0.3)
         lineage_score = 1.5 if (node.parent_id and node.parent_id in self.confirmed) else 1.0

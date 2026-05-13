@@ -37,9 +37,13 @@ class Settings(BaseSettings):
     minio_secure: bool = False
     sandbox_timeout_sec: int = 120
     sandbox_memory_mb: int = 512
+    # Max Docker executions per ``code.generated`` step (minimum 1). When 1, no second
+    # run after timeout rewrite. See ``services.worker.sub_agent_loop.run_code_step``.
     sandbox_code_max_retries: int = 3
+    sandbox_use_domain_timeout_floor: bool = True
     # After a sandbox wall-timeout on heavy code, one LLM rewrite + one extra execution (if LLM available).
     sandbox_after_timeout_llm_rewrite: bool = True
+    agent_tool_n_steps_cap: int = 0
     literature_answer_similarity: float = 0.92
     # Think-act agent budgets
     agent_max_steps: int = 12
@@ -75,8 +79,26 @@ class Settings(BaseSettings):
     campaign_expand_on_confirmed: bool = True       # expand tree on confirmed findings
     campaign_expand_on_refuted: bool = True         # generate alternatives on refuted
     campaign_max_tree_depth: int = 8                # max hypothesis depth in tree
+    campaign_prior_timeout_sec: int = 180
     # If a batch has unfinished Celery sub-agents and no completions for this many seconds, revoke the oldest.
     campaign_frontier_evict_idle_sec: int = 900       # 0 disables eviction
+    campaign_batch_max_wait_sec: int = 0
+    # Celery ar.get timeout for the baseline sub-agent (full think-act trace — often 10–20+ min).
+    campaign_baseline_worker_timeout_sec: int = 600
+    # Cap train_model n_steps for baseline_measurement fallback (lower = faster baseline).
+    campaign_baseline_max_train_steps: int = 150
+    campaign_baseline_mode: str = "sub_agent"
+    # Tighter think-act caps for the baseline-measurement sub-agent only (full agents use agent_max_*).
+    campaign_baseline_agent_max_steps: int = 6
+    campaign_baseline_agent_max_seconds: int = 480
+    campaign_baseline_agent_max_tool_calls: int = 14
+    # If >0, revoke a still-running Celery sub-agent after this many seconds since dispatch
+    # (independent of sandbox completion — kills stuck timeout/LLM loops). 0 = disabled.
+    campaign_sub_agent_max_wall_sec: int = 0
+    # Pull next_batch(size = campaign_batch_size * multiplier) for more parallel Celery workers per wave.
+    campaign_inflight_multiplier: int = 1
+    # 0 = derive from campaign_batch_size * campaign_inflight_multiplier (pipelined dispatch).
+    campaign_max_concurrent_sub_agents: int = 0
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -109,47 +131,51 @@ settings = Settings()
 
 def _apply_profile(s: Settings) -> None:
     profile = (s.propab_profile or "dev").strip().lower()
-    profiles: dict[str, dict[str, float | int | str]] = {
+    # Legacy names → dev (single fast-debug profile).
+    if profile in {"research", "deep", "campaign_dev"}:
+        profile = "dev"
+
+    profiles: dict[str, dict[str, float | int | str | bool]] = {
+        # Fast local / CI debugging: short sandbox, heuristic sub-agent, small campaigns,
+        # fast_tool baseline. Use ``propab agent`` + ``propab health`` (see README).
         "dev": {
+            "sub_agent_plan_source": "heuristic",
+            "sub_agent_max_planned_steps": 4,
+            "sub_agent_max_rounds": 2,
+            "sub_agent_tools_per_round": 3,
             "research_max_rounds": 2,
-            "research_max_hypotheses": 15,
-            "agent_max_steps": 10,
-            "agent_min_steps": 3,
-            # Match research wall budget so dev runs fewer surprise timeouts than 300s cap.
-            "agent_max_seconds": 600,
-            # MNIST / sandbox training needs far more than 60s wall time in Docker.
-            "sandbox_timeout_sec": 420,
-            "n_steps_default": 180,
-            "max_code_steps_per_hypothesis": 2,
-            "classification_default_dataset": "mnist",
-            "llm_http_timeout_sec": 240.0,
-        },
-        "research": {
-            "research_max_rounds": 4,
-            "research_max_hypotheses": 60,
-            "agent_max_steps": 12,
-            "agent_min_steps": 4,
-            "agent_max_seconds": 600,
-            "sandbox_timeout_sec": 420,
-            "n_steps_default": 300,
+            "research_max_hypotheses": 12,
+            "research_max_hours": 1.0,
+            "research_max_seconds_per_round": 400,
+            "agent_max_steps": 8,
+            "agent_min_steps": 2,
+            "agent_max_seconds": 240,
+            "agent_max_tool_calls": 20,
+            "agent_tool_n_steps_cap": 80,
+            "sandbox_timeout_sec": 90,
+            "sandbox_use_domain_timeout_floor": False,
+            "sandbox_code_max_retries": 1,
+            "sandbox_after_timeout_llm_rewrite": False,
+            "n_steps_default": 80,
             "max_code_steps_per_hypothesis": 1,
             "classification_default_dataset": "mnist",
-            "llm_http_timeout_sec": 300.0,
+            "llm_http_timeout_sec": 120.0,
+            "campaign_compute_budget_seconds": 1800,
+            "campaign_batch_size": 2,
+            "campaign_max_hypotheses": 24,
+            "campaign_checkpoint_every": 60,
+            "campaign_expand_on_confirmed": False,
+            "campaign_expand_on_refuted": False,
+            "campaign_frontier_evict_idle_sec": 45,
+            "campaign_batch_max_wait_sec": 300,
+            "campaign_prior_timeout_sec": 45,
+            "campaign_baseline_mode": "fast_tool",
+            "campaign_baseline_worker_timeout_sec": 120,
+            "campaign_baseline_max_train_steps": 50,
+            "campaign_min_replications": 1,
+            "campaign_sub_agent_max_wall_sec": 600,
         },
-        "deep": {
-            "research_max_rounds": 6,
-            "research_max_hypotheses": 80,
-            "agent_max_steps": 16,
-            "agent_min_steps": 5,
-            "agent_max_seconds": 1200,
-            "sandbox_timeout_sec": 600,
-            "n_steps_default": 500,
-            "max_code_steps_per_hypothesis": 2,
-            "classification_default_dataset": "mnist",
-            "llm_http_timeout_sec": 420.0,
-        },
-        # Campaign v1: 4-hour budget, hypothesis tree, breakthrough detection.
-        # Designed for a single hard question (e.g. optimal MLP for MNIST).
+        # Production campaign runs (e.g. Campaign v1): full budgets, LLM sub-agent, sub_agent baseline.
         "campaign": {
             "research_max_rounds": 50,
             "research_max_hypotheses": 500,
@@ -157,22 +183,37 @@ def _apply_profile(s: Settings) -> None:
             "research_max_seconds_per_round": 1800,
             "agent_max_steps": 14,
             "agent_min_steps": 5,
-            # Must exceed worst-case sandbox wait (sandbox_timeout × retries); see fixes.md §agent vs sandbox.
+            # Must exceed worst-case sandbox wait (one Docker run + optional rewrite run); see sub_agent_loop.
             "agent_max_seconds": 1800,
-            "sandbox_timeout_sec": 480,
+            # Bounded wall per Docker run; domain floor is off so we do not inherit 480s floors.
+            "sandbox_timeout_sec": 240,
+            "sandbox_use_domain_timeout_floor": False,
             "sandbox_code_max_retries": 1,
-            "n_steps_default": 300,
+            # One Docker run per generated block by default (no second run after rewrite).
+            "sandbox_after_timeout_llm_rewrite": False,
+            # train_model defaults must fit wall clock; agent_tool_n_steps_cap clamps LLM params.
+            "n_steps_default": 120,
+            "agent_tool_n_steps_cap": 96,
             "max_code_steps_per_hypothesis": 2,
             "classification_default_dataset": "mnist",
             "llm_http_timeout_sec": 300.0,
             "campaign_compute_budget_seconds": 14400,
             "campaign_batch_size": 5,
+            "campaign_inflight_multiplier": 2,
+            "campaign_max_concurrent_sub_agents": 0,
             "campaign_max_hypotheses": 500,
             "campaign_breakthrough_threshold": 0.05,
             "campaign_min_confidence": 0.85,
             "campaign_min_replications": 3,
-            "campaign_frontier_evict_idle_sec": 600,
-            "agent_max_tool_calls": 48,
+            "campaign_frontier_evict_idle_sec": 420,
+            "campaign_baseline_mode": "fast_tool",
+            "campaign_baseline_worker_timeout_sec": 180,
+            "campaign_baseline_max_train_steps": 50,
+            "campaign_sub_agent_max_wall_sec": 2700,
+            "campaign_baseline_agent_max_steps": 6,
+            "campaign_baseline_agent_max_seconds": 420,
+            "campaign_baseline_agent_max_tool_calls": 14,
+            "agent_max_tool_calls": 20,
         },
     }
     selected = profiles.get(profile, profiles["dev"])

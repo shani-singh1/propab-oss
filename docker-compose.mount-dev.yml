@@ -1,0 +1,38 @@
+# Optional overlay: bind-mount Python sources + API/orchestrator reload so code edits apply
+# without rebuilding images (seconds instead of minutes). Worker still needs
+# `docker compose ... restart worker` after Python changes (Celery does not auto-reload).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.mount-dev.yml up -d
+#
+# Set PROPAB_PROFILE=dev in `.env` for short sandbox / fast_tool baseline while debugging.
+
+services:
+  api:
+    environment:
+      - PROPAB_PROFILE=${PROPAB_PROFILE:-dev}
+    command: >
+      uvicorn services.api.app.main:app --host 0.0.0.0 --port 8000
+      --reload --reload-dir /app/services --reload-dir /app/packages
+    volumes:
+      - ./packages:/app/packages
+      - ./services:/app/services
+      - ./migrations:/app/migrations
+
+  orchestrator:
+    environment:
+      - PROPAB_PROFILE=${PROPAB_PROFILE:-dev}
+    command: >
+      uvicorn services.orchestrator.main:app --host 0.0.0.0 --port 8010
+      --reload --reload-dir /app/services --reload-dir /app/packages
+    volumes:
+      - ./packages:/app/packages
+      - ./services:/app/services
+      - ./migrations:/app/migrations
+
+  worker:
+    environment:
+      - PROPAB_PROFILE=${PROPAB_PROFILE:-dev}
+    volumes:
+      - ./packages:/app/packages
+      - ./services:/app/services
+      - ./migrations:/app/migrations

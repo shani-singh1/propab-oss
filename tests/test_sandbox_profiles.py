@@ -14,6 +14,10 @@ def test_unknown_domain_uses_global() -> None:
     assert effective_sandbox_timeout_sec("chemistry", 45) == 45
 
 
+def test_smoke_profile_can_disable_domain_floor() -> None:
+    assert effective_sandbox_timeout_sec("deep_learning", 60, use_domain_floor=False) == 60
+
+
 def test_env_override(monkeypatch) -> None:
     monkeypatch.setenv("SANDBOX_TIMEOUT_DEEP_LEARNING", "400")
     try:

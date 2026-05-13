@@ -43,6 +43,7 @@ from propab.campaign import (
     STATUS_BREAKTHROUGH,
     STATUS_BUDGET_EXHAUSTED,
 )
+from propab.campaign_snapshot import write_campaign_snapshot
 from propab.config import settings
 from propab.db import create_redis
 from propab.events import EventEmitter
@@ -356,6 +357,25 @@ async def db_save_campaign(campaign: ResearchCampaign, session_factory: async_se
         await db.commit()
 
 
+async def db_set_research_session_stage(
+    session_id: str,
+    session_factory: async_sessionmaker,
+    *,
+    stage: str,
+) -> None:
+    """Update ``research_sessions.stage`` for UI / monitors (campaign phases)."""
+    async with session_factory() as db:
+        await db.execute(
+            text("""
+                UPDATE research_sessions
+                SET stage = :stage
+                WHERE id = CAST(:id AS uuid)
+            """),
+            {"id": session_id, "stage": stage},
+        )
+        await db.commit()
+
+
 async def db_mark_research_session_completed(
     session_id: str,
     session_factory: async_sessionmaker,
@@ -433,7 +453,21 @@ async def measure_baseline(
     Run the baseline experiment and return the primary metric value.
     Uses the campaign question to infer what "standard approach" means.
     """
-    baseline_prompt = f"""
+    baseline_mode = str(getattr(settings, "campaign_baseline_mode", "sub_agent") or "sub_agent").strip().lower()
+    if baseline_mode in {"skip", "none", "disabled"}:
+        logger.warning("Campaign baseline measurement skipped by campaign_baseline_mode=%s", baseline_mode)
+        return 0.0
+
+    if baseline_mode == "fast_tool":
+        config = {
+            "dataset": "mnist" if "mnist" in campaign.question.lower() else "synthetic",
+            "architecture": "auto MLP",
+            "metric": campaign.breakthrough_criteria.metric_name,
+            "n_steps": int(getattr(settings, "campaign_baseline_max_train_steps", 40)),
+            "description": "Fast development baseline.",
+        }
+    else:
+        baseline_prompt = f"""
 Given this research campaign question:
 "{campaign.question}"
 
@@ -446,18 +480,18 @@ What is the standard/baseline approach to measure?  Extract:
 Return JSON only:
 {{"dataset": "...", "architecture": "...", "metric": "...", "n_steps": 150, "description": "..."}}
 """
-    # Use a synthetic session_id for the baseline measurement LLM call
-    baseline_session_id = f"campaign-{campaign.id}-baseline"
-    try:
-        raw = await llm.call(
-            prompt=baseline_prompt,
-            purpose="campaign.baseline_config",
-            session_id=baseline_session_id,
-        )
-        json_match = re.search(r"\{.*\}", raw, re.DOTALL)
-        config = json.loads(json_match.group()) if json_match else {}
-    except Exception:
-        config = {}
+        # Use a synthetic session_id for the baseline measurement LLM call
+        baseline_session_id = f"campaign-{campaign.id}-baseline"
+        try:
+            raw = await llm.call(
+                prompt=baseline_prompt,
+                purpose="campaign.baseline_config",
+                session_id=baseline_session_id,
+            )
+            json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+            config = json.loads(json_match.group()) if json_match else {}
+        except Exception:
+            config = {}
 
     metric_name = _normalize_metric_name(
         config.get("metric") or campaign.breakthrough_criteria.metric_name,
@@ -472,7 +506,8 @@ Return JSON only:
         "text": (
             f"Baseline: standard approach for '{campaign.question[:200]}'. "
             f"Metric to record: {metric_name}. "
-            f"Use train_model with dataset={dataset_name!r} and record val_accuracy."
+            f"First call train_model with model_id='auto', dataset={dataset_name!r}, "
+            f"n_steps from campaign config, task='classification'; use only schema-valid keys."
         ),
         "test_methodology": (
             f"Train {config.get('architecture', 'standard MLP')} on "
@@ -486,6 +521,7 @@ Return JSON only:
         "refinement_of": None,
     }
 
+    min_baseline_steps = 20 if baseline_mode == "fast_tool" else 35
     task_payload = {
         "session_id": campaign.id,
         "hypothesis_id": _node_row_id(campaign.id, "baseline"),
@@ -495,12 +531,25 @@ Return JSON only:
         "prior": {"established_facts": [], "contested_claims": [], "open_gaps": [], "dead_ends": [], "key_papers": []},
         "domain": "deep_learning",
         "question": campaign.question,
+        "agent_limits": {
+            "max_steps": int(getattr(settings, "campaign_baseline_agent_max_steps", 6)),
+            "max_seconds": int(getattr(settings, "campaign_baseline_agent_max_seconds", 480)),
+            "max_tool_calls": int(getattr(settings, "campaign_baseline_agent_max_tool_calls", 14)),
+        },
         # Worker: if the LLM/tool trace omits val_accuracy, run train_model once deterministically.
         "baseline_measurement": {
             "dataset": dataset_name,
-            "n_steps": max(80, min(int(n_steps), 400)),
+            "n_steps": max(
+                min_baseline_steps,
+                min(
+                    int(n_steps),
+                    int(getattr(settings, "campaign_baseline_max_train_steps", 150)),
+                ),
+            ),
         },
     }
+    if baseline_mode == "fast_tool":
+        task_payload["fast_path"] = "baseline_measurement"
 
     try:
         async with session_factory() as db:
@@ -531,7 +580,8 @@ Return JSON only:
             await db.commit()
 
         ar = run_sub_agent_task.delay(task_payload)
-        result = await asyncio.to_thread(lambda: ar.get(timeout=1200))
+        _bl_to = max(15, int(getattr(settings, "campaign_baseline_worker_timeout_sec", 600)))
+        result = await asyncio.to_thread(lambda: ar.get(timeout=_bl_to))
         metric_val = _extract_primary_metric_from_worker_result(result, metric_name)
         if metric_val is None and metric_name != "val_accuracy":
             metric_val = _extract_primary_metric_from_worker_result(result, "val_accuracy")
@@ -607,102 +657,116 @@ async def generate_seed_hypotheses(
     return campaign.hypothesis_tree.add_seeds(seed_dicts, generation=generation)
 
 
-# ── Sub-agent dispatch (campaign round) ─────────────────────────────────────
+# ── Sub-agent dispatch (pipelined campaign pool) ────────────────────────────
 
-async def _iter_campaign_batch_results(
+
+async def _campaign_dispatch_sub_agent(
     *,
     campaign: ResearchCampaign,
-    batch: list[HypothesisNode],
+    node: HypothesisNode,
+    prior_dict: dict,
+    domain: str,
+    emitter: EventEmitter,
+    session_factory: async_sessionmaker,
+) -> dict:
+    """Insert hypothesis row, enqueue Celery sub-agent, emit dispatch; return pending handle dict."""
+    db_hid = _node_row_id(campaign.id, node.id)
+    async with session_factory() as db:
+        await db.execute(
+            text(
+                """
+                INSERT INTO hypotheses (
+                    id, session_id, round_id, text, test_methodology, scores_json,
+                    rank, status, verdict, confidence, evidence_summary, key_finding, created_at
+                ) VALUES (
+                    CAST(:id AS uuid), CAST(:session_id AS uuid), NULL,
+                    :text, :test_methodology, CAST(:scores_json AS jsonb),
+                    :rank, :status, NULL, NULL, NULL, NULL, NOW()
+                )
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {
+                "id": db_hid,
+                "session_id": campaign.id,
+                "text": node.text,
+                "test_methodology": "",
+                "scores_json": "{}",
+                "rank": 1,
+                "status": "pending",
+            },
+        )
+        await db.commit()
+
+    hypothesis_dict = {
+        "id": node.id,
+        "text": node.text,
+        "test_methodology": "",
+        "scores": {},
+        "rank": 1,
+        "gap_reference": "",
+        "expected_result": "",
+        "refinement_of": node.parent_id,
+    }
+    await emitter.emit(
+        session_id=campaign.id,
+        event_type=EventType.HYPO_DISPATCHED,
+        step="hypothesis.dispatch",
+        payload={"hypothesis_id": node.id, "depth": node.depth, "generation": node.generation},
+        hypothesis_id=db_hid,
+    )
+    ar = run_sub_agent_task.delay({
+        "session_id": campaign.id,
+        "hypothesis_id": db_hid,
+        "campaign_node_id": node.id,
+        "hypothesis": hypothesis_dict,
+        "baseline": {
+            "metric_name": campaign.breakthrough_criteria.metric_name,
+            "metric_value": campaign.baseline_metric,
+            "description": "Campaign baseline measured at start.",
+            "lit_compare_safe": abs(float(campaign.baseline_metric)) >= 1e-12,
+        },
+        "prior": prior_dict,
+        "domain": domain,
+        "question": campaign.question,
+    })
+    return {"ar": ar, "nid": node.id, "db_hid": db_hid, "enq_mono": time.monotonic()}
+
+
+def _peer_db_hids_inflight(pending: list[dict], *, exclude_nid: str | None = None) -> list[str]:
+    return [p["db_hid"] for p in pending if exclude_nid is None or p["nid"] != exclude_nid]
+
+
+async def _iter_campaign_pipelined_results(
+    *,
+    campaign: ResearchCampaign,
+    max_concurrent: int,
     prior_dict: dict,
     domain: str,
     emitter: EventEmitter,
     session_factory: async_sessionmaker,
 ) -> AsyncIterator[dict]:
     """
-    Dispatch a batch of hypothesis nodes to sub-agents and yield each result as
-    the corresponding Celery task completes (order may differ from ``batch``).
+    Pipelined dispatch: keep up to ``max_concurrent`` Celery sub-agents running.
 
-    Yields incrementally so the campaign loop can persist tree/metrics to Postgres
-    while long-running workers are still in flight — otherwise GET /campaigns shows
-    ``hypotheses_tested=0`` for the entire multi-sub-agent wall-clock wait.
+    Whenever a slot frees (completion, eviction, or deadline straggler), pull the next
+    best frontier node (excluding in-flight ids) so tree expansions mid-wave are picked
+    up without waiting for an entire fixed batch to drain.
     """
     pending: list[dict] = []
-    all_node_ids = [node.id for node in batch]
-    all_db_hids = [_node_row_id(campaign.id, nid) for nid in all_node_ids]
-
-    for node in batch:
-        db_hid = _node_row_id(campaign.id, node.id)
-        # Ensure hypothesis row exists so worker can write experiment_steps/tool_calls
-        # with FK integrity.
-        async with session_factory() as db:
-            await db.execute(
-                text(
-                    """
-                    INSERT INTO hypotheses (
-                        id, session_id, round_id, text, test_methodology, scores_json,
-                        rank, status, verdict, confidence, evidence_summary, key_finding, created_at
-                    ) VALUES (
-                        CAST(:id AS uuid), CAST(:session_id AS uuid), NULL,
-                        :text, :test_methodology, CAST(:scores_json AS jsonb),
-                        :rank, :status, NULL, NULL, NULL, NULL, NOW()
-                    )
-                    ON CONFLICT (id) DO NOTHING
-                    """
-                ),
-                {
-                    "id": db_hid,
-                    "session_id": campaign.id,
-                    "text": node.text,
-                    "test_methodology": "",
-                    "scores_json": "{}",
-                    "rank": 1,
-                    "status": "pending",
-                },
-            )
-            await db.commit()
-
-        hypothesis_dict = {
-            "id": node.id,
-            "text": node.text,
-            "test_methodology": "",
-            "scores": {},
-            "rank": 1,
-            "gap_reference": "",
-            "expected_result": "",
-            "refinement_of": node.parent_id,
-        }
-        await emitter.emit(
-            session_id=campaign.id,
-            event_type=EventType.HYPO_DISPATCHED,
-            step="hypothesis.dispatch",
-            payload={"hypothesis_id": node.id, "depth": node.depth, "generation": node.generation},
-            hypothesis_id=db_hid,
-        )
-        ar = run_sub_agent_task.delay({
-            "session_id": campaign.id,
-            "hypothesis_id": db_hid,
-            "campaign_node_id": node.id,
-            "hypothesis": hypothesis_dict,
-            "baseline": {
-                "metric_name": campaign.breakthrough_criteria.metric_name,
-                "metric_value": campaign.baseline_metric,
-                "description": "Campaign baseline measured at start.",
-                "lit_compare_safe": abs(float(campaign.baseline_metric)) >= 1e-12,
-            },
-            "prior": prior_dict,
-            "domain": domain,
-            "question": campaign.question,
-        })
-        pending.append({"ar": ar, "nid": node.id, "db_hid": db_hid, "enq_mono": time.monotonic()})
-
-    # Wait long enough for parallel Celery sub-agents (MNIST runs can be 15–40+ min each).
-    remaining = max(60.0, float(campaign.remaining_seconds()))
-    batch_deadline = time.monotonic() + min(
-        remaining * 0.5,
-        max(1800.0, float(len(batch)) * 2700.0),
-    )
     completed_ids: set[str] = set()
     last_progress_mono = time.monotonic()
+
+    remaining = max(60.0, float(campaign.remaining_seconds()))
+    batch_max_wait = max(0, int(getattr(settings, "campaign_batch_max_wait_sec", 0) or 0))
+    if batch_max_wait > 0:
+        batch_wait = min(remaining, float(batch_max_wait))
+    else:
+        batch_wait = min(
+            remaining * 0.5,
+            max(1800.0, float(max_concurrent) * 2700.0),
+        )
+    batch_deadline = time.monotonic() + max(5.0, batch_wait)
     evict_after = max(0, int(getattr(settings, "campaign_frontier_evict_idle_sec", 0)))
 
     _redis = None
@@ -711,14 +775,101 @@ async def _iter_campaign_batch_results(
     except Exception as exc:
         logger.warning("Redis unavailable for peer broadcast: %s", exc)
 
-    while pending and time.monotonic() < batch_deadline:
+    async def refill_slots() -> bool:
+        """Dispatch from frontier until at cap or no candidates. Returns True if any dispatch."""
+        nonlocal last_progress_mono
+        progressed_local = False
+        while len(pending) < max_concurrent and not campaign.should_stop():
+            inflight = {p["nid"] for p in pending}
+            node = campaign.hypothesis_tree.next_dispatch_candidate(inflight)
+            if node is None:
+                break
+            item = await _campaign_dispatch_sub_agent(
+                campaign=campaign,
+                node=node,
+                prior_dict=prior_dict,
+                domain=domain,
+                emitter=emitter,
+                session_factory=session_factory,
+            )
+            pending.append(item)
+            last_progress_mono = time.monotonic()
+            progressed_local = True
+        return progressed_local
+
+    await refill_slots()
+
+    while time.monotonic() < batch_deadline:
+        if not pending and not await refill_slots():
+            if campaign.hypothesis_tree.next_dispatch_candidate(frozenset()) is None:
+                break
+            if campaign.should_stop():
+                break
+            await asyncio.sleep(0.05)
+            continue
+
         progressed = False
+        max_wall = max(0, int(getattr(settings, "campaign_sub_agent_max_wall_sec", 0) or 0))
+        if max_wall > 0 and pending:
+            now_mono = time.monotonic()
+            for victim in list(pending):
+                ar_w = victim["ar"]
+                if await asyncio.to_thread(ar_w.ready):
+                    continue
+                age = now_mono - float(victim.get("enq_mono", now_mono))
+                if age <= float(max_wall):
+                    continue
+                pending.remove(victim)
+                try:
+                    await asyncio.to_thread(lambda ar_=ar_w: ar_.revoke(terminate=True))
+                except Exception as exc:
+                    logger.warning("[campaign %s] Celery revoke (per-task wall) failed: %s", campaign.id, exc)
+                ev_note = (
+                    f"Sub-agent exceeded campaign_sub_agent_max_wall_sec={max_wall}s since dispatch; "
+                    "revoked to unblock the frontier."
+                )
+                wall_result = {
+                    "hypothesis_id": victim["db_hid"],
+                    "campaign_node_id": victim["nid"],
+                    "verdict": "inconclusive",
+                    "confidence": 0.0,
+                    "evidence_summary": ev_note,
+                    "key_finding": None,
+                    "metric_value": None,
+                    "failure_reason": "sub_agent_wall_exceeded",
+                }
+                completed_ids.add(victim["nid"])
+                last_progress_mono = time.monotonic()
+                progressed = True
+                await emitter.emit(
+                    session_id=campaign.id,
+                    event_type=EventType.CAMPAIGN_SUB_AGENT_EVICTED,
+                    step="campaign.sub_agent_wall",
+                    payload={
+                        "node_id": victim["nid"],
+                        "max_wall_sec": max_wall,
+                        "reason": ev_note,
+                    },
+                    hypothesis_id=victim["db_hid"],
+                )
+                yield wall_result
+                still_running_db = _peer_db_hids_inflight(pending)
+                if still_running_db and _redis is not None:
+                    finding_payload = build_peer_finding_payload(wall_result)
+                    await publish_peer_finding(
+                        _redis, target_hypothesis_ids=still_running_db, finding=finding_payload
+                    )
+                await refill_slots()
+            if progressed:
+                continue
+
         for item in list(pending):
             ar, nid, db_hid = item["ar"], item["nid"], item["db_hid"]
             ready = await asyncio.to_thread(lambda: ar.ready())
             if not ready:
                 continue
             progressed = True
+            still_running_db = _peer_db_hids_inflight(pending, exclude_nid=nid)
             pending.remove(item)
             try:
                 result = await asyncio.to_thread(lambda: ar.get(timeout=30))
@@ -732,22 +883,16 @@ async def _iter_campaign_batch_results(
                     "metric_value": None,
                     "failure_reason": str(exc),
                 }
-            result["campaign_node_id"] = str(
-                result.get("campaign_node_id") or nid
-            )
+            result["campaign_node_id"] = str(result.get("campaign_node_id") or nid)
             completed_ids.add(nid)
             last_progress_mono = time.monotonic()
             yield result
-
-            still_running_db = [
-                hid for hid, tree_id in zip(all_db_hids, all_node_ids, strict=True)
-                if tree_id not in completed_ids
-            ]
             if still_running_db and _redis is not None:
                 finding_payload = build_peer_finding_payload(result)
                 await publish_peer_finding(
                     _redis, target_hypothesis_ids=still_running_db, finding=finding_payload
                 )
+            await refill_slots()
 
         stalled = pending and evict_after > 0 and (time.monotonic() - last_progress_mono) >= evict_after
         if stalled:
@@ -762,9 +907,7 @@ async def _iter_campaign_batch_results(
                 victim = idle_candidates[0]
                 pending.remove(victim)
                 try:
-                    await asyncio.to_thread(
-                        lambda ar_=victim["ar"]: ar_.revoke(terminate=True)
-                    )
+                    await asyncio.to_thread(lambda ar_=victim["ar"]: ar_.revoke(terminate=True))
                 except Exception as exc:
                     logger.warning("[campaign %s] Celery revoke failed for %s: %s", campaign.id, victim["nid"], exc)
                 ev_note = (
@@ -783,6 +926,7 @@ async def _iter_campaign_batch_results(
                 }
                 completed_ids.add(victim["nid"])
                 last_progress_mono = time.monotonic()
+                progressed = True
                 await emitter.emit(
                     session_id=campaign.id,
                     event_type=EventType.CAMPAIGN_SUB_AGENT_EVICTED,
@@ -795,20 +939,22 @@ async def _iter_campaign_batch_results(
                     hypothesis_id=victim["db_hid"],
                 )
                 yield eviction_result
-
-                still_running_db = [
-                    hid for hid, tree_id in zip(all_db_hids, all_node_ids, strict=True)
-                    if tree_id not in completed_ids
-                ]
+                still_running_db = _peer_db_hids_inflight(pending)
                 if still_running_db and _redis is not None:
                     finding_payload = build_peer_finding_payload(eviction_result)
                     await publish_peer_finding(
                         _redis, target_hypothesis_ids=still_running_db, finding=finding_payload
                     )
+                await refill_slots()
                 continue
 
         if not progressed and pending:
             await asyncio.sleep(0.15)
+        elif not progressed and not pending:
+            if not await refill_slots():
+                if campaign.hypothesis_tree.next_dispatch_candidate(frozenset()) is None:
+                    break
+                await asyncio.sleep(0.05)
 
     if _redis is not None:
         try:
@@ -816,7 +962,6 @@ async def _iter_campaign_batch_results(
         except Exception:
             pass
 
-    # Timeout fallback for stragglers
     for item in pending:
         yield {
             "hypothesis_id": item["db_hid"],
@@ -859,9 +1004,24 @@ async def run_campaign_loop(
             step="campaign.start",
             payload=campaign.summary(),
         )
+        await db_set_research_session_stage(campaign.id, session_factory, stage="campaign.prior")
 
         # ── Stage 1: Intake + Literature (lightweight, reuse session infra) ──
         parsed = await parse_question(campaign.question)
+        prior_timeout = max(5, int(getattr(settings, "campaign_prior_timeout_sec", 180)))
+        await emitter.emit(
+            session_id=campaign.id,
+            event_type=EventType.CAMPAIGN_PROGRESS,
+            step="campaign.phase",
+            payload={
+                "phase": "prior_build",
+                "timeout_sec": prior_timeout,
+                "detail": (
+                    "Literature prior (LLM + retrieval); hypotheses_tested stays 0 "
+                    "until prior and baseline phases finish."
+                ),
+            },
+        )
         try:
             prior = await asyncio.wait_for(
                 build_prior(
@@ -870,7 +1030,7 @@ async def run_campaign_loop(
                     paper_ttl_days=30,
                     llm=llm,
                 ),
-                timeout=180,
+                timeout=prior_timeout,
             )
         except TimeoutError:
             logger.warning("[campaign %s] Prior build timed out; continuing with empty prior.", campaign.id)
@@ -892,6 +1052,21 @@ async def run_campaign_loop(
 
         # ── Stage 2: Measure baseline if not yet done ─────────────────────
         if abs(campaign.baseline_metric) < 1e-12 and abs(campaign.breakthrough_criteria.baseline_value) < 1e-12:
+            await db_set_research_session_stage(campaign.id, session_factory, stage="campaign.baseline")
+            _bl_to = int(getattr(settings, "campaign_baseline_worker_timeout_sec", 600))
+            await emitter.emit(
+                session_id=campaign.id,
+                event_type=EventType.CAMPAIGN_PROGRESS,
+                step="campaign.phase",
+                payload={
+                    "phase": "baseline_measure",
+                    "celery_join_timeout_sec": _bl_to,
+                    "detail": (
+                        "Baseline runs a full sub-agent on Celery (MNIST train_model + tools). "
+                        "This often dominates the first 7–20+ minutes; hypotheses_tested remains 0 until it finishes."
+                    ),
+                },
+            )
             logger.info("[campaign %s] Measuring baseline...", campaign.id)
             campaign.baseline_metric = await measure_baseline(
                 campaign, llm, emitter, session_factory,
@@ -907,20 +1082,18 @@ async def run_campaign_loop(
                     "baseline_value": campaign.baseline_metric,
                 },
             )
+            await asyncio.to_thread(write_campaign_snapshot, "post_baseline", campaign, prior_dict)
+
+        await db_set_research_session_stage(campaign.id, session_factory, stage="campaign.experiments")
 
         # ── Stage 3: Campaign loop ────────────────────────────────────────
         last_checkpoint = time.monotonic()
         generation = campaign.hypothesis_tree._generation
 
         while not campaign.should_stop():
-            # Get next batch from frontier
-            batch = campaign.hypothesis_tree.next_batch(
-                size=settings.campaign_batch_size,
-                strategy="highest_expected_value",
-            )
-
-            # If frontier is empty, generate new seed hypotheses
-            if not batch:
+            # Pipelined pool: refill keeps up to max_concurrent Celery tasks busy until the
+            # frontier has no dispatchable pending nodes (mid-wave tree expansions included).
+            if campaign.hypothesis_tree.next_dispatch_candidate(frozenset()) is None:
                 await emitter.emit(
                     session_id=campaign.id,
                     event_type=EventType.HYPO_TREE_FRONTIER_EMPTY,
@@ -935,17 +1108,34 @@ async def run_campaign_loop(
                 if not seeds:
                     logger.info("[campaign %s] No seeds generated; stopping.", campaign.id)
                     break
-                batch = seeds
-                # Persist tree + frontier before long-running Celery work so GET /campaigns
-                # and monitors show real tree size instead of zeros for the whole batch.
                 await db_save_campaign(campaign, session_factory)
 
-            # Run experiments — stream each Celery completion so DB / GET /campaigns
-            # advance while sibling workers are still running.
+            max_c = int(getattr(settings, "campaign_max_concurrent_sub_agents", 0) or 0)
+            if max_c <= 0:
+                max_c = max(
+                    1,
+                    int(settings.campaign_batch_size)
+                    * max(1, int(getattr(settings, "campaign_inflight_multiplier", 1) or 1)),
+                )
+
             breakthrough_found = False
-            async for result in _iter_campaign_batch_results(
+            await emitter.emit(
+                session_id=campaign.id,
+                event_type=EventType.CAMPAIGN_PROGRESS,
+                step="campaign.batch_dispatch",
+                payload={
+                    "phase": "pipelined_sub_agents",
+                    "max_concurrent": max_c,
+                    "frontier_size": len(campaign.hypothesis_tree.frontier),
+                    "note": (
+                        "Slots refill as workers complete; new frontier children from expansions "
+                        "can dispatch without waiting for a fixed batch to drain."
+                    ),
+                },
+            )
+            async for result in _iter_campaign_pipelined_results(
                 campaign=campaign,
-                batch=batch,
+                max_concurrent=max_c,
                 prior_dict=prior_dict,
                 domain=domain,
                 emitter=emitter,
@@ -972,6 +1162,10 @@ async def run_campaign_loop(
 
                 if verdict == "confirmed":
                     campaign.total_confirmed += 1
+                    if campaign.total_confirmed == 1:
+                        await asyncio.to_thread(
+                            write_campaign_snapshot, "post_first_confirmed", campaign, prior_dict
+                        )
 
                     # Expand the tree from this confirmed node
                     if settings.campaign_expand_on_confirmed:
@@ -1073,7 +1267,14 @@ async def run_campaign_loop(
 
         await db_save_campaign(campaign, session_factory)
 
+        loaded = await db_load_campaign(campaign.id, session_factory)
+        if loaded is not None:
+            campaign = loaded
+
+        await asyncio.to_thread(write_campaign_snapshot, "pre_paper", campaign, prior_dict)
+
         # Write a paper with whatever we found
+        await db_set_research_session_stage(campaign.id, session_factory, stage="campaign.paper")
         synthesis = build_campaign_synthesis_payload(campaign)
         await write_paper_minimal(
             session_id=campaign.id,
@@ -1085,13 +1286,29 @@ async def run_campaign_loop(
             synthesis=synthesis,
         )
 
+        for attempt in range(3):
+            try:
+                await db_mark_research_session_completed(campaign.id, session_factory)
+                break
+            except Exception as mark_exc:
+                logger.warning(
+                    "[campaign %s] db_mark_research_session_completed attempt %s/3: %s",
+                    campaign.id,
+                    attempt + 1,
+                    mark_exc,
+                )
+                if attempt == 2:
+                    logger.exception(
+                        "[campaign %s] session row may still be 'running' — fix DB/network and re-run mark",
+                        campaign.id,
+                    )
+                await asyncio.sleep(1.0 * (attempt + 1))
         await emitter.emit(
             session_id=campaign.id,
             event_type=EventType.CAMPAIGN_COMPLETED,
             step="campaign.complete",
             payload=campaign.summary(),
         )
-        await db_mark_research_session_completed(campaign.id, session_factory)
 
     except Exception as exc:
         logger.exception("[campaign %s] Fatal error: %s", campaign.id, exc)

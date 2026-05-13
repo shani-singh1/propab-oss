@@ -41,6 +41,8 @@ class AgentContext:
     # Wall-clock cap (monotonic deadline). None = no deadline beyond max_steps.
     deadline_monotonic: float | None = None
     time_budget_exceeded: bool = False
+    # Last validation / tool failures for the think prompt (same agent, no re-routing).
+    tool_failures: list[dict[str, Any]] = field(default_factory=list)
 
     def significance_status(self) -> SignificanceResult:
         return check_significance(self.results_so_far)
@@ -154,6 +156,19 @@ def _extract_named_values(results_so_far: list[dict], tool_names: list[str]) -> 
     return "\n".join(lines) if lines else "  (no numeric values in results yet)"
 
 
+def _tool_failures_block(ctx: AgentContext, *, max_items: int = 4, max_chars: int = 1200) -> str:
+    if not ctx.tool_failures:
+        return "  (none)"
+    parts: list[str] = []
+    for item in ctx.tool_failures[-max_items:]:
+        if not isinstance(item, dict):
+            continue
+        blob = json.dumps(item, ensure_ascii=False)
+        parts.append(f"  - {blob[:400]}{'...' if len(blob) > 400 else ''}")
+    out = "\n".join(parts) if parts else "  (none)"
+    return out[:max_chars] + ("..." if len(out) > max_chars else "")
+
+
 # ─── Think prompt ─────────────────────────────────────────────────────────────
 
 _THINK_PROMPT_TMPL = """You are a research sub-agent testing the following hypothesis.
@@ -190,6 +205,9 @@ If you have a single val_losses list, pass it as values to bootstrap_confidence.
 Peer agent findings this round:
 {peer_summary}
 
+Recent tool failures in THIS run (read before next tool call — fix parameters and retry the same tool; do not restart domain routing):
+{tool_failures_block}
+
 Available tools (name → description):
 {tools_summary}
 
@@ -215,19 +233,18 @@ SANDBOX AND AGENT WALL CLOCK (critical for train_model / run_experiment_grid / a
 • Sandbox code receives injected helpers: SANDBOX_WALL_SEC (seconds budget) and SANDBOX_REMAINING_SEC().
   If generating custom loops, exit early when SANDBOX_REMAINING_SEC() drops below ~30 seconds.
 • This entire hypothesis agent may run at most ~agent_wall_budget_sec={agent_wall_budget_sec} seconds wall-clock total.
-• Choose conservative n_steps / small grids so experiments finish inside the sandbox ceiling; oversized runs only produce timeouts.
+• If you already hit one sandbox timeout on **code**, your next code attempt must **halve** n_steps/epochs (or shrink the grid) — identical resubmits are forbidden and will only time out again.
+
+• Train/grid hard step ceiling for this profile: {agent_tool_n_steps_cap} (0 means the worker does not clamp n_steps).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ADAPTIVE n_steps GUIDANCE — read before calling train_model or run_experiment_grid:
-• Subtle effects (activation functions, normalization placement, dropout): n_steps >= 300
-  These effects are real but small. Short runs will return inconclusive — NOT because
-  the hypothesis is false, but because the experiment wasn't long enough.
-• Structural effects (depth vs width, layer size, skip connections): n_steps >= 150
-  These produce larger effect sizes and are detectable in fewer steps.
-• Convergence speed / optimizer comparison: n_steps >= 500
-  You need to see the full curve to measure when each approach plateaus.
+• If agent_tool_n_steps_cap > 0, treat it as a HARD ceiling (overrides the bullets below when they disagree).
+• Subtle effects (activation functions, normalization placement, dropout): prefer n_steps near the cap when the cap is tight.
+• Structural effects (depth vs width, layer size, skip connections): smaller n_steps often suffice.
+• Convergence speed / optimizer comparison: needs longer runs — if the cap is low, say so in reasoning and use the longest allowed n_steps.
 • Default (if unsure): n_steps = {n_steps_default}
-• NEVER use n_steps < 100 for hypothesis testing — results will be underpowered.
+• Avoid requesting n_steps far above the cap — the worker will clamp and you lose the intended comparison.
 For classification tasks: use dataset='{classification_default_dataset}' unless a strong reason exists not to.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -346,6 +363,7 @@ async def decide_next_action(
         else ""
     )
     extracted_values = _extract_named_values(context.results_so_far, context.tool_names_run)
+    steps_cap = int(getattr(settings, "agent_tool_n_steps_cap", 0) or 0)
 
     prompt = _THINK_PROMPT_TMPL.format(
         hypothesis_text=context.hypothesis_text,
@@ -362,6 +380,7 @@ async def decide_next_action(
         gate_passed=sig.gate_passed,
         sig_tool_ran=any_significance_tool_ran(context.tool_names_run),
         peer_summary=context.to_peer_summary(),
+        tool_failures_block=_tool_failures_block(context),
         tools_summary=_tools_summary(specs),
         max_code_steps=int(getattr(settings, "max_code_steps_per_hypothesis", 1)),
         used_code_steps=_count_code_steps(context.tool_names_run),
@@ -369,6 +388,7 @@ async def decide_next_action(
         classification_default_dataset=str(getattr(settings, "classification_default_dataset", "mnist")),
         sandbox_timeout_sec=int(sandbox_timeout_sec),
         agent_wall_budget_sec=int(agent_wall_budget_sec),
+        agent_tool_n_steps_cap=steps_cap,
     )
 
     raw = await llm.call(
