@@ -32,11 +32,18 @@ services:
     volumes:
       - propab_data:/data/propab
     depends_on:
-      - postgres
-      - redis
-      - qdrant
-      - minio
-      - orchestrator
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      minio:
+        condition: service_started
+      orchestrator:
+        condition: service_started
 
   orchestrator:
     build:
@@ -68,10 +75,16 @@ services:
     volumes:
       - propab_data:/data/propab
     depends_on:
-      - postgres
-      - redis
-      - qdrant
-      - minio
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      minio:
+        condition: service_started
 
   worker:
     build:
@@ -101,10 +114,16 @@ services:
       - propab_data:/data/propab
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
-      - postgres
-      - redis
-      - qdrant
-      - minio
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      minio:
+        condition: service_started
 
   frontend:
     build:
@@ -117,6 +136,21 @@ services:
     depends_on:
       - api
 
+  # One-shot schema migration: Alembic is the single source of truth for the DB schema.
+  # Runs `alembic upgrade head` and exits; all app services wait for it to finish.
+  migrate:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://propab:propab@postgres:5432/propab
+      - DATABASE_URL_SYNC=postgresql+psycopg://propab:propab@postgres:5432/propab
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   postgres:
     image: postgres:15
     environment:
@@ -127,8 +161,11 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql
-      - ./migrations/006_campaigns.sql:/docker-entrypoint-initdb.d/006_campaigns.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U propab -d propab"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   redis:
     image: redis:7-alpine

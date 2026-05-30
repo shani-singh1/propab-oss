@@ -39,8 +39,8 @@ def test_merit_from_trace_two_substantive_tools() -> None:
         },
         {
             "step_type": "tool_call",
-            "input_json": {"tool": "loss_landscape", "params": {}},
-            "output_json": {"summary": "flat region"},
+            "input_json": {"tool": "convergence_analysis", "params": {}},
+            "output_json": {"summary": "converged"},
             "error_json": None,
         },
     ]

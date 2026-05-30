@@ -43,21 +43,8 @@ def render_paper_tex(
     )
 
 
-def _confirmed_hypothesis_count(synthesis: dict[str, Any] | None) -> int:
-    syn = synthesis or {}
-    ledger = syn.get("ledger")
-    if isinstance(ledger, dict):
-        confirmed = ledger.get("confirmed")
-        if isinstance(confirmed, list) and confirmed:
-            return len(confirmed)
-    tc = syn.get("total_confirmed")
-    if isinstance(tc, int) and tc > 0:
-        return tc
-    return 0
-
-
 def _ledger_counts(synthesis: dict[str, Any]) -> tuple[int, int, int]:
-    """Confirmed/refuted/inconclusive counts: prefer synthesis['ledger'], else top-level totals."""
+    """Confirmed/refuted/inconclusive: prefer synthesis['ledger'] lists, else top-level totals."""
     syn = synthesis or {}
     ledger = syn.get("ledger")
     if isinstance(ledger, dict):
@@ -72,95 +59,190 @@ def _ledger_counts(synthesis: dict[str, Any]) -> tuple[int, int, int]:
     return n_c, n_r, n_i
 
 
-def _annotate_synthesis_blob_for_llm(synthesis: dict[str, Any] | None) -> str:
-    """Prefix synthesis JSON so the LLM sees authoritative ledger counts."""
-    n_c, n_r, n_i = _ledger_counts(synthesis or {})
-    if n_c or n_r or n_i:
-        header = (
-            "AUTHORITATIVE_LEDGER_COUNTS: "
-            f"confirmed={n_c}, refuted={n_r}, inconclusive={n_i}. "
-            "Use these exact integers when describing experiment outcomes.\n"
+def outcome_counts(synthesis: dict[str, Any] | None) -> dict[str, int]:
+    """
+    Authoritative outcome counts for prose. Prefers the DB-derived ``counts`` block
+    (set by the paper writer from :func:`compile_session_findings`) so the abstract
+    always matches the results section; falls back to the in-memory ledger shape.
+    """
+    syn = synthesis or {}
+    c = syn.get("counts")
+    if isinstance(c, dict) and any(isinstance(c.get(k), int) for k in ("confirmed", "refuted", "inconclusive")):
+        confirmed = int(c.get("confirmed") or 0)
+        refuted = int(c.get("refuted") or 0)
+        inconclusive = int(c.get("inconclusive") or 0)
+        tested = int(c.get("tested") or (confirmed + refuted + inconclusive))
+        return {"confirmed": confirmed, "refuted": refuted, "inconclusive": inconclusive, "tested": tested}
+    n_c, n_r, n_i = _ledger_counts(syn)
+    return {"confirmed": n_c, "refuted": n_r, "inconclusive": n_i, "tested": n_c + n_r + n_i}
+
+
+def _best_finding(synthesis: dict[str, Any] | None) -> dict[str, Any] | None:
+    syn = synthesis or {}
+    cf = syn.get("confirmed_findings")
+    if isinstance(cf, list) and cf and isinstance(cf[0], dict):
+        return cf[0]
+    bf = syn.get("best_finding")
+    if isinstance(bf, dict) and bf:
+        return bf
+    return None
+
+
+def _outcome_sentence(counts: dict[str, int], best: dict[str, Any] | None) -> str:
+    """
+    A natural-language sentence stating the authoritative outcome (no count tuples).
+
+    Returns LaTeX-ready text: free text is escaped here, while ``stats_text`` (which is
+    already LaTeX math) is passed through. Callers must NOT re-escape the result.
+    """
+    tested, c, r = counts["tested"], counts["confirmed"], counts["refuted"]
+    if tested == 0:
+        return "No experiments were executed in this study."
+    if c == 0:
+        return (
+            f"Across {tested} hypotheses evaluated, none met the significance threshold against the recorded "
+            "measurements, so the question remains open under the methods applied here."
         )
-        return header + json.dumps(synthesis or {}, ensure_ascii=False)[:4000]
-    return json.dumps(synthesis or {}, ensure_ascii=False)[:4000]
-
-
-def _merge_ledger_into_llm_abstract(abstract: str, synthesis: dict[str, Any] | None) -> str:
-    """LLM prose often hallucinates ``confirmed=0``; align with synthesis ledger."""
-    n_c, n_r, n_i = _ledger_counts(synthesis or {})
-    if not (n_c or n_r or n_i):
-        return abstract
-    fixed = abstract
-    fixed = re.sub(r"(?i)confirmed\s*=\s*\d+", f"confirmed={n_c}", fixed, count=1)
-    fixed = re.sub(r"(?i)refuted\s*=\s*\d+", f"refuted={n_r}", fixed, count=1)
-    fixed = re.sub(r"(?i)inconclusive\s*=\s*\d+", f"inconclusive={n_i}", fixed, count=1)
-    if (
-        re.search(rf"(?i)confirmed\s*=\s*{n_c}\b", fixed)
-        and re.search(rf"(?i)refuted\s*=\s*{n_r}\b", fixed)
-        and re.search(rf"(?i)inconclusive\s*=\s*{n_i}\b", fixed)
-    ):
-        return fixed
-    tag = _latex_escape(
-        f"[Hypothesis ledger (authoritative): {n_c} confirmed, {n_r} refuted, {n_i} inconclusive.] "
+    s = (
+        f"Across {tested} hypotheses evaluated, {c} {'was' if c == 1 else 'were'} supported by statistically "
+        "significant evidence"
     )
-    return tag + fixed
+    if r:
+        s += f" and {r} {'was' if r == 1 else 'were'} refuted"
+    s += "."
+    if best:
+        claim = str(best.get("key_finding") or best.get("text") or "").strip().rstrip(".")
+        stats = str(best.get("stats_text") or "")
+        if claim:
+            claim = _latex_escape(claim[0].lower() + claim[1:])
+            frag = f" The strongest result was that {claim}"
+            if stats and stats != "no inferential statistic recorded":
+                frag += f" ({stats})"
+            s += frag + "."
+    return s
 
 
-def _fallback_from_context(question: str, prior: dict[str, Any], synthesis: dict[str, Any] | None) -> dict[str, str]:
+_TITLE_QUESTION_WORDS = r"(what|how|does|do|is|are|can|could|why|which|when|where|will|would|should)"
+
+
+def _fallback_title(question: str) -> str:
+    q = (question or "").strip().rstrip("?.! ")
+    # Strip a leading interrogative phrase (e.g. "What is", "How does") to get a declarative title.
+    for _ in range(2):
+        stripped = re.sub(rf"^{_TITLE_QUESTION_WORDS}\b[\s,:-]*", "", q, flags=re.IGNORECASE).strip()
+        if stripped == q or not stripped:
+            break
+        q = stripped
+    if not q:
+        q = (question or "Automated research report").strip()
+    return (q[0].upper() + q[1:])[:180] if q else "Automated research report"
+
+
+async def _llm_title(llm: LLMClient, session_id: str, question: str, best: dict[str, Any] | None) -> str:
+    finding = ""
+    if best:
+        finding = str(best.get("key_finding") or best.get("text") or "")[:300]
+    prompt = (
+        "Write a single concise, specific academic paper title (at most 16 words) for a study answering this "
+        f"question: {question}\n"
+        + (f"Main finding: {finding}\n" if finding else "")
+        + "Output only the title text: no quotes, no markdown, no trailing period."
+    )
+    try:
+        raw = (await llm.call(prompt=prompt, purpose="paper.title", session_id=session_id)).strip()
+        raw = raw.strip().strip('"').strip("'").rstrip(".")
+        if 0 < len(raw) <= 200 and "\n" not in raw:
+            return raw
+    except Exception:
+        pass
+    return _fallback_title(question)
+
+
+def _fallback_from_context(
+    question: str, prior: dict[str, Any], synthesis: dict[str, Any] | None
+) -> dict[str, str]:
     syn = synthesis or {}
     if syn.get("short_circuit"):
         ans = str(syn.get("short_answer") or "")
-        body = _latex_escape(ans[:2000])
         return {
-            "abstract": body or _latex_escape(question[:1200]),
+            "title": _fallback_title(question),
+            "abstract": _latex_escape(ans[:2000]) or _latex_escape(question[:1200]),
             "introduction": _latex_escape(
-                "This report documents a literature-aligned answer produced without full hypothesis testing."
+                f"We address the question: {question[:900]}. This report documents an answer that is well supported "
+                "by existing literature and therefore did not require new hypothesis testing."
             ),
             "discussion": _latex_escape(
-                "The short-circuit path skipped multi-hypothesis experiments; see abstract and prior literature."
+                "Because the question was resolvable from established prior work, the system returned the "
+                "literature-grounded answer directly rather than running independent experiments."
             ),
             "conclusion": _latex_escape(
-                "Established literature supports the stated answer; reproduce with full experiments if stakes are high."
+                "The stated answer follows from established results; independent experimental replication is "
+                "recommended where the stakes are high."
             ),
         }
+
     kpapers = prior.get("key_papers") or []
     cite = ""
-    if isinstance(kpapers, list) and kpapers:
-        first = kpapers[0] if isinstance(kpapers[0], dict) else {}
-        cite = str(first.get("title", ""))[:200]
-    intro_plain = (
-        f"We address: {question[:900]}. "
-        f"Prior retrieval surfaced {len(kpapers)} seed papers"
-        + (f", including ``{cite}''." if cite else ".")
-    )
-    n_c, n_r, n_i = _ledger_counts(syn)
-    abs_plain = (
-        f"This session investigated: {question[:700]}. "
-        f"Automated sub-agent runs produced stored traces summarized in Results "
-        f"(confirmed={n_c}, refuted={n_r}, inconclusive={n_i}). "
-    )
-    if n_c == 0:
-        abs_plain += (
-            "No hypothesis met the platform confirmation bar against the recorded tool outputs; "
-            "do not treat narrative optimizer rankings as established facts without independent replication."
+    if isinstance(kpapers, list) and kpapers and isinstance(kpapers[0], dict):
+        cite = str(kpapers[0].get("title", ""))[:200]
+
+    counts = outcome_counts(syn)
+    best = _best_finding(syn)
+    outcome = _outcome_sentence(counts, best)  # LaTeX-ready (do not re-escape)
+    q_esc = _latex_escape(question[:900])
+    cite_esc = _latex_escape(cite)
+    n_papers = len(kpapers)
+    works_word = "work" if n_papers == 1 else "works"
+
+    if kpapers:
+        lit_sentence = (
+            f"Retrieval over the prior literature surfaced {n_papers} relevant {works_word}"
+            + (f", including ``{cite_esc}''. " if cite_esc else ". ")
         )
     else:
-        abs_plain += "Claims tied to confirmed hypotheses are summarized in Results; other rows remain tentative."
+        lit_sentence = "No closely matching prior work was retrieved, motivating direct experimentation. "
 
-    disc_plain = (
-        f"Automated experiments concluded with ledger "
-        f"(confirmed={n_c}, refuted={n_r}, inconclusive={n_i}). "
-        "Limitations include sandboxed execution and tool proxies where noted in outputs."
+    intro = (
+        f"We study the following question: {q_esc} "
+        + lit_sentence
+        + "We approach it with autonomous experimentation: generating falsifiable hypotheses, testing each with "
+        "computational instruments under a fixed protocol, and admitting a claim only when it is backed by "
+        "significant statistical evidence."
     )
-    concl_plain = (
-        "Primary takeaways depend on hypotheses marked confirmed in the results section; "
-        "inconclusive rows indicate insufficient signal or tooling limits."
+    abstract = (
+        f"We investigate the following question through autonomous, fully automated experimentation: {q_esc} "
+        "Falsifiable hypotheses were generated and tested under a uniform protocol, with claims admitted only on "
+        f"significant statistical evidence. {outcome}"
     )
+    if counts["confirmed"] == 0:
+        discussion = (
+            "The experiments did not surface evidence strong enough to confirm any hypothesis under the present "
+            "protocol. This is an honest negative result: it constrains the space of likely answers rather than "
+            "establishing one. Limitations include the breadth of instruments available to the agents and the "
+            "compute budget allotted per hypothesis."
+        )
+        conclusion = (
+            "No claim met the evidence bar in this study. Promising but inconclusive directions, summarised in the "
+            "results, are the natural targets for a better-powered follow-up."
+        )
+    else:
+        discussion = (
+            "The supported findings are reported with their statistical evidence in the results section. They should "
+            "be read as automated, reproducible results subject to the breadth of the available instruments and the "
+            "per-hypothesis compute budget; independent replication remains valuable before strong claims are made."
+        )
+        conclusion = (
+            "The study yields concrete, statistically supported findings together with refuted and inconclusive "
+            "directions that scope future work. We recommend independent replication of the strongest result."
+        )
+    # abstract/introduction are already LaTeX-ready (escaped fragments + LaTeX outcome);
+    # discussion/conclusion are static safe prose.
     return {
-        "abstract": _latex_escape(abs_plain[:2000]),
-        "introduction": _latex_escape(intro_plain),
-        "discussion": _latex_escape(disc_plain),
-        "conclusion": _latex_escape(concl_plain),
+        "title": _fallback_title(question),
+        "abstract": abstract[:2400],
+        "introduction": intro[:2400],
+        "discussion": discussion[:2200],
+        "conclusion": conclusion[:1600],
     }
 
 
@@ -172,51 +254,69 @@ async def generate_prose_sections(
     prior: dict[str, Any] | None,
     synthesis: dict[str, Any] | None,
 ) -> dict[str, str]:
+    """
+    Produce publishable narrative sections (title, abstract, introduction, discussion,
+    conclusion). Quantitative outcome statements are always derived deterministically
+    from the authoritative counts, so they match the results section exactly; the LLM,
+    when available, supplies only the surrounding framing.
+    """
     prior = prior or {}
+    syn = synthesis or {}
+    counts = outcome_counts(syn)
+    best = _best_finding(syn)
+    fb = _fallback_from_context(question, prior, synthesis)
+
     use_llm = llm is not None and (
         str(getattr(llm, "provider", "") or "").lower() in ("ollama", "gemini")
         or bool(str(getattr(llm, "api_key", "") or "").strip())
     )
-    # LLM prose routinely asserts definitive rankings when every hypothesis is inconclusive;
-    # the ledger from synthesis is authoritative for what may be claimed at high level.
-    if use_llm and _confirmed_hypothesis_count(synthesis) == 0:
-        use_llm = False
-    if not use_llm:
-        return _fallback_from_context(question, prior, synthesis)
+    if not use_llm or syn.get("short_circuit"):
+        return fb
 
-    prior_blob = json.dumps(prior, ensure_ascii=False)[:6000]
-    syn_blob = _annotate_synthesis_blob_for_llm(synthesis)
+    prior_blob = json.dumps(prior, ensure_ascii=False)[:5000]
+    outcome = _outcome_sentence(counts, best)
 
     async def one(purpose: str, instruction: str) -> str:
         prompt = (
-            f"You write one concise LaTeX-free paragraph for an ML research report.\n"
+            "You write one concise, formal paragraph for an academic research paper. "
+            "Do NOT state any numeric counts of confirmed/refuted/inconclusive hypotheses (those are added "
+            "separately and authoritatively). Do not invent results.\n"
             f"Research question: {question}\n"
-            f"Context JSON (truncated): {prior_blob}\n"
-            f"Synthesis JSON (truncated): {syn_blob}\n"
+            f"Prior-literature context (JSON, truncated): {prior_blob}\n"
+            f"Authoritative outcome (use as the factual basis, do not restate the numbers verbatim): {outcome}\n"
             f"Task: {instruction}\n"
-            "Output plain text only, no markdown, no citations markup, <= 180 words."
+            "Output plain prose only: no markdown, no citation markup, no bullet points, <= 170 words."
         )
         for attempt in range(3):
             try:
                 raw = (await llm.call(prompt=prompt, purpose=purpose, session_id=session_id)).strip()
                 if raw.startswith("[") or raw.startswith("{"):
                     return ""
-                return _latex_escape(raw[:2500])
+                return _latex_escape(raw[:2400])
             except Exception:
                 if attempt < 2:
                     await asyncio.sleep(1.5 * (2**attempt))
                     continue
                 return ""
 
-    abstract = await one("paper.abstract", "Write the abstract summarizing problem, approach, and high-level outcome.")
-    introduction = await one("paper.introduction", "Write the introduction: motivation, gap, and what was executed.")
-    discussion = await one("paper.discussion", "Write discussion: interpret experiment ledger, limitations, rival explanations.")
-    conclusion = await one("paper.conclusion", "Write a tight conclusion: what was learned, what remains open, one recommendation.")
+    title = await _llm_title(llm, session_id, question, best)
+    intro = await one("paper.introduction", "Write the introduction: motivation, the gap in prior work, and the approach taken.")
+    framing = await one("paper.abstract", "Write the abstract's opening: the problem and the method, ending right before the results.")
+    discussion = await one(
+        "paper.discussion",
+        "Write the discussion: interpret what the supported findings mean, give rival explanations, and state limitations.",
+    )
+    conclusion = await one(
+        "paper.conclusion", "Write a tight conclusion: the main takeaway and the most important open question."
+    )
 
-    fb = _fallback_from_context(question, prior, synthesis)
+    # The abstract's quantitative claims are always the authoritative outcome sentence
+    # (already LaTeX-ready), appended to LLM framing — guaranteeing it matches Results.
+    abstract = (framing.strip() + " " + outcome).strip() if framing else fb["abstract"]
     return {
-        "abstract": _merge_ledger_into_llm_abstract(abstract or fb["abstract"], synthesis),
-        "introduction": introduction or fb["introduction"],
+        "title": title or fb["title"],
+        "abstract": abstract,
+        "introduction": intro or fb["introduction"],
         "discussion": discussion or fb["discussion"],
         "conclusion": conclusion or fb["conclusion"],
     }

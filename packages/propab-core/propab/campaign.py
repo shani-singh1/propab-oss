@@ -19,9 +19,11 @@ from uuid import uuid4
 from propab.hypothesis_tree import HypothesisTree
 from propab.metric_normalize import normalize_accuracy_metric
 
-# Reported val_accuracy at or above this (after normalize_accuracy_metric) is treated as
-# instrumentation / unit confusion for typical sandboxed MNIST MLPs — do not
-# record as best_metric or count toward breakthrough (fixes false ~0.998 "wins").
+# Default plausibility ceiling for accuracy-style metrics. A single-experiment result at or
+# above this (after normalization) is usually instrumentation / unit confusion rather than a
+# real win, so accuracy criteria adopt it by default. It is an explicit, overridable field on
+# BreakthroughCriteria (set plausibility_max=None to disable, or a higher value for easy tasks) —
+# NOT a hardwired assumption in the comparison logic, so the engine stays domain-agnostic.
 ACC_METRIC_PLAUSIBILITY_MAX = 0.975
 
 
@@ -56,6 +58,16 @@ class BreakthroughCriteria:
     direction: str = "higher_is_better"  # "higher_is_better" | "lower_is_better"
     min_confidence: float = 0.85       # significance confidence required
     min_replications: int = 3          # confirmed siblings before declaring
+    # Optional declared ceiling: a higher_is_better result at/above this is rejected as
+    # implausible (instrumentation guard). None disables the guard. Domain-agnostic.
+    plausibility_max: float | None = None
+
+    def _is_implausible(self, metric_val: float) -> bool:
+        return (
+            self.direction == "higher_is_better"
+            and self.plausibility_max is not None
+            and metric_val >= self.plausibility_max
+        )
 
     def is_breakthrough(self, finding: dict[str, Any]) -> bool:
         """Return True only when ALL criteria are met."""
@@ -73,13 +85,7 @@ class BreakthroughCriteria:
         metric_val = normalize_accuracy_metric(self.metric_name, metric_val)
         if metric_val is None:
             return False
-        # Near-perfect reported accuracy from a sandbox MLP is usually a instrumentation bug —
-        # do not declare campaign breakthrough on it.
-        if (
-            self.direction == "higher_is_better"
-            and "accuracy" in (self.metric_name or "").lower()
-            and metric_val >= ACC_METRIC_PLAUSIBILITY_MAX
-        ):
+        if self._is_implausible(metric_val):
             return False
         base = self.baseline_value
         if abs(base) < 1e-12:
@@ -111,6 +117,7 @@ class BreakthroughCriteria:
             "direction": self.direction,
             "min_confidence": self.min_confidence,
             "min_replications": self.min_replications,
+            "plausibility_max": self.plausibility_max,
         }
 
     @classmethod
@@ -122,11 +129,17 @@ class BreakthroughCriteria:
             direction=data.get("direction", "higher_is_better"),
             min_confidence=data.get("min_confidence", 0.85),
             min_replications=data.get("min_replications", 3),
+            plausibility_max=data.get("plausibility_max"),
         )
 
     @classmethod
     def default_accuracy(cls) -> "BreakthroughCriteria":
-        return cls(metric_name="val_accuracy", direction="higher_is_better", improvement_threshold=0.05)
+        return cls(
+            metric_name="val_accuracy",
+            direction="higher_is_better",
+            improvement_threshold=0.05,
+            plausibility_max=ACC_METRIC_PLAUSIBILITY_MAX,
+        )
 
     @classmethod
     def default_loss(cls) -> "BreakthroughCriteria":
@@ -230,11 +243,7 @@ class ResearchCampaign:
         if metric_val is None:
             return False
 
-        if (
-            crit.direction == "higher_is_better"
-            and "accuracy" in (crit.metric_name or "").lower()
-            and metric_val >= ACC_METRIC_PLAUSIBILITY_MAX
-        ):
+        if crit._is_implausible(metric_val):
             return False
 
         is_better = (
@@ -247,6 +256,23 @@ class ResearchCampaign:
             self.improvement_pct = crit.improvement_pct(metric_val)
             return True
         return False
+
+    def recount_from_tree(self) -> None:
+        """Recompute outcome counts from distinct tree nodes.
+
+        Counters must reflect *distinct evaluated hypotheses* — not the number of
+        worker results — otherwise re-dispatched nodes double-count and the campaign
+        summary diverges from the hypothesis tree and the DB-derived paper counts.
+        Tree nodes are upserted one row per node in the ``hypotheses`` table, so this
+        keeps ``summary()`` aligned with ``compile_session_findings``.
+        """
+        nodes = self.hypothesis_tree.nodes
+        evaluated = [
+            n for n in nodes.values()
+            if n.verdict in ("confirmed", "refuted", "inconclusive")
+        ]
+        self.total_hypotheses = len(evaluated)
+        self.total_confirmed = sum(1 for n in evaluated if n.verdict == "confirmed")
 
     def count_replications(self, hypothesis_id: str) -> int:
         """

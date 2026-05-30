@@ -17,6 +17,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY packages ./packages
 COPY services ./services
 COPY migrations ./migrations
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -e . --no-deps

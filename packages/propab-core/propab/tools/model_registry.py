@@ -82,6 +82,58 @@ def get_model(model_id: str) -> dict[str, Any] | None:
     return None
 
 
+def _param_count_from_dims(dims: list[int] | None) -> int:
+    """Dense MLP parameter count from layer dims (weights + biases)."""
+    if not dims or len(dims) < 2:
+        return 0
+    total = 0
+    for i in range(len(dims) - 1):
+        total += dims[i] * dims[i + 1] + dims[i + 1]
+    return int(total)
+
+
+def resolve_model(model_id: str) -> dict[str, Any] | None:
+    """Resolve a model_id robustly across the build → train chain.
+
+    Agents frequently pass the wrong handle to downstream tools: a base build id to an
+    eval tool, or a ``<id>:trained`` handle to a profiling tool. Both should work. This
+    looks up the exact id, then tries the trained variant, then the base variant, and
+    backfills ``param_count`` from ``dims`` (carried from the base build) so profiling
+    and counting tools never silently report 0.
+    """
+    mid = str(model_id or "").strip()
+    if not mid:
+        return None
+
+    candidates = [mid]
+    if mid.endswith(":trained"):
+        candidates.append(mid[: -len(":trained")])
+    else:
+        candidates.append(f"{mid}:trained")
+
+    info: dict[str, Any] | None = None
+    for cand in candidates:
+        got = get_model(cand)
+        if got is not None:
+            info = dict(got)
+            break
+    if info is None:
+        return None
+
+    # Backfill param_count from the base entry / dims so trained handles profile correctly.
+    if not info.get("param_count"):
+        base_id = info.get("base")
+        base_info = get_model(str(base_id)) if base_id else None
+        if base_info and base_info.get("param_count"):
+            info["param_count"] = int(base_info["param_count"])
+            info.setdefault("activation", base_info.get("activation"))
+        else:
+            pc = _param_count_from_dims(info.get("dims"))
+            if pc:
+                info["param_count"] = pc
+    return info
+
+
 def clear_model(model_id: str) -> None:
     _STORE.pop(model_id, None)
     try:

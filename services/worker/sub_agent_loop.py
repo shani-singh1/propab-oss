@@ -35,6 +35,7 @@ from services.worker.sandbox_code_rewrite import (
 from services.worker.significance import (
     any_significance_tool_ran,
     check_significance,
+    classify_verdict,
 )
 from services.worker.think_act import (
     AgentContext,
@@ -838,6 +839,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
         any_tool_success = False
         successful_tool_outputs: list[dict[str, Any]] = []
         successful_tool_names: list[str] = []
+        last_code_output: list[dict[str, Any]] = []
         step_counter = 0
         tool_calls_done = 0
         err_box: list[Any] = [None]
@@ -975,6 +977,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
             force_inline_trusted: bool = False,
         ) -> bool:
             nonlocal sandbox_ok
+            del last_code_output[:]
             step_id = str(uuid4())
             t0 = time.perf_counter()
             code_cur = code
@@ -1169,6 +1172,8 @@ async def run_sub_agent_async(payload: dict) -> dict:
                 memory_mb=settings.sandbox_memory_mb,
                 timeout_sec=sandbox_timeout_sec,
             )
+            if sandbox_ok and isinstance(parsed, dict):
+                last_code_output.append(parsed)
             await emitter.emit(
                 session_id=session_id,
                 event_type=EventType.AGENT_STEP_COMPLETED,
@@ -1301,13 +1306,26 @@ async def run_sub_agent_async(payload: dict) -> dict:
                             agent_ctx.tool_failures.pop(0)
 
                 elif action.action_type == "code":
-                    code_desc = action.code_description or "custom computation"
-                    code = _think_act_stub_code(str(code_desc))
-                    step_ok = await run_code_step(
-                        code,
-                        step_counter,
-                        force_inline_trusted=True,
-                    )
+                    real_code = (action.code or "").strip()
+                    if real_code:
+                        # Real LLM-authored program → execute in the Docker sandbox.
+                        step_ok = await run_code_step(real_code, step_counter)
+                        if step_ok and last_code_output:
+                            # Feed real computed output back so the LLM can chain on it and
+                            # the significance/evidence layer can use real measurements.
+                            out = last_code_output[-1]
+                            agent_ctx.results_so_far.append(out)
+                            successful_tool_outputs.append(out)
+                            successful_tool_names.append("__code__")
+                    else:
+                        # No source supplied (description only) → deterministic no-op stub so the
+                        # step is recorded without burning a Docker wall on an empty computation.
+                        code_desc = action.code_description or "custom computation"
+                        step_ok = await run_code_step(
+                            _think_act_stub_code(str(code_desc)),
+                            step_counter,
+                            force_inline_trusted=True,
+                        )
                     if step_ok:
                         agent_ctx.tool_names_run.append("__code__")
 
@@ -1466,46 +1484,13 @@ async def run_sub_agent_async(payload: dict) -> dict:
         # Use significance module for the gate check
         sig_result = check_significance(successful_tool_outputs)
 
-        if evidence_obj["n_metric_steps"] == 0:
-            verdict = "inconclusive"
-            confidence = 0.0
-            evidence_obj["verdict_reason"] = "no metric-bearing steps executed"
-        elif sig_result.gate_definitively_failed:
-            verdict = "refuted"
-            confidence = _compute_confidence(evidence_obj)
-            evidence_obj["verdict_reason"] = (
-                "significance test ran and found no effect (p >= 0.30, negligible effect size)"
-            )
-        elif not sig_result.gate_passed:
-            verdict = "inconclusive"
-            confidence = _compute_confidence(evidence_obj)
-            evidence_obj["verdict_reason"] = (
-                "no significance evidence: p_value/effect_size/CI not produced or not decisive"
-            )
-        else:
-            # Gate passed — check direction
-            supports_hypothesis = False
-            if evidence_obj["p_value"] is not None:
-                supports_hypothesis = bool(
-                    evidence_obj["delta"] is not None
-                    and evidence_obj["p_value"] < 0.05
-                    and evidence_obj["relevance_score"] >= 0.12
-                )
-            elif evidence_obj["effect_size"] is not None:
-                supports_hypothesis = bool(
-                    abs(evidence_obj["effect_size"]) > 0.2 and evidence_obj["relevance_score"] >= 0.12
-                )
-            elif evidence_obj["delta_pct"] is not None:
-                supports_hypothesis = bool(
-                    abs(evidence_obj["delta_pct"]) >= 2.0 and evidence_obj["relevance_score"] >= 0.12
-                )
-            confidence = _compute_confidence(evidence_obj)
-            verdict = "confirmed" if supports_hypothesis else "inconclusive"
-            evidence_obj["verdict_reason"] = (
-                "significance gate passed; metric direction supports hypothesis"
-                if supports_hypothesis
-                else "significance gate passed but metric direction ambiguous"
-            )
+        verdict, verdict_reason = classify_verdict(
+            evidence_obj,
+            sig_result,
+            min_metric_steps_for_confirm=int(getattr(settings, "min_metric_steps_for_confirm", 2)),
+        )
+        evidence_obj["verdict_reason"] = verdict_reason
+        confidence = 0.0 if evidence_obj["n_metric_steps"] == 0 else _compute_confidence(evidence_obj)
 
         sig_summary = {
             "gate_passed": sig_result.gate_passed,

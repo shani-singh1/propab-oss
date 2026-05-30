@@ -59,7 +59,9 @@ def test_campaign_synthesis_prose_abstract_matches_ledger_counts() -> None:
             prior={"key_papers": []},
             synthesis=syn,
         )
-        assert "confirmed=22" in out["abstract"]
-        assert "refuted=2" in out["abstract"]
+        # Abstract is publishable prose: counts in words, never machine-log tuples.
+        assert "confirmed=" not in out["abstract"]
+        assert "22 were supported" in out["abstract"]
+        assert "2 were refuted" in out["abstract"]
 
     asyncio.run(_run())

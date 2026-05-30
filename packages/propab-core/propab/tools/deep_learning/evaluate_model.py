@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from propab.tools.model_registry import get_model
+from propab.tools.model_registry import resolve_model
 from propab.tools.types import ToolError, ToolResult
 
 TOOL_SPEC = {
@@ -47,7 +47,7 @@ def evaluate_model(
             error=ToolError(type="missing_dependency", message="PyTorch required."),
         )
 
-    info = get_model(str(model_id))
+    info = resolve_model(str(model_id))
     if not info:
         return ToolResult(
             success=False,

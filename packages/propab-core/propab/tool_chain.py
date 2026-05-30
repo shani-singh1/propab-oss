@@ -16,11 +16,9 @@ _ACCEPTS_MODEL_ID = frozenset(
         "profile_model",
         "compute_flops",
         "activation_statistics",
-        "loss_landscape",
         "lr_range_test",
         "gradient_noise_scale",
         "compare_optimizers",
-        "hessian_analysis",
     }
 )
 

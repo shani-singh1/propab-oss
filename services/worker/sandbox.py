@@ -13,6 +13,17 @@ except ImportError:  # pragma: no cover
     requests = None  # type: ignore[assignment]
 
 
+_DOCKER_CLIENT = None
+
+
+def _get_docker_client():
+    """Reuse a single Docker client per worker process (avoids per-call connection cold start)."""
+    global _DOCKER_CLIENT
+    if _DOCKER_CLIENT is None:
+        _DOCKER_CLIENT = docker.from_env()
+    return _DOCKER_CLIENT
+
+
 def _sandbox_prepended_budget(timeout_sec: int) -> str:
     """Expose wall budget inside user code so training loops can early-exit before Docker SIGKILL."""
     wall = max(15, int(timeout_sec))
@@ -39,7 +50,7 @@ def run_sandboxed_python(
 
     Prepends SANDBOX_WALL_SEC and SANDBOX_REMAINING_SEC() helpers so codegen can throttle work.
     """
-    client = docker.from_env()
+    client = _get_docker_client()
     full_src = _sandbox_prepended_budget(timeout_sec) + code
     payload = base64.b64encode(full_src.encode("utf-8")).decode("ascii")
     inner = (

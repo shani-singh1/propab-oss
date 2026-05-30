@@ -37,7 +37,7 @@ def main() -> int:
 
     start = [
         sys.executable,
-        str(ROOT / "scripts" / "start_campaign_v2.py"),
+        str(ROOT / "scripts" / "start_campaign_v1.py"),
         "--api",
         api,
         "--hours",

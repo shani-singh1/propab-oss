@@ -53,9 +53,17 @@ class Settings(BaseSettings):
     agent_max_tool_calls: int = 40
     # httpx read/connect timeout for OpenAI / external LLM HTTP (seconds)
     llm_http_timeout_sec: float = 180.0
+    # Transient-error resilience for LLM calls (timeouts, 429, 5xx). Retries use
+    # exponential backoff: base * 2**attempt. Keeps long campaigns alive.
+    llm_max_retries: int = 3
+    llm_retry_base_delay_sec: float = 2.0
     max_code_steps_per_hypothesis: int = 1
     n_steps_default: int = 150
     classification_default_dataset: str = "mnist"
+    # Verification bar: a hypothesis may only be "confirmed" if its supporting metric was observed
+    # in at least this many independent metric-bearing steps (replication/reproduction guard).
+    # Set to 1 to allow single-shot confirmations. Domain-agnostic.
+    min_metric_steps_for_confirm: int = 2
     # Multi-round orchestrator
     research_max_rounds: int = 4
     research_max_hours: float = 3.5

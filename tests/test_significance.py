@@ -6,8 +6,72 @@ from services.worker.significance import (
     SignificanceResult,
     any_significance_tool_ran,
     check_significance,
+    classify_verdict,
     fisher_combine_p_values,
 )
+
+
+def _evidence(**kw):
+    base = {
+        "n_metric_steps": 2,
+        "relevance_score": 0.5,
+        "p_value": 0.01,
+        "delta": -0.1,
+        "delta_pct": -5.0,
+        "effect_size": 0.6,
+    }
+    base.update(kw)
+    return base
+
+
+def test_classify_verdict_confirmed_when_replicated():
+    sig = SignificanceResult(gate_passed=True, p_value=0.01, effect_size=0.6)
+    verdict, _ = classify_verdict(_evidence(n_metric_steps=2), sig)
+    assert verdict == "confirmed"
+
+
+def test_classify_verdict_unreplicated_downgraded_to_inconclusive():
+    sig = SignificanceResult(gate_passed=True, p_value=0.01, effect_size=0.6)
+    verdict, reason = classify_verdict(_evidence(n_metric_steps=1), sig)
+    assert verdict == "inconclusive"
+    assert "unreplicated" in reason
+
+
+def test_classify_verdict_single_step_confirmable_when_bar_is_one():
+    sig = SignificanceResult(gate_passed=True, p_value=0.01, effect_size=0.6)
+    verdict, _ = classify_verdict(
+        _evidence(n_metric_steps=1), sig, min_metric_steps_for_confirm=1
+    )
+    assert verdict == "confirmed"
+
+
+def test_classify_verdict_no_metric_steps_inconclusive():
+    sig = SignificanceResult(gate_passed=True)
+    verdict, reason = classify_verdict(_evidence(n_metric_steps=0), sig)
+    assert verdict == "inconclusive"
+    assert "no metric-bearing steps" in reason
+
+
+def test_classify_verdict_refuted_on_definitive_failure():
+    sig = SignificanceResult(gate_passed=False, gate_definitively_failed=True, p_value=0.4)
+    verdict, _ = classify_verdict(_evidence(), sig)
+    assert verdict == "refuted"
+
+
+def test_classify_verdict_gate_not_passed_inconclusive():
+    sig = SignificanceResult(gate_passed=False)
+    verdict, _ = classify_verdict(_evidence(), sig)
+    assert verdict == "inconclusive"
+
+
+def test_classify_verdict_ambiguous_direction_inconclusive():
+    sig = SignificanceResult(gate_passed=True, p_value=0.2)
+    # p_value present but >= 0.05 → direction not supported
+    verdict, reason = classify_verdict(
+        _evidence(p_value=0.2, effect_size=None, delta_pct=None), sig
+    )
+    assert verdict == "inconclusive"
+    assert "ambiguous" in reason
 
 
 def test_gate_passes_on_p_value():

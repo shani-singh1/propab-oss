@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from propab.campaign import BreakthroughCriteria, ResearchCampaign
+from propab.campaign import ACC_METRIC_PLAUSIBILITY_MAX, BreakthroughCriteria, ResearchCampaign
 from propab.config import settings
 from propab.events import EventEmitter
 from propab.types import EventType
@@ -114,6 +114,9 @@ class BreakthroughCriteriaRequest(BaseModel):
     direction: str = Field(default="higher_is_better")
     min_confidence: float = Field(default=0.85, ge=0.5, le=1.0)
     min_replications: int = Field(default=3, ge=1, le=20)
+    # Optional declared instrumentation ceiling for higher_is_better metrics. If omitted,
+    # accuracy-style criteria adopt the default accuracy ceiling; other metrics stay unbounded.
+    plausibility_max: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class CampaignRequest(BaseModel):
@@ -150,12 +153,21 @@ async def create_campaign(
     GET /stream/{campaign_id} delivers all events in real time.
     """
     campaign_id = str(uuid4())
+    bc = request.breakthrough_criteria
+    plausibility_max = bc.plausibility_max
+    if (
+        plausibility_max is None
+        and bc.direction == "higher_is_better"
+        and "accuracy" in (bc.metric_name or "").lower()
+    ):
+        plausibility_max = ACC_METRIC_PLAUSIBILITY_MAX
     criteria = BreakthroughCriteria(
-        metric_name=request.breakthrough_criteria.metric_name,
-        improvement_threshold=request.breakthrough_criteria.improvement_threshold,
-        direction=request.breakthrough_criteria.direction,
-        min_confidence=request.breakthrough_criteria.min_confidence,
-        min_replications=request.breakthrough_criteria.min_replications,
+        metric_name=bc.metric_name,
+        improvement_threshold=bc.improvement_threshold,
+        direction=bc.direction,
+        min_confidence=bc.min_confidence,
+        min_replications=bc.min_replications,
+        plausibility_max=plausibility_max,
     )
     campaign = ResearchCampaign(
         id=campaign_id,

@@ -23,6 +23,9 @@ class AgentAction:
     tool_name: str | None = None
     params: dict[str, Any] = field(default_factory=dict)
     code_description: str | None = None
+    # Complete executable Python source for action_type="code". When present, it is run in the
+    # Docker sandbox (real execution); code_description is only a human-readable summary.
+    code: str | None = None
     reasoning: str = ""
     expected_outcome: str = ""
 
@@ -220,13 +223,19 @@ What should you do next? Rules:
 4. Do not repeat a tool you already ran unless with meaningfully different parameters.
 5. Good sequence: build_mlp → train_model → (train_model again with different config) →
    statistical_significance(results_a=val_losses_A, results_b=val_losses_B) → stop
-6. STRICT RULE: You may only use action_type="code" if:
-   (a) no available tool covers the exact measurement, and
-   (b) you explicitly state which tool you checked and why it does not apply.
+6. action_type="code" is a first-class instrument: write COMPLETE, self-contained, executable
+   Python to compute, search, simulate, or verify whatever the hypothesis requires. This is the
+   primary way to attack computational/mathematical problems (combinatorics, number theory,
+   search/verification, constructions) where no domain tool applies.
+   CODE OUTPUT CONTRACT (mandatory): the program MUST end by printing exactly one JSON line to
+   stdout of the form: print(json.dumps({{"sandbox": "ok", ...your result fields...}}))
+   Put your real measurements/values (e.g. counts, metrics, found constructions, verification
+   booleans) as fields in that dict. Code that does not print this JSON line is treated as failed.
 7. Maximum code steps allowed for this hypothesis: {max_code_steps}.
    Code steps already used: {used_code_steps}.
-8. If you are about to write code to train/evaluate/compare models, use tools instead:
-   train_model, run_experiment_grid, compare_optimizers, statistical_significance.
+8. Prefer an exact-fit tool over code when one exists. If you are training/evaluating/comparing
+   ML models, use tools (train_model, run_experiment_grid, compare_optimizers); reserve code for
+   computations the tools do not cover.
 
 SANDBOX AND AGENT WALL CLOCK (critical for train_model / run_experiment_grid / any code step):
 • Each sandbox run is capped at sandbox_timeout_sec={sandbox_timeout_sec} seconds (Docker, no GPU).
@@ -250,7 +259,7 @@ For classification tasks: use dataset='{classification_default_dataset}' unless 
 
 Choose ONE action:
 - tool: call a specific tool
-- code: write custom Python code (describe what it computes)
+- code: write complete executable Python (full source in the "code" field; must print the JSON contract line)
 - stop: stop collecting evidence (only allowed after significance gate is passed)
 
 Return JSON only:
@@ -258,7 +267,8 @@ Return JSON only:
   "action_type": "tool" | "code" | "stop",
   "tool_name": "tool_name_here",
   "params": {{"param": "value"}},
-  "code_description": "what the code computes (only if action_type=code)",
+  "code_description": "one-line summary of what the code computes (only if action_type=code)",
+  "code": "FULL Python source ending in print(json.dumps({{\\"sandbox\\":\\"ok\\", ...}})) (only if action_type=code)",
   "reasoning": "one sentence: why this action next",
   "expected_outcome": "what you expect to learn or confirm from this action"
 }}
@@ -477,6 +487,7 @@ def _parse_action(data: dict) -> AgentAction:
         tool_name=str(data.get("tool_name", "")).strip() or None,
         params=data.get("params") if isinstance(data.get("params"), dict) else {},
         code_description=str(data.get("code_description", "")).strip() or None,
+        code=(str(data.get("code")).strip() or None) if data.get("code") is not None else None,
         reasoning=str(data.get("reasoning", "")).strip(),
         expected_outcome=str(data.get("expected_outcome", "")).strip(),
     )

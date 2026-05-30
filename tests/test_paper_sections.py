@@ -1,7 +1,7 @@
 import asyncio
 
 from propab.paper_compiler import collect_figure_object_ids, compile_references_latex
-from propab.paper_sections import generate_prose_sections, render_paper_tex
+from propab.paper_sections import generate_prose_sections, outcome_counts, render_paper_tex
 
 
 def test_render_paper_tex_includes_sections() -> None:
@@ -31,81 +31,52 @@ def test_compile_references_empty_prior() -> None:
     assert "References" in tex
 
 
-def test_generate_prose_sections_nonempty_ledger_matches_confirmed_count() -> None:
-    """Abstract must report the same confirmed count as ledger (campaign paper path)."""
+def test_outcome_counts_prefers_db_counts_block() -> None:
+    syn = {
+        "counts": {"confirmed": 5, "refuted": 2, "inconclusive": 1, "tested": 8},
+        "ledger": {"confirmed": ["a"], "refuted": [], "inconclusive": []},
+    }
+    c = outcome_counts(syn)
+    assert (c["confirmed"], c["refuted"], c["inconclusive"], c["tested"]) == (5, 2, 1, 8)
+
+
+def test_abstract_is_prose_not_ledger_tuple_and_matches_counts() -> None:
+    """The abstract must read as prose and report the authoritative counts in words."""
 
     async def _run() -> None:
-        confirmed = [f"h{i}" for i in range(22)]
         out = await generate_prose_sections(
             llm=None,
             session_id="00000000-0000-0000-0000-000000000003",
             question="Short synthetic campaign question.",
             prior={"key_papers": []},
-            synthesis={
-                "total_confirmed": 22,
-                "total_refuted": 2,
-                "total_inconclusive": 0,
-                "ledger": {"confirmed": confirmed, "refuted": ["r1", "r2"], "inconclusive": []},
-            },
+            synthesis={"counts": {"confirmed": 22, "refuted": 2, "inconclusive": 0, "tested": 24}},
         )
-
-        assert "confirmed=22" in out["abstract"]
-        assert "refuted=2" in out["abstract"]
-        assert "No hypothesis met the platform confirmation bar" not in out["abstract"]
+        abstract = out["abstract"]
+        # No machine-log ledger tuples in publishable prose.
+        assert "confirmed=" not in abstract
+        # Authoritative numbers expressed in words.
+        assert "24 hypotheses" in abstract
+        assert "22 were supported" in abstract
+        assert "2 were refuted" in abstract
+        assert out["title"]
 
     asyncio.run(_run())
 
 
-def test_generate_prose_sections_uses_total_confirmed_when_ledger_empty() -> None:
-    async def _run() -> None:
-        out = await generate_prose_sections(
-            llm=None,
-            session_id="00000000-0000-0000-0000-000000000002",
-            question="Campaign question.",
-            prior={"key_papers": []},
-            synthesis={
-                "total_confirmed": 3,
-                "total_refuted": 1,
-                "total_inconclusive": 2,
-                "ledger": {},
-            },
-        )
-
-        assert "confirmed=3" in out["abstract"]
-        assert "refuted=1" in out["abstract"]
-        assert "inconclusive=2" in out["abstract"]
-
-    asyncio.run(_run())
-
-
-def test_generate_prose_sections_no_llm_honest_abstract_when_zero_confirmed() -> None:
+def test_abstract_honest_when_zero_confirmed() -> None:
     async def _run() -> None:
         out = await generate_prose_sections(
             llm=None,
             session_id="00000000-0000-0000-0000-000000000001",
             question="Compare optimizers A and B on synthetic losses.",
             prior={"key_papers": []},
-            synthesis={
-                "ledger": {"confirmed": [], "refuted": [], "inconclusive": ["h1", "h2"]},
-            },
+            synthesis={"counts": {"confirmed": 0, "refuted": 0, "inconclusive": 2, "tested": 2}},
         )
-
-        assert "confirmed=0" in out["abstract"]
-        assert "inconclusive=2" in out["abstract"]
-        assert "No hypothesis met" in out["abstract"]
+        abstract = out["abstract"]
+        assert "confirmed=" not in abstract
+        assert "none met the significance threshold" in abstract
 
     asyncio.run(_run())
-
-
-def test_merge_ledger_into_llm_abstract_patches_wrong_counts() -> None:
-    from propab.paper_sections import _merge_ledger_into_llm_abstract
-
-    syn = {"total_confirmed": 7, "total_refuted": 0, "total_inconclusive": 1}
-    bad = "Outcomes: confirmed=0, refuted=0, inconclusive=0."
-    out = _merge_ledger_into_llm_abstract(bad, syn)
-    assert "confirmed=7" in out
-    assert "refuted=0" in out
-    assert "inconclusive=1" in out
 
 
 def test_collect_figure_object_ids_dedupes() -> None:

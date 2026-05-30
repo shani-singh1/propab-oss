@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import time
 from typing import Any
 from uuid import uuid4
@@ -12,6 +14,20 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from propab.config import settings
 from propab.events import EventEmitter
 from propab.types import EventType
+
+logger = logging.getLogger(__name__)
+
+# Status codes worth retrying: rate limits and transient server-side failures.
+_RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
+
+
+def _is_transient_llm_error(exc: Exception) -> bool:
+    """True for network/timeout/rate-limit errors that a retry can plausibly fix."""
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _RETRYABLE_STATUS
+    return False
 
 
 class LLMClient:
@@ -69,6 +85,31 @@ class LLMClient:
         return response_text
 
     async def _call_provider(self, prompt: str) -> str:
+        """Dispatch to the provider with bounded exponential backoff on transient errors.
+
+        A single LLM timeout used to crash entire campaigns; retrying transient
+        failures (timeouts, connection resets, 429/5xx) keeps long runs alive.
+        """
+        max_retries = max(0, int(getattr(settings, "llm_max_retries", 3)))
+        base_delay = float(getattr(settings, "llm_retry_base_delay_sec", 2.0))
+        last_exc: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                return await self._call_provider_once(prompt)
+            except Exception as exc:  # noqa: BLE001 — classify then re-raise non-transient
+                if not _is_transient_llm_error(exc) or attempt >= max_retries:
+                    raise
+                last_exc = exc
+                delay = base_delay * (2 ** attempt)
+                logger.warning(
+                    "Transient LLM error (%s: %s); retry %d/%d in %.1fs",
+                    type(exc).__name__, exc, attempt + 1, max_retries, delay,
+                )
+                await asyncio.sleep(delay)
+        # Unreachable: loop either returns or raises, but keep type-checkers happy.
+        raise last_exc if last_exc else RuntimeError("LLM call failed without an exception")
+
+    async def _call_provider_once(self, prompt: str) -> str:
         prov = (self.provider or "openai").strip().lower()
         if prov == "ollama":
             return await self._ollama_chat(prompt)

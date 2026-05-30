@@ -20,7 +20,7 @@ def test_refine_skips_non_tool_next() -> None:
     assert out == nxt
 
 
-def test_refine_injects_model_id_for_hessian_analysis() -> None:
-    nxt = {"type": "tool", "tool": "hessian_analysis", "params": {"dataset": "synthetic"}}
+def test_refine_injects_model_id_for_activation_statistics() -> None:
+    nxt = {"type": "tool", "tool": "activation_statistics", "params": {"dataset": "synthetic"}}
     out = refine_next_tool_step("build_transformer", {"model_id": "mid-99"}, nxt)
     assert out["params"]["model_id"] == "mid-99"

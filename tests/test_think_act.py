@@ -64,6 +64,27 @@ def test_parse_action_stop():
     assert action.action_type == "stop"
 
 
+def test_parse_action_code_captures_real_source():
+    src = "import json\nprint(json.dumps({'sandbox': 'ok', 'count': 42}))\n"
+    data = {
+        "action_type": "code",
+        "code_description": "count solutions",
+        "code": src,
+        "reasoning": "no tool covers this combinatorial search",
+    }
+    action = _parse_action(data)
+    assert action.action_type == "code"
+    assert action.code == src.strip()
+    assert action.code_description == "count solutions"
+
+
+def test_parse_action_code_without_source_is_none():
+    data = {"action_type": "code", "code_description": "describe only"}
+    action = _parse_action(data)
+    assert action.action_type == "code"
+    assert action.code is None
+
+
 def test_parse_action_unknown_defaults_to_stop():
     data = {"action_type": "fly", "reasoning": "test"}
     action = _parse_action(data)

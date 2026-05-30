@@ -53,7 +53,7 @@ from propab.types import EventType
 from services.orchestrator.hypotheses import generate_ranked_hypotheses
 from services.orchestrator.intake import parse_question
 from services.orchestrator.literature import build_prior
-from services.orchestrator.paper import write_paper_minimal
+from services.orchestrator.paper import _session_experiment_step_count, write_paper_minimal
 from services.orchestrator.schemas import Prior
 from services.worker.peer_findings import build_peer_finding_payload, publish_peer_finding
 from services.worker.tasks import run_sub_agent_task
@@ -975,6 +975,45 @@ async def _iter_campaign_pipelined_results(
         }
 
 
+async def _try_salvage_paper(
+    campaign: ResearchCampaign,
+    prior_dict: dict[str, Any] | None,
+    emitter: EventEmitter,
+    llm: LLMClient,
+    session_factory: async_sessionmaker,
+) -> bool:
+    """Best-effort paper write after a fatal error. Returns True iff a paper was produced.
+
+    A campaign that ran real experiments should not be thrown away just because a late
+    LLM/DB hiccup escaped the loop — if there are experiment steps on disk, compile the
+    paper from the accumulated trace so the run still ships a deliverable.
+    """
+    try:
+        steps = await _session_experiment_step_count(session_factory, campaign.id)
+        if steps <= 0:
+            return False
+        try:
+            campaign.recount_from_tree()
+        except Exception:
+            pass
+        await db_set_research_session_stage(campaign.id, session_factory, stage="campaign.paper")
+        synthesis = build_campaign_synthesis_payload(campaign)
+        await write_paper_minimal(
+            session_id=campaign.id,
+            session_factory=session_factory,
+            emitter=emitter,
+            llm=llm,
+            question=campaign.question,
+            prior=prior_dict,
+            synthesis=synthesis,
+        )
+        logger.info("[campaign %s] Salvaged paper from %d experiment steps after error.", campaign.id, steps)
+        return True
+    except Exception as exc:  # noqa: BLE001 — salvage is best-effort
+        logger.warning("[campaign %s] Paper salvage failed: %s", campaign.id, exc)
+        return False
+
+
 # ── Main campaign loop ───────────────────────────────────────────────────────
 
 async def run_campaign_loop(
@@ -996,6 +1035,9 @@ async def run_campaign_loop(
         emitter=emitter,
         session_factory=session_factory,
     )
+    # Defined inside the try below, but referenced by the fatal-error salvage path —
+    # initialize so an early crash can still attempt paper salvage without NameError.
+    prior_dict: dict[str, Any] | None = None
 
     try:
         await emitter.emit(
@@ -1089,6 +1131,10 @@ async def run_campaign_loop(
         # ── Stage 3: Campaign loop ────────────────────────────────────────
         last_checkpoint = time.monotonic()
         generation = campaign.hypothesis_tree._generation
+        # Recompute counters from any resumed tree so a reloaded campaign reports
+        # distinct-node totals from the first wave (not stale persisted increments).
+        campaign.recount_from_tree()
+        first_confirmed_snapshotted = campaign.total_confirmed > 0
 
         while not campaign.should_stop():
             # Pipelined pool: refill keeps up to max_concurrent Celery tasks busy until the
@@ -1102,9 +1148,27 @@ async def run_campaign_loop(
                 )
                 generation += 1
                 campaign.hypothesis_tree._generation = generation
-                seeds = await generate_seed_hypotheses(
-                    campaign, prior, parsed, llm, emitter, session_factory, generation,
-                )
+                try:
+                    seeds = await generate_seed_hypotheses(
+                        campaign, prior, parsed, llm, emitter, session_factory, generation,
+                    )
+                except Exception as seed_exc:  # noqa: BLE001 — degrade, don't crash the campaign
+                    logger.warning(
+                        "[campaign %s] Seed regeneration failed (%s); finalizing with results so far.",
+                        campaign.id,
+                        seed_exc,
+                    )
+                    await emitter.emit(
+                        session_id=campaign.id,
+                        event_type=EventType.CAMPAIGN_PROGRESS,
+                        step="campaign.degraded",
+                        payload={
+                            "phase": "seed_regeneration_failed",
+                            "error": str(seed_exc),
+                            "note": "Re-seeding hit a transient error; writing the paper with accumulated results.",
+                        },
+                    )
+                    break
                 if not seeds:
                     logger.info("[campaign %s] No seeds generated; stopping.", campaign.id)
                     break
@@ -1158,11 +1222,14 @@ async def run_campaign_loop(
                     )
                     continue
 
-                campaign.total_hypotheses += 1
+                # Recount from the tree (distinct nodes) rather than incrementing per
+                # result — re-dispatched nodes must not inflate the totals, so the
+                # campaign summary stays consistent with the tree and the paper.
+                campaign.recount_from_tree()
 
                 if verdict == "confirmed":
-                    campaign.total_confirmed += 1
-                    if campaign.total_confirmed == 1:
+                    if not first_confirmed_snapshotted:
+                        first_confirmed_snapshotted = True
                         await asyncio.to_thread(
                             write_campaign_snapshot, "post_first_confirmed", campaign, prior_dict
                         )
@@ -1215,8 +1282,18 @@ async def run_campaign_loop(
                             hypothesis_id=_node_row_id(campaign.id, node_id),
                         )
 
-                await db_save_campaign(campaign, session_factory)
+                # Throttle persistence: always checkpoint on state that matters
+                # (confirmed / breakthrough), otherwise at most every checkpoint interval.
+                # This removes the per-result write amplification that slowed campaigns.
+                now_mono = time.monotonic()
+                checkpoint_secs = max(5, int(getattr(settings, "campaign_checkpoint_every", 60) or 60))
+                if verdict == "confirmed" or breakthrough_found or (now_mono - last_checkpoint) >= checkpoint_secs:
+                    await db_save_campaign(campaign, session_factory)
+                    last_checkpoint = now_mono
 
+            # Persist end-of-wave state so progress survives interruption.
+            await db_save_campaign(campaign, session_factory)
+            last_checkpoint = time.monotonic()
             await emitter.emit(
                 session_id=campaign.id,
                 event_type=EventType.CAMPAIGN_PROGRESS,
@@ -1312,6 +1389,24 @@ async def run_campaign_loop(
 
     except Exception as exc:
         logger.exception("[campaign %s] Fatal error: %s", campaign.id, exc)
+        # Last-resort salvage: if real experiments ran, a crash should still yield a
+        # paper from the accumulated trace rather than discarding the whole campaign.
+        salvaged = await _try_salvage_paper(campaign, prior_dict, emitter, llm, session_factory)
+        if salvaged:
+            try:
+                await db_mark_research_session_completed(campaign.id, session_factory)
+            except Exception:
+                logger.exception("[campaign %s] salvage paper written but mark-completed failed", campaign.id)
+            await emitter.emit(
+                session_id=campaign.id,
+                event_type=EventType.CAMPAIGN_COMPLETED,
+                step="campaign.complete_salvaged",
+                payload={
+                    "salvaged_after_error": type(exc).__name__,
+                    "campaign_summary": campaign.summary(),
+                },
+            )
+            return
         try:
             await db_mark_research_session_failed(campaign.id, session_factory)
         except Exception:

@@ -53,16 +53,6 @@ def _latex_escape(s: str) -> str:
     return "".join(out)
 
 
-def _format_params(params: Any) -> str:
-    if params is None:
-        return "{}"
-    if isinstance(params, dict):
-        blob = json.dumps(params, ensure_ascii=False)
-    else:
-        blob = str(params)
-    return blob[:280] + ("..." if len(blob) > 280 else "")
-
-
 def _latex_cell_scalarish(val: Any, max_len: int = 200) -> str:
     """Single table cell: escape; nested structures as compact JSON."""
     if val is None:
@@ -158,115 +148,79 @@ def _tabular_payload_from_tool_output(out: Any) -> Any:
     return out
 
 
-def _format_evidence_for_paper(evidence_summary: str | None) -> str:
-    text = (evidence_summary or "").strip()
-    if not text:
-        return ""
-    m = re.search(r"evidence=(\{[\s\S]*?\})\s*;", text)
+def parse_evidence(evidence_summary: str | None) -> dict[str, Any]:
+    """
+    Structured statistical evidence from the worker's ``evidence_summary`` string.
+
+    Returns a dict with p_value, effect_size, confidence_interval, n_metric_steps,
+    metric_value (any of which may be None). This is the single parser used by both
+    the abstract (headline statistics) and the results table, so the two never diverge.
+    """
+    out: dict[str, Any] = {
+        "p_value": None,
+        "effect_size": None,
+        "confidence_interval": None,
+        "n_metric_steps": None,
+        "metric_value": None,
+    }
+    raw = (evidence_summary or "").strip()
+    if not raw:
+        return out
+    m = re.search(r"evidence=(\{[\s\S]*?\})\s*;", raw)
     if m:
         try:
             ev = json.loads(m.group(1))
-            p = ev.get("p_value")
-            e = ev.get("effect_size")
+            for k in ("p_value", "effect_size", "n_metric_steps", "metric_value"):
+                if isinstance(ev.get(k), (int, float)):
+                    out[k] = ev[k]
             ci = ev.get("confidence_interval")
-            p_s = f"{float(p):.6f}" if isinstance(p, (float, int)) else "n/a"
-            e_s = f"{float(e):.4f}" if isinstance(e, (float, int)) else "n/a"
-            if isinstance(ci, list) and len(ci) >= 2 and all(isinstance(x, (float, int)) for x in ci[:2]):
-                ci_s = f"[{float(ci[0]):.4f}, {float(ci[1]):.4f}]"
-            else:
-                ci_s = "n/a"
-            return f"p={p_s}, effect={e_s}, CI={ci_s}"
-        except Exception:
+            if isinstance(ci, list) and len(ci) >= 2 and all(isinstance(x, (int, float)) for x in ci[:2]):
+                out["confidence_interval"] = [float(ci[0]), float(ci[1])]
+            return out
+        except (json.JSONDecodeError, TypeError, ValueError):
             pass
-    return text[:220] + ("..." if len(text) > 220 else "")
-
-
-def _extract_metric_steps_from_evidence(evidence_summary: str | None) -> int | None:
-    text = (evidence_summary or "").strip()
-    if not text:
-        return None
-    # New format: evidence={...}; plan_origin=...
-    m = re.search(r"evidence=(\{[\s\S]*?\})\s*;", text)
-    if m:
-        try:
-            obj = json.loads(m.group(1))
-            v = obj.get("n_metric_steps")
-            if isinstance(v, int):
-                return v
-        except json.JSONDecodeError:
-            pass
-    # Legacy fallback: n_metric_steps=<int>
-    m2 = re.search(r"n_metric_steps\s*=\s*(\d+)", text)
+    m2 = re.search(r"n_metric_steps\s*=\s*(\d+)", raw)
     if m2:
-        return int(m2.group(1))
-    return None
+        out["n_metric_steps"] = int(m2.group(1))
+    return out
 
 
-async def compile_methods_section(session_factory: async_sessionmaker, hypothesis_id: str) -> str:
+def format_stats(ev: dict[str, Any]) -> str:
+    """Render available statistics as a compact LaTeX math fragment (omits missing pieces)."""
+    parts: list[str] = []
+    p = ev.get("p_value")
+    if isinstance(p, (int, float)):
+        parts.append(f"$p = {float(p):.3g}$")
+    e = ev.get("effect_size")
+    if isinstance(e, (int, float)):
+        parts.append(f"Cohen's $d = {float(e):.2f}$")
+    ci = ev.get("confidence_interval")
+    if isinstance(ci, list) and len(ci) >= 2:
+        parts.append(f"95\\% CI $[{ci[0]:.3g}, {ci[1]:.3g}]$")
+    return ", ".join(parts) if parts else "no inferential statistic recorded"
+
+
+def _effective_verdict(row: Any) -> str:
     """
-    Deterministic methods text from experiment_steps (no LLM), per architecture.
-    """
-    async with session_factory() as session:
-        rows = (
-            await session.execute(
-                text(
-                    """
-                    SELECT step_type, input_json, output_json, duration_ms, memory_mb, timeout_sec, summary
-                    FROM experiment_steps
-                    WHERE hypothesis_id = :hypothesis_id
-                    ORDER BY created_at ASC
-                    """
-                ),
-                {"hypothesis_id": hypothesis_id},
-            )
-        ).mappings().all()
+    The verdict a reader should see, after applying the platform's evidence bar.
 
-    lines: list[str] = []
-    for row in rows:
-        step_type = row["step_type"]
-        if step_type == "tool_call":
-            input_data = row["input_json"] or {}
-            tool_name = _latex_escape(str(input_data.get("tool", "unknown_tool")))
-            params = input_data.get("params")
-            duration_ms = row["duration_ms"] or 0
-            out_json = row.get("output_json")
-            out_for_table = _tabular_payload_from_tool_output(out_json)
-            tab_p = latex_tabular_from_jsonish(params)
-            tab_o = latex_tabular_from_jsonish(out_for_table) if out_json not in (None, {}, []) else None
-            if tab_p:
-                lines.append(
-                    f"Tool \\texttt{{{tool_name}}} (completed in {duration_ms}ms). Parameters:\\\\\n"
-                    f"{tab_p}"
-                )
-            else:
-                lines.append(
-                    f"Tool \\texttt{{{tool_name}}} was called with parameters {_latex_escape(_format_params(params))}. "
-                    f"Execution completed in {duration_ms}ms."
-                )
-            if tab_o:
-                lines.append("Recorded tool output:\\\\\n" + tab_o)
-            elif out_json not in (None, {}, []):
-                blob = (
-                    json.dumps(out_json, ensure_ascii=False)
-                    if not isinstance(out_json, str)
-                    else out_json
-                )
-                lines.append(
-                    "Tool output (summary): "
-                    + _latex_escape(str(blob)[:400] + ("..." if len(str(blob)) > 400 else ""))
-                )
-        elif step_type == "code_exec":
-            mem = row["memory_mb"] if row["memory_mb"] is not None else "512"
-            timeout = row["timeout_sec"] if row["timeout_sec"] is not None else "30"
-            lines.append(
-                f"Custom computation was executed in an isolated sandbox "
-                f"(memory limit: {mem}MB, timeout: {timeout}s). "
-                f"Code is available in the experiment trace for this hypothesis."
-            )
-        elif step_type == "llm_reasoning":
-            summary = _latex_escape(str(row["summary"] or "intermediate evaluation"))
-            lines.append(f"The agent evaluated intermediate results and \\textit{{{summary}}}.")
-    return "\n".join(lines) if lines else "No automated experiment steps were recorded for this hypothesis."
+    This is the SINGLE source of truth for counting outcomes, so the abstract,
+    the results section, and any summary always agree:
+      - never executed                  -> "unexecuted" (excluded from all counts)
+      - DB says confirmed, no metric    -> "inconclusive" (cannot claim without evidence)
+      - otherwise                       -> the recorded verdict (defaulting to inconclusive)
+    """
+    steps = int(row.get("step_count") or 0)
+    if steps == 0:
+        return "unexecuted"
+    raw = str(row.get("verdict") or "").strip().lower()
+    ev = parse_evidence(str(row.get("evidence_summary") or ""))
+    n_metric = ev.get("n_metric_steps")
+    if raw == "confirmed" and not n_metric:
+        return "inconclusive"
+    if raw in ("confirmed", "refuted", "inconclusive"):
+        return raw
+    return "inconclusive"
 
 
 def _human_round_num(round_number_0_indexed: int | None) -> int:
@@ -275,14 +229,16 @@ def _human_round_num(round_number_0_indexed: int | None) -> int:
     return base + 1
 
 
-async def compile_session_methods_latex(session_factory: async_sessionmaker, session_id: str) -> dict[str, Any]:
+async def _fetch_result_rows(session_factory: async_sessionmaker, session_id: str) -> list[dict[str, Any]]:
     async with session_factory() as session:
-        hyp_rows = (
+        rows = (
             await session.execute(
                 text(
                     """
-                    SELECT h.id, h.text, h.rank,
-                           COALESCE(r.round_number, 0) AS round_number
+                    SELECT h.id, h.rank, h.text, h.verdict, h.confidence, h.evidence_summary,
+                           h.key_finding, h.tool_trace_id,
+                           COALESCE(r.round_number, 0) AS round_number,
+                           (SELECT COUNT(*) FROM experiment_steps e WHERE e.hypothesis_id = h.id) AS step_count
                     FROM hypotheses h
                     LEFT JOIN research_rounds r ON r.id = h.round_id
                     WHERE h.session_id = CAST(:session_id AS uuid)
@@ -294,52 +250,181 @@ async def compile_session_methods_latex(session_factory: async_sessionmaker, ses
                 {"session_id": session_id},
             )
         ).mappings().all()
+    return [dict(r) for r in rows]
 
-    sections: list[str] = []
-    per_hypothesis: dict[str, str] = {}
-    if not hyp_rows:
+
+async def compile_session_findings(session_factory: async_sessionmaker, session_id: str) -> dict[str, Any]:
+    """
+    Authoritative, DB-derived view of session outcomes. Used to keep the abstract,
+    the results section, and the synthesis ledger perfectly consistent.
+
+    Returns ``counts`` (confirmed/refuted/inconclusive/tested/unexecuted) and the
+    classified findings, each with parsed statistics, ordered by confidence.
+    """
+    rows = await _fetch_result_rows(session_factory, session_id)
+    buckets: dict[str, list[dict[str, Any]]] = {"confirmed": [], "refuted": [], "inconclusive": []}
+    unexecuted = 0
+    for row in rows:
+        verdict = _effective_verdict(row)
+        if verdict == "unexecuted":
+            unexecuted += 1
+            continue
+        ev = parse_evidence(str(row.get("evidence_summary") or ""))
+        buckets[verdict].append(
+            {
+                "id": str(row.get("id")),
+                "rank": row.get("rank"),
+                "round": _human_round_num(row.get("round_number")),
+                "text": str(row.get("text") or "").strip(),
+                "key_finding": str(row.get("key_finding") or "").strip(),
+                "confidence": float(row.get("confidence")) if row.get("confidence") is not None else None,
+                "stats": ev,
+                "stats_text": format_stats(ev),
+            }
+        )
+    for b in buckets.values():
+        b.sort(key=lambda f: (f.get("confidence") or 0.0), reverse=True)
+    counts = {
+        "confirmed": len(buckets["confirmed"]),
+        "refuted": len(buckets["refuted"]),
+        "inconclusive": len(buckets["inconclusive"]),
+        "unexecuted": unexecuted,
+    }
+    counts["tested"] = counts["confirmed"] + counts["refuted"] + counts["inconclusive"]
+    return {"counts": counts, **buckets}
+
+
+async def _aggregate_tool_usage(session_factory: async_sessionmaker, session_id: str) -> dict[str, Any]:
+    """Tool-usage and round counts for the deterministic Methods narrative."""
+    async with session_factory() as session:
+        tool_rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT COALESCE(tc.tool_name, e.input_json->>'tool') AS tool_name,
+                           COUNT(*) AS n
+                    FROM experiment_steps e
+                    JOIN hypotheses h ON h.id = e.hypothesis_id
+                    LEFT JOIN tool_calls tc ON tc.step_id = e.id
+                    WHERE h.session_id = CAST(:sid AS uuid) AND e.step_type = 'tool_call'
+                    GROUP BY 1
+                    ORDER BY n DESC
+                    """
+                ),
+                {"sid": session_id},
+            )
+        ).mappings().all()
+        rounds = (
+            await session.execute(
+                text(
+                    """
+                    SELECT COUNT(DISTINCT COALESCE(r.round_number, 0))
+                    FROM hypotheses h
+                    LEFT JOIN research_rounds r ON r.id = h.round_id
+                    WHERE h.session_id = CAST(:sid AS uuid)
+                    """
+                ),
+                {"sid": session_id},
+            )
+        ).scalar_one()
+        code_steps = (
+            await session.execute(
+                text(
+                    """
+                    SELECT COUNT(*) FROM experiment_steps e
+                    JOIN hypotheses h ON h.id = e.hypothesis_id
+                    WHERE h.session_id = CAST(:sid AS uuid) AND e.step_type = 'code_exec'
+                    """
+                ),
+                {"sid": session_id},
+            )
+        ).scalar_one()
+    tools = {str(r["tool_name"]): int(r["n"]) for r in tool_rows if r["tool_name"]}
+    return {"tools": tools, "rounds": int(rounds or 1), "code_steps": int(code_steps or 0)}
+
+
+_SIGNIFICANCE_TOOLS = {
+    "statistical_significance",
+    "bootstrap_confidence",
+    "literature_baseline_compare",
+}
+
+
+async def compile_session_methods_latex(session_factory: async_sessionmaker, session_id: str) -> dict[str, Any]:
+    """
+    Deterministic Methods section, compiled from the experiment trace (no LLM).
+
+    Produces a readable methodological narrative rather than a per-call log dump:
+    the experimental protocol, the instruments used (with usage counts), and how
+    statistical support was established. The full step-level trace remains queryable
+    via the API for replication, but is not dumped into the manuscript.
+    """
+    findings = await compile_session_findings(session_factory, session_id)
+    counts = findings["counts"]
+    agg = await _aggregate_tool_usage(session_factory, session_id)
+    tools = agg["tools"]
+
+    if counts["tested"] == 0 and not tools:
         return {
-            "combined_latex": "\\section{Methods}\nNo hypotheses were executed.\n",
+            "combined_latex": (
+                "\\section{Methods}\nNo experiments were executed for this session.\n"
+            ),
             "per_hypothesis": {},
         }
 
-    sections.append("\\section{Methods}")
-    for rn_key, group_iter in groupby(hyp_rows, key=lambda row: int(row["round_number"])):
-        group = list(group_iter)
-        hr = _human_round_num(rn_key)
-        if hr >= 2:
-            sections.append(
-                f"\\subsection{{Round {hr} hypotheses \\textit{{(informed by prior rounds)}}}}\n"
+    rounds = max(1, agg["rounds"])
+    round_phrase = "a single round" if rounds == 1 else f"{rounds} successive rounds"
+    protocol = (
+        "We addressed the research question through autonomous, fully automated experimentation. "
+        f"A total of {counts['tested']} falsifiable hypotheses were generated and tested across {round_phrase} of "
+        "investigation, with each later round informed by the confirmed and refuted findings of the previous one. "
+        "Every hypothesis was assigned to an independent sub-agent that selected computational instruments, executed "
+        "them (and, where required, wrote and ran code in an isolated sandbox), observed the results, and decided its "
+        "next action before reaching a verdict."
+    )
+
+    if tools:
+        ranked = sorted(tools.items(), key=lambda kv: kv[1], reverse=True)
+        tool_phrases = ", ".join(
+            f"\\texttt{{{_latex_escape(name)}}} ({n} call{'s' if n != 1 else ''})" for name, n in ranked[:12]
+        )
+        instruments = f"The experiments employed the following instruments: {tool_phrases}."
+        if agg["code_steps"]:
+            instruments += (
+                f" In addition, {agg['code_steps']} custom computation"
+                f"{'s were' if agg['code_steps'] != 1 else ' was'} executed in the sandbox where no pre-built "
+                "instrument was sufficient."
             )
-        else:
-            sections.append(f"\\subsection{{Round {hr} hypotheses}}\n")
+    else:
+        instruments = (
+            f"All {agg['code_steps']} experimental computations were performed as custom code executed in an "
+            "isolated sandbox."
+        )
 
-        for hyp in group:
-            hid = str(hyp["id"])
-            body = await compile_methods_section(session_factory, hid)
-            label_rank = hyp["rank"] if hyp.get("rank") is not None else "?"
-            hyp_text = _latex_escape(str(hyp["text"] or ""))
-            short_head = hyp_text[:100] + ("..." if len(hyp_text) > 100 else "")
-            title = _latex_escape(f"Round {hr} -- Hypothesis {label_rank}: {short_head}")
-            has_steps = "No automated experiment steps" not in body
-            if not has_steps:
-                section = (
-                    f"\\subsubsection{{{title}}}\\label{{subsec:{hid}}}\n"
-                    f"\\textit{{{hyp_text}}}\\\\\n"
-                    "\\textit{{Note: No experiment steps were executed for this hypothesis; "
-                    "excluded from methods and results analysis.}}\n"
-                )
-            else:
-                section = (
-                    f"\\subsubsection{{{title}}}\\label{{subsec:{hid}}}\n"
-                    f"\\textit{{{hyp_text}}}\\\\\n"
-                    f"{body}\n"
-                )
-            sections.append(section)
-            per_hypothesis[hid] = body
+    sig_used = sorted(n for n in tools if n in _SIGNIFICANCE_TOOLS)
+    if sig_used:
+        sig_list = ", ".join(f"\\texttt{{{_latex_escape(n)}}}" for n in sig_used)
+        stats_method = (
+            f"Statistical support was established using {sig_list}. A hypothesis was marked \\emph{{confirmed}} only "
+            "when a metric-bearing experiment yielded significant evidence -- a $p$-value below 0.05, an absolute "
+            "effect size above 0.2, or a 95\\% confidence interval excluding the null -- in the direction predicted "
+            "by the hypothesis; otherwise it was recorded as refuted or inconclusive."
+        )
+    else:
+        stats_method = (
+            "A hypothesis was marked \\emph{confirmed} only when a metric-bearing experiment yielded significant "
+            "evidence (a $p$-value below 0.05, an absolute effect size above 0.2, or a 95\\% confidence interval "
+            "excluding the null) in the predicted direction; otherwise it was recorded as refuted or inconclusive."
+        )
 
-    combined = "\n".join(sections)
-    return {"combined_latex": combined, "per_hypothesis": per_hypothesis}
+    reproducibility = (
+        "All hypotheses, parameters, intermediate outputs, and statistical computations are persisted in a structured "
+        "trace and are available for independent inspection and replication."
+    )
+
+    body = "\n\n".join([protocol, instruments, stats_method, reproducibility])
+    combined = f"\\section{{Methods}}\n{body}\n"
+    return {"combined_latex": combined, "per_hypothesis": {}}
 
 
 def collect_figure_object_ids(synthesis: dict[str, Any] | None) -> list[str]:
@@ -360,102 +445,124 @@ def collect_figure_object_ids(synthesis: dict[str, Any] | None) -> list[str]:
     return out
 
 
-def _results_block_for_row(row: Any) -> str:
-    """One hypothesis result block (subsubsection body) with shared formatting."""
-    label_rank = row["rank"] if row.get("rank") is not None else str(row["id"])[:8]
-    hr = _human_round_num(row.get("round_number"))
-    title = _latex_escape(f"Round {hr} -- Hypothesis {label_rank}")
-    raw_verdict = str(row.get("verdict") or "pending")
-    verdict = _latex_escape(raw_verdict)
-    conf = row.get("confidence")
-    conf_s = f"{float(conf):.2f}" if conf is not None else "n/a"
-    ev = _latex_escape(_format_evidence_for_paper(str(row.get("evidence_summary") or "")))
-    kf = row.get("key_finding")
-    kf_s = _latex_escape(str(kf))[:500] if kf else ""
-    trace = _latex_escape(str(row.get("tool_trace_id") or ""))
-    hyp = _latex_escape(str(row.get("text") or "")[:900])
-    steps = int(row.get("step_count") or 0)
-    n_metric_steps = _extract_metric_steps_from_evidence(str(row.get("evidence_summary") or ""))
-    if steps == 0:
-        return (
-            f"\\subsubsection{{{title}}}\n"
-            f"\\textbf{{Statement:}} {hyp}\\\\\n"
-            "\\textbf{Status:} excluded from analysis (no experiment steps executed).\\\\\n"
-            "\\textbf{Note:} This hypothesis was generated but never executed, so it is not included in conclusions."
-        )
-    if raw_verdict.lower() == "confirmed" and n_metric_steps == 0:
-        return (
-            f"\\subsubsection{{{title}}}\n"
-            f"\\textbf{{Statement:}} {hyp}\\\\\n"
-            "\\textbf{Status:} excluded from analysis (confirmed without metric evidence).\\\\\n"
-            "\\textbf{Note:} Confirmation requires metric-bearing evidence; this row is excluded pending rerun."
-        )
-    return (
-        f"\\subsubsection{{{title}}}\n"
-        f"\\textbf{{Statement:}} {hyp}\\\\\n"
-        f"\\textbf{{Verdict:}} {verdict} (confidence {conf_s}). "
-        f"Recorded {steps} experiment step(s).\\\\\n"
-        f"\\textbf{{Evidence:}} {ev}\\\\\n"
-        + (f"\\textbf{{Key finding:}} {kf_s}\\\\\n" if kf_s else "")
-        + (f"\\textbf{{Trace id:}} \\texttt{{{trace}}}\n" if trace else "")
-    )
+def _finding_sentence(f: dict[str, Any]) -> str:
+    """A single prose sentence describing one finding, grounded in its statistics."""
+    claim = f.get("key_finding") or f.get("text") or ""
+    claim = claim.strip().rstrip(".")
+    stats = f.get("stats_text") or ""
+    sent = _latex_escape(claim[:400])
+    if stats and stats != "no inferential statistic recorded":
+        sent += f" ({stats})"
+    return sent + "."
+
+
+def _findings_table(findings: list[dict[str, Any]]) -> str:
+    """A clean summary table of confirmed findings (no trace IDs, no raw JSON)."""
+    if not findings:
+        return ""
+    lines = [
+        "\\begin{table}[ht]",
+        "\\centering",
+        "\\caption{Summary of supported findings and their statistical evidence.}",
+        "\\begin{tabular}{p{0.46\\linewidth} c p{0.30\\linewidth}}",
+        "\\hline",
+        "\\textbf{Finding} & \\textbf{Confidence} & \\textbf{Statistical evidence} \\\\",
+        "\\hline",
+    ]
+    for f in findings[:20]:
+        claim = (f.get("key_finding") or f.get("text") or "").strip().rstrip(".")
+        cell = _latex_escape(claim[:220])
+        conf = f.get("confidence")
+        conf_s = f"{float(conf):.2f}" if isinstance(conf, (int, float)) else "--"
+        stats = f.get("stats_text") or "--"
+        lines.append(f"{cell} & {conf_s} & {stats} \\\\")
+    lines.extend(["\\hline", "\\end{tabular}", "\\end{table}"])
+    return "\n".join(lines)
 
 
 async def compile_session_results_latex(session_factory: async_sessionmaker, session_id: str) -> str:
-    """Deterministic results from hypothesis verdicts and step counts (no LLM)."""
-    async with session_factory() as session:
-        rows = (
-            await session.execute(
-                text(
-                    """
-                    SELECT h.id, h.rank, h.text, h.verdict, h.confidence, h.evidence_summary, h.key_finding,
-                           h.tool_trace_id,
-                           COALESCE(r.round_number, 0) AS round_number,
-                           (SELECT COUNT(*) FROM experiment_steps e WHERE e.hypothesis_id = h.id) AS step_count
-                    FROM hypotheses h
-                    LEFT JOIN research_rounds r ON r.id = h.round_id
-                    WHERE h.session_id = CAST(:session_id AS uuid)
-                    ORDER BY COALESCE(r.round_number, 0) ASC,
-                             h.rank ASC NULLS LAST,
-                             h.created_at ASC
-                    """
-                ),
-                {"session_id": session_id},
-            )
-        ).mappings().all()
+    """
+    Deterministic Results section as readable prose plus a findings table.
 
-    if not rows:
-        return "\\section{Results}\nNo hypotheses were recorded for this session.\n"
+    Outcomes are organised by what was learned (supported / refuted / inconclusive),
+    not as a chronological per-hypothesis verdict log. Counts here are produced by the
+    same classifier (:func:`compile_session_findings`) that feeds the abstract.
+    """
+    findings = await compile_session_findings(session_factory, session_id)
+    counts = findings["counts"]
+    if counts["tested"] == 0:
+        return "\\section{Results}\nNo hypotheses were executed for this session.\n"
 
     parts: list[str] = ["\\section{Results}"]
-    for rn_key, group_iter in groupby(rows, key=lambda row: int(row["round_number"])):
-        group = list(group_iter)
-        hr = _human_round_num(rn_key)
-        if hr >= 2:
-            parts.append(
-                f"\\subsection{{Round {hr} results \\textit{{(following Round {hr - 1})}}}}\n"
-            )
-        else:
-            parts.append(f"\\subsection{{Round {hr} results}}\n")
-        for row in group:
-            parts.append(_results_block_for_row(row))
-    return "\n".join(parts)
+
+    lead = (
+        f"We evaluated {counts['tested']} hypotheses. "
+        f"{counts['confirmed']} were supported by statistically significant evidence, "
+        f"{counts['refuted']} were refuted, and {counts['inconclusive']} remained inconclusive."
+    )
+    if counts["unexecuted"]:
+        lead += (
+            f" A further {counts['unexecuted']} generated hypotheses were not executed and are excluded from "
+            "the analysis."
+        )
+    parts.append(lead)
+
+    confirmed = findings["confirmed"]
+    if confirmed:
+        parts.append("\\subsection{Supported findings}")
+        parts.append(_findings_table(confirmed))
+        for f in confirmed[:10]:
+            parts.append(_finding_sentence(f))
+    else:
+        parts.append("\\subsection{Supported findings}")
+        parts.append(
+            "No hypothesis met the significance bar against the recorded measurements. The question remains "
+            "open under the methods applied here."
+        )
+
+    refuted = findings["refuted"]
+    if refuted:
+        parts.append("\\subsection{Refuted hypotheses}")
+        bullets = "\n".join(f"\\item {_finding_sentence(f)}" for f in refuted[:10])
+        parts.append("\\begin{itemize}\n" + bullets + "\n\\end{itemize}")
+
+    inconclusive = findings["inconclusive"]
+    if inconclusive:
+        parts.append("\\subsection{Inconclusive directions}")
+        parts.append(
+            f"{len(inconclusive)} hypotheses produced experiments without decisive statistical support and warrant "
+            "better-powered follow-up. The highest-confidence among them concerned: "
+            + _latex_escape("; ".join((f.get("text") or "")[:120] for f in inconclusive[:3]))
+            + "."
+        )
+    return "\n\n".join(p for p in parts if p)
 
 
 def compile_references_latex(prior: dict[str, Any] | None) -> str:
-    """Manual bibliography from prior key papers (no BibTeX engine required)."""
+    """Bibliography from prior key papers in a conventional reference style."""
     prior = prior or {}
     papers = prior.get("key_papers") or []
     if not isinstance(papers, list) or not papers:
-        return "\\section{References}\nNo seed papers were attached to the prior for this session.\n"
+        return "\\section{References}\nNo external references were retrieved for this study.\n"
 
     lines: list[str] = ["\\section{References}", "\\begin{thebibliography}{99}"]
     for i, p in enumerate(papers[:48]):
         if not isinstance(p, dict):
             continue
         pid = _latex_escape(str(p.get("paper_id") or f"ref{i}"))
-        title = _latex_escape(str(p.get("title") or "Untitled"))[:400]
-        summ = _latex_escape(str(p.get("summary") or ""))[:280]
-        lines.append(f"\\bibitem{{{pid}}}{title}. \\textit{{Abstract excerpt:}} {summ}")
+        title = _latex_escape(str(p.get("title") or "Untitled").strip())[:400]
+        authors = p.get("authors")
+        if isinstance(authors, list) and authors:
+            names = ", ".join(_latex_escape(str(a)) for a in authors[:6])
+            if len(authors) > 6:
+                names += " et al."
+            author_str = names + ". "
+        elif isinstance(authors, str) and authors.strip():
+            author_str = _latex_escape(authors.strip()[:200]) + ". "
+        else:
+            author_str = ""
+        arxiv = str(p.get("paper_id") or "").strip()
+        arxiv_str = f" arXiv:{_latex_escape(arxiv)}." if arxiv and not arxiv.startswith("ref") else ""
+        lines.append(f"\\bibitem{{{pid}}}{author_str}\\textit{{{title}}}.{arxiv_str}")
     lines.append("\\end{thebibliography}")
     return "\n".join(lines)

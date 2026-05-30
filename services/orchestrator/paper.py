@@ -16,9 +16,9 @@ from propab.llm import LLMClient
 from propab.paper_compiler import (
     collect_figure_object_ids,
     compile_references_latex,
+    compile_session_findings,
     compile_session_methods_latex,
     compile_session_results_latex,
-    _latex_escape,
 )
 from propab.paper_sections import generate_prose_sections, render_paper_tex
 from propab.storage import get_object_bytes, put_bytes
@@ -75,11 +75,11 @@ def _build_figures_tex_and_files(
         fname = _safe_figure_filename(i, oid)
         (tmp / fname).write_bytes(data)
         written.append(fname)
-        cap = _latex_escape(oid[:160])
         blocks.append(
             "\\begin{figure}[ht]\n\\centering\n"
             f"\\includegraphics[width=0.88\\linewidth]{{{fname}}}\n"
-            f"\\caption{{Artifact \\texttt{{{cap}}}}}\n"
+            f"\\caption{{Experimental result figure {i + 1}, generated during automated experimentation.}}\n"
+            f"\\label{{fig:result-{i + 1}}}\n"
             "\\end{figure}\n\n"
         )
     return ("".join(blocks), written)
@@ -148,13 +148,20 @@ async def write_paper_minimal(
 
     methods_tex = report["combined_latex"]
     q = (question or "").strip() or "Research session"
-    title = q.replace("\n", " ")[:160]
+
+    # Reconcile counts at paper time: the authoritative outcome counts come from the same
+    # DB-classifier the results section uses, so the abstract can never disagree with results.
+    synthesis = dict(synthesis or {})
+    if not literature_only:
+        findings = await compile_session_findings(session_factory, session_id)
+        synthesis["counts"] = findings["counts"]
+        synthesis["confirmed_findings"] = findings["confirmed"]
 
     await emitter.emit(
         session_id=session_id,
         event_type=EventType.PAPER_SECTION_STARTED,
         step="paper.prose",
-        payload={"section": "abstract_intro_discussion_conclusion"},
+        payload={"section": "title_abstract_intro_discussion_conclusion"},
     )
     prose = await generate_prose_sections(
         llm=llm,
@@ -163,6 +170,7 @@ async def write_paper_minimal(
         prior=prior,
         synthesis=synthesis,
     )
+    title = (prose.get("title") or q).replace("\n", " ").strip()[:180]
     try:
         grounding = await ground_session_claims(session_factory, session_id, prose)
     except Exception as exc:  # noqa: BLE001 — paper should still render

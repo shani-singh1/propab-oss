@@ -21,7 +21,6 @@ SUBSTANTIVE_TOOL_NAMES: frozenset[str] = frozenset(
         "statistical_significance",
         "run_experiment_grid",
         "convergence_analysis",
-        "loss_landscape",
         "lr_range_test",
         "hyperparameter_sweep",
         "compare_implementations",
@@ -30,7 +29,6 @@ SUBSTANTIVE_TOOL_NAMES: frozenset[str] = frozenset(
         "inspect_gradients",
         "profile_model",
         "compute_flops",
-        "hessian_analysis",
         "reproduce_result",
     }
 )

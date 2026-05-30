@@ -69,6 +69,10 @@ def _run_ledger_paper_review(tee, api: str, cid: str, blob: dict) -> int:
         merged = abs_tex.replace(" ", "")
         if f"confirmed={n_expect}" in merged:
             ok = True
+        elif re.search(rf"(?i)\b{n_expect}\s+were\s+supported\b", abs_tex):
+            ok = True
+        elif re.search(rf"(?i)\b{n_expect}\s+hypotheses?\s+were\s+supported\b", abs_tex):
+            ok = True
         elif re.search(rf"(?i){n_expect}\s+confirmed", abs_tex):
             ok = True
         else:

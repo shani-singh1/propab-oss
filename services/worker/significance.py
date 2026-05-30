@@ -128,6 +128,71 @@ def check_significance(results: list[dict[str, Any]]) -> SignificanceResult:
     )
 
 
+def classify_verdict(
+    evidence: dict[str, Any],
+    sig_result: "SignificanceResult",
+    *,
+    min_metric_steps_for_confirm: int = 2,
+    relevance_min: float = 0.12,
+) -> tuple[str, str]:
+    """
+    Decide a hypothesis verdict from accumulated evidence and the significance gate.
+
+    Pure (no I/O) so it can be unit-tested. Returns (verdict, verdict_reason) where verdict is one
+    of "confirmed" | "refuted" | "inconclusive".
+
+    A "confirmed" verdict requires ALL of:
+      1. at least one metric-bearing step,
+      2. the significance gate passed (p<0.05 / |effect|>0.2 / CI excludes 0),
+      3. the metric direction supports the hypothesis, AND
+      4. the supporting metric was observed in >= ``min_metric_steps_for_confirm`` independent
+         steps (replication/reproduction guard against single-shot false positives).
+    """
+    n_metric = int(evidence.get("n_metric_steps") or 0)
+    if n_metric == 0:
+        return "inconclusive", "no metric-bearing steps executed"
+    if sig_result.gate_definitively_failed:
+        return (
+            "refuted",
+            "significance test ran and found no effect (p >= 0.30, negligible effect size)",
+        )
+    if not sig_result.gate_passed:
+        return (
+            "inconclusive",
+            "no significance evidence: p_value/effect_size/CI not produced or not decisive",
+        )
+
+    relevance = float(evidence.get("relevance_score") or 0.0)
+    supports = False
+    if evidence.get("p_value") is not None:
+        supports = bool(
+            evidence.get("delta") is not None
+            and evidence["p_value"] < 0.05
+            and relevance >= relevance_min
+        )
+    elif evidence.get("effect_size") is not None:
+        supports = bool(abs(evidence["effect_size"]) > 0.2 and relevance >= relevance_min)
+    elif evidence.get("delta_pct") is not None:
+        supports = bool(abs(evidence["delta_pct"]) >= 2.0 and relevance >= relevance_min)
+
+    if not supports:
+        return "inconclusive", "significance gate passed but metric direction ambiguous"
+
+    min_steps = max(1, int(min_metric_steps_for_confirm))
+    if n_metric < min_steps:
+        return (
+            "inconclusive",
+            (
+                f"significance and metric direction support the hypothesis, but the result is "
+                f"unreplicated ({n_metric} metric step; need >= {min_steps} to confirm)"
+            ),
+        )
+    return (
+        "confirmed",
+        "significance gate passed; metric direction supports hypothesis and is replicated",
+    )
+
+
 def fisher_combine_p_values(p_values: list[float]) -> float:
     """Fisher's method: combine independent p-values from multiple rounds."""
     valid = [p for p in p_values if 0 < p <= 1.0]

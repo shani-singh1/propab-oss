@@ -335,10 +335,16 @@ def train_model(
                     val_accuracy = float((preds == Y_val.long()).float().mean().item())
 
         tid = f"{model_id}:trained"
+        base_info = get_model(str(model_id)) or {}
+        param_count = int(base_info.get("param_count") or 0)
+        if not param_count:
+            param_count = sum(dims[i] * dims[i + 1] + dims[i + 1] for i in range(len(dims) - 1))
         put_model(tid, {
             "kind": "mlp_trained",
             "base": model_id,
             "dims": dims,
+            "activation": activation_name,
+            "param_count": param_count,
             "val_losses": val_losses,
             "final_val_loss": final_val,
         })

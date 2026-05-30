@@ -22,6 +22,6 @@ def test_registry_discovers_core_tools() -> None:
     assert "compare_attention_variants" in names
     assert "hyperparameter_sweep" in names
     assert "compare_implementations" in names
-    assert "hessian_analysis" in names
+    assert "convergence_analysis" in names
     assert "literature_baseline_compare" in names
     assert "load_curated_dataset" in names

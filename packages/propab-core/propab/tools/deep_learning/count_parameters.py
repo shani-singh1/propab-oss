@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from propab.tools.model_registry import get_model
+from propab.tools.model_registry import resolve_model
 from propab.tools.types import ToolError, ToolResult
 
 TOOL_SPEC = {
@@ -20,9 +20,15 @@ TOOL_SPEC = {
 
 
 def count_parameters(model_id: str) -> ToolResult:
-    info = get_model(str(model_id))
+    info = resolve_model(str(model_id))
     if not info:
-        return ToolResult(success=False, error=ToolError(type="unknown_model", message="Unknown model_id — run build_mlp first."))
+        return ToolResult(
+            success=False,
+            error=ToolError(
+                type="unknown_model",
+                message=f"Unknown model_id '{model_id}' — run build_mlp first, or pass a model_id/trained_model_id from a prior tool.",
+            ),
+        )
     pc = int(info.get("param_count", 0))
     return ToolResult(
         success=True,
