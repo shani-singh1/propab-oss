@@ -128,6 +128,33 @@ def check_significance(results: list[dict[str, Any]]) -> SignificanceResult:
     )
 
 
+def scan_verification(results: list[dict[str, Any]]) -> tuple[int, int]:
+    """Count deterministic verification outcomes in tool/code outputs.
+
+    Returns (n_verified_true, n_verified_false). A step counts as a deterministic
+    verification when its JSON output carries a boolean ``verified`` field (or a truthy
+    ``counterexample``). This is how non-statistical, exactly-checkable claims (number
+    theory, combinatorics, constructions) are confirmed/refuted — a single rigorous
+    verification is definitive in a way a p-value is not.
+    """
+    n_true = 0
+    n_false = 0
+    for out in results:
+        if not isinstance(out, dict):
+            continue
+        v = out.get("verified")
+        if isinstance(v, bool):
+            if v:
+                n_true += 1
+            else:
+                n_false += 1
+        # An explicit counterexample refutes regardless of the verified flag.
+        ce = out.get("counterexample")
+        if ce not in (None, "", [], {}, False):
+            n_false += 1
+    return n_true, n_false
+
+
 def classify_verdict(
     evidence: dict[str, Any],
     sig_result: "SignificanceResult",
@@ -141,13 +168,32 @@ def classify_verdict(
     Pure (no I/O) so it can be unit-tested. Returns (verdict, verdict_reason) where verdict is one
     of "confirmed" | "refuted" | "inconclusive".
 
-    A "confirmed" verdict requires ALL of:
-      1. at least one metric-bearing step,
-      2. the significance gate passed (p<0.05 / |effect|>0.2 / CI excludes 0),
-      3. the metric direction supports the hypothesis, AND
-      4. the supporting metric was observed in >= ``min_metric_steps_for_confirm`` independent
-         steps (replication/reproduction guard against single-shot false positives).
+    Two evidence regimes are supported:
+      * Deterministic verification (number theory / combinatorics / constructions): a step
+        returns an exactly-checkable ``verified`` boolean. A reproduced ``verified=true``
+        confirms; any ``verified=false`` / counterexample refutes. This path needs no p-value.
+      * Statistical (empirical / ML): a "confirmed" verdict requires a metric-bearing step,
+        the significance gate (p<0.05 / |effect|>0.2 / CI excludes 0), metric direction
+        supporting the hypothesis, and replication across >= ``min_metric_steps_for_confirm`` steps.
     """
+    min_steps = max(1, int(min_metric_steps_for_confirm))
+
+    # ── Deterministic verification regime (takes precedence; exact evidence) ──
+    vt = int(evidence.get("verified_true_steps") or 0)
+    vf = int(evidence.get("verified_false_steps") or 0)
+    if vf > 0:
+        return "refuted", "deterministic counterexample found (verified=false)"
+    if vt > 0:
+        if vt >= min_steps:
+            return (
+                "confirmed",
+                f"deterministic verification reproduced ({vt} independent checks, verified=true)",
+            )
+        return (
+            "inconclusive",
+            f"verified once but unreplicated ({vt} check; need >= {min_steps} to confirm)",
+        )
+
     n_metric = int(evidence.get("n_metric_steps") or 0)
     if n_metric == 0:
         return "inconclusive", "no metric-bearing steps executed"
@@ -178,7 +224,6 @@ def classify_verdict(
     if not supports:
         return "inconclusive", "significance gate passed but metric direction ambiguous"
 
-    min_steps = max(1, int(min_metric_steps_for_confirm))
     if n_metric < min_steps:
         return (
             "inconclusive",

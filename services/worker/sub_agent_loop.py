@@ -36,6 +36,7 @@ from services.worker.significance import (
     any_significance_tool_ran,
     check_significance,
     classify_verdict,
+    scan_verification,
 )
 from services.worker.think_act import (
     AgentContext,
@@ -196,6 +197,8 @@ class HypothesisEvidence(TypedDict):
     n_metric_steps: int
     relevance_score: float
     verdict_reason: str
+    verified_true_steps: int
+    verified_false_steps: int
 
 
 def _heuristic_tool_plan_merged(
@@ -388,6 +391,7 @@ def _build_evidence(
     delta_pct = None
     if delta is not None and baseline_value not in (None, 0.0):
         delta_pct = (delta / baseline_value) * 100.0
+    n_verified_true, n_verified_false = scan_verification(successful_outputs)
     return HypothesisEvidence(
         metric_value=metric_value,
         baseline_value=baseline_value,
@@ -400,6 +404,8 @@ def _build_evidence(
         n_metric_steps=metric_steps,
         relevance_score=float(relevance_score),
         verdict_reason="",
+        verified_true_steps=n_verified_true,
+        verified_false_steps=n_verified_false,
     )
 
 
@@ -1490,7 +1496,14 @@ async def run_sub_agent_async(payload: dict) -> dict:
             min_metric_steps_for_confirm=int(getattr(settings, "min_metric_steps_for_confirm", 2)),
         )
         evidence_obj["verdict_reason"] = verdict_reason
-        confidence = 0.0 if evidence_obj["n_metric_steps"] == 0 else _compute_confidence(evidence_obj)
+        # Deterministic verification carries its own (high) confidence; it has no
+        # metric steps, so the statistical confidence path would wrongly report 0.0.
+        if int(evidence_obj.get("verified_true_steps") or 0) > 0 and verdict == "confirmed":
+            confidence = 0.95
+        elif int(evidence_obj.get("verified_false_steps") or 0) > 0 and verdict == "refuted":
+            confidence = 0.95
+        else:
+            confidence = 0.0 if evidence_obj["n_metric_steps"] == 0 else _compute_confidence(evidence_obj)
 
         sig_summary = {
             "gate_passed": sig_result.gate_passed,

@@ -443,6 +443,28 @@ async def db_load_campaign(campaign_id: str, session_factory: async_sessionmaker
 
 # ── Baseline measurement ─────────────────────────────────────────────────────
 
+_ML_METRIC_TOKENS = (
+    "accuracy", "loss", "error", "f1", "auc", "perplexity", "flops", "bleu", "mse", "rmse", "recall", "precision",
+)
+_ML_QUESTION_TOKENS = (
+    "mnist", "cifar", "imagenet", "dataset", "neural", "network", " mlp", "transformer", "epoch", "optimizer",
+    "classifier", "classification", "regression", "embedding", "architecture", "train a", "training a model",
+)
+
+
+def _is_ml_campaign(campaign: ResearchCampaign) -> bool:
+    """Heuristic: does this campaign have an empirical ML training baseline to measure?
+
+    Verification/math/combinatorics campaigns (Erdős-style problems) have no MLP to train,
+    so the baseline step must be skipped rather than recording a meaningless trained metric.
+    """
+    metric = str(campaign.breakthrough_criteria.metric_name or "").lower()
+    if any(tok in metric for tok in _ML_METRIC_TOKENS):
+        return True
+    q = str(campaign.question or "").lower()
+    return any(tok in q for tok in _ML_QUESTION_TOKENS)
+
+
 async def measure_baseline(
     campaign: ResearchCampaign,
     llm: LLMClient,
@@ -456,6 +478,25 @@ async def measure_baseline(
     baseline_mode = str(getattr(settings, "campaign_baseline_mode", "sub_agent") or "sub_agent").strip().lower()
     if baseline_mode in {"skip", "none", "disabled"}:
         logger.warning("Campaign baseline measurement skipped by campaign_baseline_mode=%s", baseline_mode)
+        return 0.0
+
+    # Non-empirical (verification / math / combinatorics) campaigns have no ML training
+    # baseline to measure — forcing an MLP train here would record a meaningless number.
+    if not _is_ml_campaign(campaign):
+        logger.info("Non-ML campaign detected; skipping ML baseline measurement.")
+        await emitter.emit(
+            session_id=campaign.id,
+            event_type=EventType.BASELINE_MEASURED,
+            step="campaign.baseline_measured",
+            payload={
+                "baseline_metric": 0.0,
+                "metric_name": campaign.breakthrough_criteria.metric_name,
+                "note": (
+                    "Verification/computational campaign: no numeric training baseline. "
+                    "Hypotheses are judged by deterministic verification, not metric improvement."
+                ),
+            },
+        )
         return 0.0
 
     if baseline_mode == "fast_tool":

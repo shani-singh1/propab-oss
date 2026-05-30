@@ -231,6 +231,13 @@ What should you do next? Rules:
    stdout of the form: print(json.dumps({{"sandbox": "ok", ...your result fields...}}))
    Put your real measurements/values (e.g. counts, metrics, found constructions, verification
    booleans) as fields in that dict. Code that does not print this JSON line is treated as failed.
+   VERIFICATION HYPOTHESES (number theory, combinatorics, constructions, search/proof — anything
+   exactly checkable rather than statistical): include a boolean field "verified" — true only if
+   your code rigorously checked the claim holds over the stated domain, false if it found a
+   counterexample — plus a "certificate" field holding the witness (e.g. the explicit construction,
+   the decomposition, or the counterexample). A reproduced verified=true CONFIRMS the hypothesis
+   deterministically (no p-value needed); a verified=false (or a non-empty "counterexample") REFUTES
+   it. Only set verified=true when the check is exact and exhaustive over the claimed range.
 7. Maximum code steps allowed for this hypothesis: {max_code_steps}.
    Code steps already used: {used_code_steps}.
 8. Prefer an exact-fit tool over code when one exists. If you are training/evaluating/comparing

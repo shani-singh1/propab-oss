@@ -8,6 +8,7 @@ from services.worker.significance import (
     check_significance,
     classify_verdict,
     fisher_combine_p_values,
+    scan_verification,
 )
 
 
@@ -50,6 +51,45 @@ def test_classify_verdict_no_metric_steps_inconclusive():
     verdict, reason = classify_verdict(_evidence(n_metric_steps=0), sig)
     assert verdict == "inconclusive"
     assert "no metric-bearing steps" in reason
+
+
+# ── Deterministic verification regime (math / combinatorics / constructions) ──
+
+def test_scan_verification_counts_true_false_and_counterexample():
+    outs = [
+        {"sandbox": "ok", "verified": True, "certificate": {"n": 7}},
+        {"sandbox": "ok", "verified": True},
+        {"sandbox": "ok", "verified": False},
+        {"sandbox": "ok", "counterexample": {"n": 11}},
+        {"sandbox": "ok"},  # no verification signal
+    ]
+    n_true, n_false = scan_verification(outs)
+    assert n_true == 2
+    assert n_false == 2
+
+
+def test_classify_verdict_confirmed_on_reproduced_verification_without_pvalue():
+    sig = SignificanceResult(gate_passed=False)  # no statistical evidence at all
+    ev = {"n_metric_steps": 0, "verified_true_steps": 2, "verified_false_steps": 0}
+    verdict, reason = classify_verdict(ev, sig, min_metric_steps_for_confirm=2)
+    assert verdict == "confirmed"
+    assert "deterministic verification" in reason
+
+
+def test_classify_verdict_refuted_on_counterexample():
+    sig = SignificanceResult(gate_passed=True, p_value=0.001)
+    ev = {"n_metric_steps": 3, "verified_true_steps": 0, "verified_false_steps": 1}
+    verdict, reason = classify_verdict(ev, sig)
+    assert verdict == "refuted"
+    assert "counterexample" in reason
+
+
+def test_classify_verdict_single_verification_unreplicated_inconclusive():
+    sig = SignificanceResult(gate_passed=False)
+    ev = {"n_metric_steps": 0, "verified_true_steps": 1, "verified_false_steps": 0}
+    verdict, reason = classify_verdict(ev, sig, min_metric_steps_for_confirm=2)
+    assert verdict == "inconclusive"
+    assert "unreplicated" in reason
 
 
 def test_classify_verdict_refuted_on_definitive_failure():
