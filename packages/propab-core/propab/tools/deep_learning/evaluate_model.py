@@ -47,7 +47,7 @@ def evaluate_model(
             error=ToolError(type="missing_dependency", message="PyTorch required."),
         )
 
-    info = resolve_model(str(model_id))
+    info = resolve_model(str(model_id), prefer_trained=True)
     if not info:
         return ToolResult(
             success=False,

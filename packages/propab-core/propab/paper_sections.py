@@ -88,7 +88,56 @@ def _best_finding(synthesis: dict[str, Any] | None) -> dict[str, Any] | None:
     return None
 
 
-def _outcome_sentence(counts: dict[str, int], best: dict[str, Any] | None) -> str:
+def _metric_summary(synthesis: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Baseline-relative metric facts for honest reporting, or None when unavailable."""
+    syn = synthesis or {}
+    baseline = syn.get("baseline_metric")
+    best = syn.get("best_metric")
+    if not isinstance(baseline, (int, float)) or not isinstance(best, (int, float)):
+        return None
+    if abs(float(baseline)) < 1e-12:
+        return None
+    imp = syn.get("improvement_pct_over_baseline")
+    return {
+        "baseline": float(baseline),
+        "best": float(best),
+        "improvement_pct": float(imp) if isinstance(imp, (int, float)) else None,
+        "metric_name": str(syn.get("metric_name") or "the primary metric").replace("_", " "),
+    }
+
+
+def _baseline_clause(metric: dict[str, Any] | None) -> str:
+    """LaTeX-ready sentence stating whether any result beat the measured baseline.
+
+    This is the honesty guard: "supported" means a statistically significant effect was
+    detected within the experiment, which is NOT the same as beating the baseline. State
+    the baseline comparison explicitly so the abstract cannot imply an improvement that
+    did not happen.
+    """
+    if not metric:
+        return ""
+    name = _latex_escape(metric["metric_name"])
+    baseline = metric["baseline"]
+    best = metric["best"]
+    imp = metric["improvement_pct"]
+    imp_txt = "" if imp is None else f" ({imp:+.1f}\\%)"
+    if best > baseline + 1e-9:
+        return (
+            f" The strongest configuration reached {best:.3f} {name}, improving on the "
+            f"{baseline:.3f} baseline{imp_txt}."
+        )
+    return (
+        f" No configuration exceeded the {baseline:.3f} {name} baseline; the best result was "
+        f"{best:.3f}{imp_txt}, so the supported findings are within-experiment comparisons "
+        "rather than improvements over the baseline."
+    )
+
+
+def _outcome_sentence(
+    counts: dict[str, int],
+    best: dict[str, Any] | None,
+    metric: dict[str, Any] | None = None,
+) -> str:
     """
     A natural-language sentence stating the authoritative outcome (no count tuples).
 
@@ -99,13 +148,14 @@ def _outcome_sentence(counts: dict[str, int], best: dict[str, Any] | None) -> st
     if tested == 0:
         return "No experiments were executed in this study."
     if c == 0:
-        return (
+        s = (
             f"Across {tested} hypotheses evaluated, none met the significance threshold against the recorded "
             "measurements, so the question remains open under the methods applied here."
         )
+        return s + _baseline_clause(metric)
     s = (
-        f"Across {tested} hypotheses evaluated, {c} {'was' if c == 1 else 'were'} supported by statistically "
-        "significant evidence"
+        f"Across {tested} hypotheses evaluated, {c} {'was' if c == 1 else 'were'} supported by a statistically "
+        "significant within-experiment effect"
     )
     if r:
         s += f" and {r} {'was' if r == 1 else 'were'} refuted"
@@ -115,10 +165,13 @@ def _outcome_sentence(counts: dict[str, int], best: dict[str, Any] | None) -> st
         stats = str(best.get("stats_text") or "")
         if claim:
             claim = _latex_escape(claim[0].lower() + claim[1:])
-            frag = f" The strongest result was that {claim}"
+            frag = f" The most significant effect was that {claim}"
             if stats and stats != "no inferential statistic recorded":
                 frag += f" ({stats})"
             s += frag + "."
+    # Always anchor the abstract to the baseline comparison so "supported" is never
+    # mistaken for "beat the baseline".
+    s += _baseline_clause(metric)
     return s
 
 
@@ -188,7 +241,7 @@ def _fallback_from_context(
 
     counts = outcome_counts(syn)
     best = _best_finding(syn)
-    outcome = _outcome_sentence(counts, best)  # LaTeX-ready (do not re-escape)
+    outcome = _outcome_sentence(counts, best, _metric_summary(syn))  # LaTeX-ready (do not re-escape)
     q_esc = _latex_escape(question[:900])
     cite_esc = _latex_escape(cite)
     n_papers = len(kpapers)
@@ -264,6 +317,7 @@ async def generate_prose_sections(
     syn = synthesis or {}
     counts = outcome_counts(syn)
     best = _best_finding(syn)
+    metric = _metric_summary(syn)
     fb = _fallback_from_context(question, prior, synthesis)
 
     use_llm = llm is not None and (
@@ -274,7 +328,7 @@ async def generate_prose_sections(
         return fb
 
     prior_blob = json.dumps(prior, ensure_ascii=False)[:5000]
-    outcome = _outcome_sentence(counts, best)
+    outcome = _outcome_sentence(counts, best, metric)
 
     async def one(purpose: str, instruction: str) -> str:
         prompt = (

@@ -1505,11 +1505,16 @@ async def run_sub_agent_async(payload: dict) -> dict:
             f"any_success={any_tool_success}; sandbox_ok={sandbox_ok}; "
             f"steps={step_counter}."
         )
-        key_finding = (
-            "Significance gate passed: metric evidence supports hypothesis."
-            if verdict == "confirmed"
-            else ("Sandbox probe completed." if sandbox_ok else None)
-        )
+        # The key finding must be the actual claim that was supported — not a generic
+        # "significance gate passed" line — or the paper reads like an internal log.
+        if verdict == "confirmed":
+            claim = re.split(r"\s*\(Question:", str(hyp_text or "").strip())[0].strip()
+            claim = re.sub(r"^Hypothesis\s+\d+\s*:\s*", "", claim).strip()
+            key_finding = claim or "The hypothesis was supported by statistically significant evidence."
+        elif sandbox_ok:
+            key_finding = "Sandbox probe completed."
+        else:
+            key_finding = None
 
         await _update_hypothesis(
             session_factory,

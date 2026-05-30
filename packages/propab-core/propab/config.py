@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     minio_secure: bool = False
     sandbox_timeout_sec: int = 120
     sandbox_memory_mb: int = 512
+    # Image for the code-execution sandbox. Must contain the scientific Python stack the
+    # agents rely on (numpy/scipy/torch). Defaults to the worker image so free-form code
+    # has the same instruments as the tools; override with SANDBOX_IMAGE. Network is always
+    # disabled in the sandbox, so code must not download datasets — use tools for that.
+    sandbox_image: str = "propab-oss-worker:latest"
     # Max Docker executions per ``code.generated`` step (minimum 1). When 1, no second
     # run after timeout rewrite. See ``services.worker.sub_agent_loop.run_code_step``.
     sandbox_code_max_retries: int = 3
@@ -86,6 +91,9 @@ class Settings(BaseSettings):
     campaign_min_replications: int = 3              # min confirmed replications
     campaign_expand_on_confirmed: bool = True       # expand tree on confirmed findings
     campaign_expand_on_refuted: bool = True         # generate alternatives on refuted
+    # Max seconds to wait for in-flight (non-blocking) tree expansions to refill the
+    # frontier before falling back to a blocking seed regeneration.
+    campaign_expansion_drain_sec: int = 90
     campaign_max_tree_depth: int = 8                # max hypothesis depth in tree
     campaign_prior_timeout_sec: int = 180
     # If a batch has unfinished Celery sub-agents and no completions for this many seconds, revoke the oldest.

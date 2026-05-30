@@ -32,6 +32,7 @@ services:
   worker:
     environment:
       - PROPAB_PROFILE=${PROPAB_PROFILE:-dev}
+      - SANDBOX_IMAGE=${SANDBOX_IMAGE:-propab-oss-worker:latest}
     volumes:
       - ./packages:/app/packages
       - ./services:/app/services

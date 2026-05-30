@@ -24,8 +24,21 @@ logger = logging.getLogger(__name__)
 # ─── In-process fast path ─────────────────────────────────────────────────────
 _STORE: dict[str, dict[str, Any]] = {}
 
+# Most-recently registered handles, so chaining survives the LLM passing a junk /
+# placeholder model_id (e.g. the literal "x", "dummy", "x:trained" copied from a
+# tool spec example). Tracked per kind so eval tools can prefer a trained model.
+_LAST_BUILT: str | None = None
+_LAST_TRAINED: str | None = None
+
+# Tokens the LLM commonly emits verbatim instead of a real id — treat as "use latest".
+_PLACEHOLDER_IDS = frozenset(
+    {"", "x", "x:trained", "dummy", "model_id", "auto", "none", "null", "model", "mlp", "id"}
+)
+
 # ─── Redis slow path (optional) ───────────────────────────────────────────────
 _REDIS_TTL = 1800  # 30 minutes
+_LATEST_BUILT_KEY = "propab:model_registry:__latest_built__"
+_LATEST_TRAINED_KEY = "propab:model_registry:__latest_trained__"
 _redis_client = None
 
 
@@ -52,14 +65,47 @@ def _redis_key(model_id: str) -> str:
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 def put_model(model_id: str, info: dict[str, Any]) -> None:
-    """Store model config in-process and optionally in Redis."""
+    """Store model config in-process and optionally in Redis, tracking recency by kind."""
+    global _LAST_BUILT, _LAST_TRAINED
     _STORE[model_id] = info
+    kind = str(info.get("kind") or "")
+    if kind == "mlp_trained":
+        _LAST_TRAINED = model_id
+    else:
+        _LAST_BUILT = model_id
     try:
         r = _get_redis()
         if r is not None:
             r.setex(_redis_key(model_id), _REDIS_TTL, json.dumps(info, default=str))
+            latest_key = _LATEST_TRAINED_KEY if kind == "mlp_trained" else _LATEST_BUILT_KEY
+            r.setex(latest_key, _REDIS_TTL, model_id)
     except Exception as exc:
         logger.debug("Redis put_model failed (non-fatal): %s", exc)
+
+
+def _latest_model_id(prefer_trained: bool) -> str | None:
+    """Most-recently registered model id (in-process first, then Redis)."""
+    primary, secondary = (
+        (_LAST_TRAINED, _LAST_BUILT) if prefer_trained else (_LAST_BUILT, _LAST_TRAINED)
+    )
+    for cand in (primary, secondary):
+        if cand and cand in _STORE:
+            return cand
+    try:
+        r = _get_redis()
+        if r is not None:
+            keys = (
+                (_LATEST_TRAINED_KEY, _LATEST_BUILT_KEY)
+                if prefer_trained
+                else (_LATEST_BUILT_KEY, _LATEST_TRAINED_KEY)
+            )
+            for k in keys:
+                raw = r.get(k)
+                if raw:
+                    return str(raw)
+    except Exception as exc:
+        logger.debug("Redis _latest_model_id failed (non-fatal): %s", exc)
+    return primary or secondary
 
 
 def get_model(model_id: str) -> dict[str, Any] | None:
@@ -92,7 +138,7 @@ def _param_count_from_dims(dims: list[int] | None) -> int:
     return int(total)
 
 
-def resolve_model(model_id: str) -> dict[str, Any] | None:
+def resolve_model(model_id: str, *, prefer_trained: bool = False) -> dict[str, Any] | None:
     """Resolve a model_id robustly across the build → train chain.
 
     Agents frequently pass the wrong handle to downstream tools: a base build id to an
@@ -100,16 +146,21 @@ def resolve_model(model_id: str) -> dict[str, Any] | None:
     looks up the exact id, then tries the trained variant, then the base variant, and
     backfills ``param_count`` from ``dims`` (carried from the base build) so profiling
     and counting tools never silently report 0.
+
+    When the id is a known placeholder (the LLM copying ``"x"``/``"dummy"``/``"x:trained"``
+    from a tool-spec example) or is simply unknown, fall back to the most-recently
+    registered model so the chain still works instead of burning a step on a hard error.
+    ``prefer_trained`` biases that fallback toward a trained model (for eval tools).
     """
     mid = str(model_id or "").strip()
-    if not mid:
-        return None
 
-    candidates = [mid]
-    if mid.endswith(":trained"):
-        candidates.append(mid[: -len(":trained")])
-    else:
-        candidates.append(f"{mid}:trained")
+    candidates: list[str] = []
+    if mid:
+        candidates.append(mid)
+        if mid.endswith(":trained"):
+            candidates.append(mid[: -len(":trained")])
+        else:
+            candidates.append(f"{mid}:trained")
 
     info: dict[str, Any] | None = None
     for cand in candidates:
@@ -117,6 +168,16 @@ def resolve_model(model_id: str) -> dict[str, Any] | None:
         if got is not None:
             info = dict(got)
             break
+
+    if info is None:
+        # Placeholder or unknown id → resolve to the latest registered model.
+        if mid.lower() in _PLACEHOLDER_IDS or not mid:
+            prefer_trained = prefer_trained or mid.lower().endswith(":trained")
+        latest = _latest_model_id(prefer_trained)
+        if latest is not None:
+            got = get_model(latest)
+            if got is not None:
+                info = dict(got)
     if info is None:
         return None
 
@@ -135,7 +196,12 @@ def resolve_model(model_id: str) -> dict[str, Any] | None:
 
 
 def clear_model(model_id: str) -> None:
+    global _LAST_BUILT, _LAST_TRAINED
     _STORE.pop(model_id, None)
+    if _LAST_BUILT == model_id:
+        _LAST_BUILT = None
+    if _LAST_TRAINED == model_id:
+        _LAST_TRAINED = None
     try:
         r = _get_redis()
         if r is not None:

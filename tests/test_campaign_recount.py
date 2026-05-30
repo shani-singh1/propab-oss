@@ -20,13 +20,14 @@ def _campaign() -> ResearchCampaign:
 
 def test_recount_counts_distinct_nodes_not_results() -> None:
     c = _campaign()
-    c.hypothesis_tree.add_seeds(
+    # Node ids are tree-owned (UUIDs); capture them from the returned nodes.
+    n1, n2, n3 = c.hypothesis_tree.add_seeds(
         [{"id": "H1", "text": "a"}, {"id": "H2", "text": "b"}, {"id": "H3", "text": "c"}]
     )
 
-    c.hypothesis_tree.update_node("H1", "confirmed", 0.9, "ev")
-    c.hypothesis_tree.update_node("H2", "confirmed", 0.9, "ev")
-    c.hypothesis_tree.update_node("H3", "refuted", 0.9, "ev")
+    c.hypothesis_tree.update_node(n1.id, "confirmed", 0.9, "ev")
+    c.hypothesis_tree.update_node(n2.id, "confirmed", 0.9, "ev")
+    c.hypothesis_tree.update_node(n3.id, "refuted", 0.9, "ev")
     c.recount_from_tree()
 
     assert c.total_hypotheses == 3
@@ -35,11 +36,11 @@ def test_recount_counts_distinct_nodes_not_results() -> None:
 
 def test_recount_does_not_double_count_re_evaluated_node() -> None:
     c = _campaign()
-    c.hypothesis_tree.add_seeds([{"id": "H1", "text": "a"}])
+    n1 = c.hypothesis_tree.add_seeds([{"id": "H1", "text": "a"}])[0]
 
     # Same node evaluated multiple times (re-dispatch) must count once.
     for _ in range(5):
-        c.hypothesis_tree.update_node("H1", "confirmed", 0.9, "ev")
+        c.hypothesis_tree.update_node(n1.id, "confirmed", 0.9, "ev")
         c.recount_from_tree()
 
     assert c.total_hypotheses == 1
@@ -48,10 +49,10 @@ def test_recount_does_not_double_count_re_evaluated_node() -> None:
 
 def test_recount_ignores_pending_nodes() -> None:
     c = _campaign()
-    c.hypothesis_tree.add_seeds([{"id": "H1", "text": "a"}, {"id": "H2", "text": "b"}])
-    c.hypothesis_tree.update_node("H1", "inconclusive", 0.5, "ev")
+    n1, _n2 = c.hypothesis_tree.add_seeds([{"id": "H1", "text": "a"}, {"id": "H2", "text": "b"}])
+    c.hypothesis_tree.update_node(n1.id, "inconclusive", 0.5, "ev")
     c.recount_from_tree()
 
-    # H2 is still pending → not counted as an evaluated hypothesis.
+    # The second seed is still pending → not counted as an evaluated hypothesis.
     assert c.total_hypotheses == 1
     assert c.total_confirmed == 0

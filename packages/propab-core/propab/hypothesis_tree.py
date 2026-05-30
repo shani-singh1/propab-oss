@@ -136,12 +136,17 @@ class HypothesisTree:
     # ── Mutation ─────────────────────────────────────────────────────────────
 
     def add_seeds(self, hypotheses: list[dict[str, Any]], generation: int = 0) -> list[HypothesisNode]:
-        """Add seed (root) hypotheses and push them to the frontier."""
+        """Add seed (root) hypotheses and push them to the frontier.
+
+        Node identity is always tree-owned (a fresh UUID), never the LLM-supplied ``id``.
+        Re-seeding when the frontier empties otherwise reuses ids like ``h1``..``h5`` and
+        silently overwrites earlier nodes — including confirmed ones, which get reset to
+        pending and re-dispatched, corrupting the findings ledger.
+        """
         added: list[HypothesisNode] = []
         for h in hypotheses:
-            raw_id = h.get("id")
             node = HypothesisNode(
-                id=str(raw_id) if raw_id is not None else str(uuid4()),
+                id=str(uuid4()),
                 text=h["text"],
                 parent_id=None,
                 depth=0,
@@ -193,6 +198,10 @@ class HypothesisTree:
             if node_id not in self.confirmed:
                 self.confirmed.append(node_id)
         else:
+            # A node re-evaluated to a non-confirmed verdict must leave the confirmed
+            # list, or ``confirmed_count`` (len of list) diverges from the verdict scan.
+            if node_id in self.confirmed:
+                self.confirmed.remove(node_id)
             self._maybe_exhaust(node_id)
         return True
 
@@ -360,7 +369,9 @@ class HypothesisTree:
         return {
             "total_nodes": len(self.nodes),
             "frontier_size": len(self.frontier),
-            "confirmed_count": len(self.confirmed),
+            # Count by verdict (authoritative) rather than len(self.confirmed); the list is a
+            # convenience index for lineage scoring and must never define the reported count.
+            "confirmed_count": verdicts.get("confirmed", 0),
             "exhausted_count": len(self.exhausted),
             "max_depth": max((n.depth for n in self.nodes.values()), default=0),
             "verdict_counts": verdicts,

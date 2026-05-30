@@ -627,6 +627,47 @@ async def expand_tree_node(
         return []
 
 
+async def _expand_node_async(
+    *,
+    campaign: ResearchCampaign,
+    node_id: str,
+    llm: LLMClient,
+    emitter: EventEmitter,
+    generation: int,
+    step: str,
+    reason: str | None = None,
+) -> None:
+    """Expand a node and emit its event off the dispatch critical path.
+
+    Tree expansion is an LLM call (~tens of seconds). Running it inline in the result
+    loop stalls slot refills (the pipelined dispatcher is suspended at ``yield``), so a
+    freed Celery worker sits idle for the whole call. Spawning this as a background task
+    lets the dispatcher keep workers busy; children land on the frontier when the call
+    returns and are picked up by the next refill.
+    """
+    try:
+        children = await expand_tree_node(
+            node_id, campaign.hypothesis_tree, llm, campaign.id, generation,
+        )
+        if children:
+            payload: dict[str, Any] = {
+                "parent_id": node_id,
+                "children_count": len(children),
+                "tree_size": len(campaign.hypothesis_tree.nodes),
+            }
+            if reason:
+                payload["expansion_reason"] = reason
+            await emitter.emit(
+                session_id=campaign.id,
+                event_type=EventType.HYPO_TREE_EXPANDED,
+                step=step,
+                payload=payload,
+                hypothesis_id=_node_row_id(campaign.id, node_id),
+            )
+    except Exception as exc:  # noqa: BLE001 — background task must not crash the loop
+        logger.warning("[campaign %s] async expansion of %s failed: %s", campaign.id, node_id, exc)
+
+
 async def generate_seed_hypotheses(
     campaign: ResearchCampaign,
     prior: object,
@@ -1135,10 +1176,33 @@ async def run_campaign_loop(
         # distinct-node totals from the first wave (not stale persisted increments).
         campaign.recount_from_tree()
         first_confirmed_snapshotted = campaign.total_confirmed > 0
+        # Background tree-expansion tasks, kept off the dispatch critical path.
+        expansion_tasks: set[asyncio.Task[None]] = set()
 
         while not campaign.should_stop():
             # Pipelined pool: refill keeps up to max_concurrent Celery tasks busy until the
             # frontier has no dispatchable pending nodes (mid-wave tree expansions included).
+            # Before declaring the frontier empty, let any in-flight expansions finish —
+            # their children can refill the frontier and save a costly blocking seed regen.
+            if (
+                campaign.hypothesis_tree.next_dispatch_candidate(frozenset()) is None
+                and expansion_tasks
+            ):
+                drain_deadline = time.monotonic() + float(
+                    getattr(settings, "campaign_expansion_drain_sec", 90) or 90
+                )
+                while (
+                    expansion_tasks
+                    and campaign.hypothesis_tree.next_dispatch_candidate(frozenset()) is None
+                    and time.monotonic() < drain_deadline
+                    and not campaign.should_stop()
+                ):
+                    await asyncio.wait(
+                        set(expansion_tasks),
+                        return_when=asyncio.FIRST_COMPLETED,
+                        timeout=15.0,
+                    )
+
             if campaign.hypothesis_tree.next_dispatch_candidate(frozenset()) is None:
                 await emitter.emit(
                     session_id=campaign.id,
@@ -1234,24 +1298,21 @@ async def run_campaign_loop(
                             write_campaign_snapshot, "post_first_confirmed", campaign, prior_dict
                         )
 
-                    # Expand the tree from this confirmed node
+                    # Expand the tree from this confirmed node (non-blocking — children
+                    # land on the frontier when the LLM call returns; dispatch continues).
                     if settings.campaign_expand_on_confirmed:
-                        children = await expand_tree_node(
-                            node_id, campaign.hypothesis_tree, llm, campaign.id, generation,
-                        )
-                        if children:
-                            await emitter.emit(
-                                session_id=campaign.id,
-                                event_type=EventType.HYPO_TREE_EXPANDED,
+                        task = asyncio.create_task(
+                            _expand_node_async(
+                                campaign=campaign,
+                                node_id=node_id,
+                                llm=llm,
+                                emitter=emitter,
+                                generation=generation,
                                 step="campaign.tree_expand",
-                                payload={
-                                    "parent_id": node_id,
-                                    "children_count": len(children),
-                                    "tree_size": len(campaign.hypothesis_tree.nodes),
-                                },
-                                # events.hypothesis_id is UUID FK; tree node ids may be short slugs (e.g. "H1").
-                                hypothesis_id=_node_row_id(campaign.id, node_id),
                             )
+                        )
+                        expansion_tasks.add(task)
+                        task.add_done_callback(expansion_tasks.discard)
 
                     # Update best metric
                     campaign.update_best_metric(result)
@@ -1265,22 +1326,20 @@ async def run_campaign_loop(
                         breakthrough_found = True
 
                 elif verdict == "refuted" and settings.campaign_expand_on_refuted:
-                    # Generate alternatives from refuted hypotheses
-                    children = await expand_tree_node(
-                        node_id, campaign.hypothesis_tree, llm, campaign.id, generation,
-                    )
-                    if children:
-                        await emitter.emit(
-                            session_id=campaign.id,
-                            event_type=EventType.HYPO_TREE_EXPANDED,
+                    # Generate alternatives from refuted hypotheses (non-blocking).
+                    task = asyncio.create_task(
+                        _expand_node_async(
+                            campaign=campaign,
+                            node_id=node_id,
+                            llm=llm,
+                            emitter=emitter,
+                            generation=generation,
                             step="campaign.tree_expand_alt",
-                            payload={
-                                "parent_id": node_id,
-                                "children_count": len(children),
-                                "expansion_reason": "refuted_alternative",
-                            },
-                            hypothesis_id=_node_row_id(campaign.id, node_id),
+                            reason="refuted_alternative",
                         )
+                    )
+                    expansion_tasks.add(task)
+                    task.add_done_callback(expansion_tasks.discard)
 
                 # Throttle persistence: always checkpoint on state that matters
                 # (confirmed / breakthrough), otherwise at most every checkpoint interval.
@@ -1331,6 +1390,14 @@ async def run_campaign_loop(
                     },
                 )
                 break
+
+        # Cancel any in-flight tree expansions before finalizing — their children would
+        # arrive after the loop and never be dispatched, so don't let them run into paper gen.
+        for t in list(expansion_tasks):
+            t.cancel()
+        if expansion_tasks:
+            await asyncio.gather(*expansion_tasks, return_exceptions=True)
+            expansion_tasks.clear()
 
         # ── Stage 4: Final checkpoint + paper ────────────────────────────
         if campaign.status != STATUS_BREAKTHROUGH:

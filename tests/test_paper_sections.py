@@ -79,6 +79,53 @@ def test_abstract_honest_when_zero_confirmed() -> None:
     asyncio.run(_run())
 
 
+def test_abstract_honest_when_no_result_beats_baseline() -> None:
+    """Honesty guard: 'supported' must not imply the baseline was beaten."""
+
+    async def _run() -> None:
+        out = await generate_prose_sections(
+            llm=None,
+            session_id="00000000-0000-0000-0000-000000000004",
+            question="Find the best MLP under 50k params for MNIST.",
+            prior={"key_papers": []},
+            synthesis={
+                "counts": {"confirmed": 10, "refuted": 1, "inconclusive": 1, "tested": 12},
+                "baseline_metric": 0.796,
+                "best_metric": 0.698,
+                "improvement_pct_over_baseline": -12.33,
+                "metric_name": "val_accuracy",
+            },
+        )
+        abstract = out["abstract"]
+        assert "No configuration exceeded" in abstract
+        assert "0.796" in abstract  # baseline stated explicitly
+        assert "within-experiment comparisons" in abstract
+
+    asyncio.run(_run())
+
+
+def test_abstract_reports_improvement_when_baseline_beaten() -> None:
+    async def _run() -> None:
+        out = await generate_prose_sections(
+            llm=None,
+            session_id="00000000-0000-0000-0000-000000000005",
+            question="Find the best MLP under 50k params for MNIST.",
+            prior={"key_papers": []},
+            synthesis={
+                "counts": {"confirmed": 8, "refuted": 0, "inconclusive": 0, "tested": 8},
+                "baseline_metric": 0.796,
+                "best_metric": 0.910,
+                "improvement_pct_over_baseline": 14.32,
+                "metric_name": "val_accuracy",
+            },
+        )
+        abstract = out["abstract"]
+        assert "improving on" in abstract
+        assert "0.910" in abstract
+
+    asyncio.run(_run())
+
+
 def test_collect_figure_object_ids_dedupes() -> None:
     ids = collect_figure_object_ids(
         {

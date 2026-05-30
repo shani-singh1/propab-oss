@@ -237,6 +237,15 @@ What should you do next? Rules:
    ML models, use tools (train_model, run_experiment_grid, compare_optimizers); reserve code for
    computations the tools do not cover.
 
+SANDBOX ENVIRONMENT (read before writing any action_type="code"):
+• Available: Python 3.11 with numpy, scipy, torch, matplotlib. CPU only (no GPU).
+• NO network access. You CANNOT download datasets, fetch URLs, or pip install. Code that calls
+  torchvision.datasets.*(download=True), urllib/requests, or any network I/O WILL FAIL.
+• For training/evaluating on real datasets (e.g. MNIST), DO NOT write download code — call the
+  tools (train_model, run_experiment_grid, evaluate_model, compare_optimizers); they handle real
+  data. Reserve action_type="code" for math/combinatorics/search/verification/simulation/analysis
+  on in-memory or synthetically-generated (e.g. numpy/torch.randn) data.
+
 SANDBOX AND AGENT WALL CLOCK (critical for train_model / run_experiment_grid / any code step):
 • Each sandbox run is capped at sandbox_timeout_sec={sandbox_timeout_sec} seconds (Docker, no GPU).
 • Sandbox code receives injected helpers: SANDBOX_WALL_SEC (seconds budget) and SANDBOX_REMAINING_SEC().

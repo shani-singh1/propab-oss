@@ -109,6 +109,8 @@ services:
       - EMBED_PROVIDER=${EMBED_PROVIDER:-openai}
       - EMBED_MODEL=${EMBED_MODEL:-text-embedding-3-small}
       - PROPAB_PROFILE=${PROPAB_PROFILE:-campaign}
+      # Sandbox reuses the worker image so free-form code has numpy/scipy/torch (network off).
+      - SANDBOX_IMAGE=${SANDBOX_IMAGE:-propab-oss-worker:latest}
     restart: unless-stopped
     volumes:
       - propab_data:/data/propab
