@@ -357,6 +357,23 @@ async def db_save_campaign(campaign: ResearchCampaign, session_factory: async_se
         await db.commit()
 
 
+async def db_set_research_session_prior(
+    session_id: str,
+    session_factory: async_sessionmaker,
+    prior_json: str,
+) -> None:
+    async with session_factory() as db:
+        await db.execute(
+            text("""
+                UPDATE research_sessions
+                SET prior_json = CAST(:prior_json AS jsonb)
+                WHERE id = CAST(:id AS uuid)
+            """),
+            {"id": session_id, "prior_json": prior_json},
+        )
+        await db.commit()
+
+
 async def db_set_research_session_stage(
     session_id: str,
     session_factory: async_sessionmaker,
@@ -1170,8 +1187,27 @@ async def run_campaign_loop(
                 open_gaps=[],
                 dead_ends=[],
                 key_papers=[],
+                evidence_status="INSUFFICIENT_EVIDENCE",
             )
         prior_dict = prior.to_dict()
+        await db_set_research_session_prior(
+            campaign.id, session_factory, json.dumps(prior_dict),
+        )
+        if prior.evidence_status == "INSUFFICIENT_EVIDENCE":
+            await emitter.emit(
+                session_id=campaign.id,
+                event_type=EventType.CAMPAIGN_PROGRESS,
+                step="campaign.prior_insufficient",
+                payload={
+                    "phase": "prior_build",
+                    "evidence_status": prior.evidence_status,
+                    "evidence_coverage": prior.evidence_coverage,
+                    "detail": (
+                        "Literature corpus did not pass quality gates; campaign continues "
+                        "with explicit insufficient-evidence prior."
+                    ),
+                },
+            )
         domain = parsed.domain
 
         # ── Stage 2: Measure baseline if not yet done ─────────────────────

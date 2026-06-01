@@ -353,12 +353,6 @@ async def run_research_loop(
             session_factory=session_factory, paper_ttl_days=paper_ttl_days, llm=llm,
         )
         await _update_session(session_factory, session_id, prior_json=json.dumps(prior.to_dict()))
-        await emitter.emit(
-            session_id=session_id,
-            event_type=EventType.LIT_PRIOR_BUILT,
-            step="literature.prior_build",
-            payload={"prior": prior.to_dict()},
-        )
 
         # ── Stage 3: Short-circuit check ────────────────────────────
         short_answer = await evaluate_literature_short_circuit(

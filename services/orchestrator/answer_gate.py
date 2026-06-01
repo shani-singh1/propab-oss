@@ -33,6 +33,8 @@ async def evaluate_literature_short_circuit(
     facts = prior.established_facts or []
     if not facts or not settings.embed_api_secret.strip():
         return None
+    if getattr(prior, "evidence_status", "READY") != "READY":
+        return None
 
     texts: list[str] = []
     fact_indices: list[int] = []

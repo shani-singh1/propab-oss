@@ -50,6 +50,19 @@ class Settings(BaseSettings):
     sandbox_after_timeout_llm_rewrite: bool = True
     agent_tool_n_steps_cap: int = 0
     literature_answer_similarity: float = 0.92
+    # Literature retrieval (domain-agnostic): query-scoped cache, multi-intent fetch, quality gates.
+    literature_query_cache_ttl_days: int = 14
+    literature_query_cache_similarity: float = 0.82
+    literature_fetch_per_intent: int = 10
+    literature_max_candidates: int = 40
+    literature_relevance_threshold: float = 0.4
+    literature_relevance_threshold_floor: float = 0.28
+    literature_citation_expand_max: int = 12
+    literature_min_papers_kept: int = 2
+    literature_min_retrieval_chunks: int = 3
+    literature_min_evidence_coverage: float = 0.35
+    literature_expansion_rounds: int = 2
+    literature_pdf_parallelism: int = 4
     # Think-act agent budgets
     agent_max_steps: int = 12
     agent_min_steps: int = 4

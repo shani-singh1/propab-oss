@@ -12,15 +12,23 @@ class Prior:
     open_gaps: list[dict]
     dead_ends: list[dict]
     key_papers: list[dict]
+    evidence_status: str = "READY"
+    evidence_coverage: float = 0.0
+    retrieval_diagnostics: dict | None = None
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "established_facts": self.established_facts,
             "contested_claims": self.contested_claims,
             "open_gaps": self.open_gaps,
             "dead_ends": self.dead_ends,
             "key_papers": self.key_papers,
+            "evidence_status": self.evidence_status,
+            "evidence_coverage": self.evidence_coverage,
         }
+        if self.retrieval_diagnostics is not None:
+            out["retrieval_diagnostics"] = self.retrieval_diagnostics
+        return out
 
 
 @dataclass(slots=True)

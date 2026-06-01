@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
 import json
 import math
 import re
@@ -18,8 +17,21 @@ from propab.events import EventEmitter
 from propab.llm import LLMClient
 from propab.types import EventType
 from services.orchestrator.intake import ParsedQuestion
+from services.orchestrator.literature_cache import (
+    load_papers_by_ids,
+    lookup_cached_paper_ids,
+    store_query_cache,
+)
+from services.orchestrator.literature_quality import (
+    build_retrieval_diagnostics,
+    build_search_intents,
+    classify_evidence_status,
+    compute_evidence_coverage,
+    gate_corpus_quality,
+    insufficient_prior,
+)
 from services.orchestrator.prior_builder import synthesize_prior_from_papers
-from services.orchestrator.retrieval import run_hybrid_retrieval
+from services.orchestrator.retrieval import expand_query, run_hybrid_retrieval
 from services.orchestrator.schemas import Prior
 
 
@@ -132,24 +144,118 @@ async def _fetch_arxiv(query: str, max_results: int = 5) -> list[dict[str, Any]]
     return _parse_arxiv_feed(response.text)
 
 
-async def _load_cached_papers(session_factory: async_sessionmaker, ttl_days: int) -> list[dict[str, Any]]:
-    min_time = datetime.now(tz=UTC) - timedelta(days=ttl_days)
+async def _fetch_arxiv_by_ids(arxiv_ids: list[str]) -> list[dict[str, Any]]:
+    """Fetch arXiv metadata for known IDs (citation graph expansion)."""
+    ids = [i for i in arxiv_ids if i and not i.startswith("semantic_scholar:")][:20]
+    if not ids:
+        return []
+    url = "https://export.arxiv.org/api/query"
+    params = {"id_list": ",".join(ids), "max_results": len(ids)}
+    async with httpx.AsyncClient(timeout=25) as client:
+        response = await client.get(url, params=params)
+    response.raise_for_status()
+    return _parse_arxiv_feed(response.text)
+
+
+async def _expand_papers_via_citations(
+    session_factory: async_sessionmaker,
+    papers: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Add 1-hop cited papers from the citation graph (domain-agnostic)."""
+    seed_ids = [str(p["id"]) for p in papers if p.get("id")]
+    if not seed_ids:
+        return papers
+    cap = max(0, settings.literature_citation_expand_max)
+    if cap == 0:
+        return papers
+
     async with session_factory() as session:
         rows = (
             await session.execute(
                 text(
                     """
-                    SELECT id, title, abstract, authors, pdf_url, ingested_at, sections_json
-                    FROM papers
-                    WHERE status = 'indexed' AND ingested_at >= :min_time
-                    ORDER BY ingested_at DESC
-                    LIMIT 5
+                    SELECT DISTINCT cited_paper_id
+                    FROM paper_citations
+                    WHERE source_paper_id = ANY(:ids)
+                    LIMIT :lim
                     """
                 ),
-                {"min_time": min_time},
+                {"ids": seed_ids, "lim": cap * 2},
             )
-        ).mappings().all()
-    return [dict(row) for row in rows]
+        ).fetchall()
+
+    existing = {str(p.get("id")) for p in papers if p.get("id")}
+    cited_ids = [str(r[0]) for r in rows if r and r[0] and str(r[0]) not in existing][:cap]
+    if not cited_ids:
+        return papers
+
+    extra = await load_papers_by_ids(session_factory, cited_ids)
+    found_ids = {str(p.get("id")) for p in extra if p.get("id")}
+    missing = [cid for cid in cited_ids if cid not in found_ids]
+    if missing:
+        fetched = await _fetch_arxiv_by_ids(missing)
+        if fetched:
+            await _upsert_papers(session_factory, fetched)
+            extra.extend(fetched)
+
+    if not extra:
+        return papers
+    return papers + extra
+
+
+async def _filter_with_adaptive_threshold(
+    question: str,
+    papers: list[dict[str, Any]],
+    *,
+    session_id: str,
+    emitter: EventEmitter,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], float]:
+    """Relevance filter; relax threshold once when too few papers survive (general-purpose)."""
+    threshold = settings.literature_relevance_threshold
+    kept, dropped = await _filter_papers_by_question_relevance(
+        question, papers, session_id=session_id, emitter=emitter, threshold=threshold,
+    )
+    floor = settings.literature_relevance_threshold_floor
+    min_kept = settings.literature_min_papers_kept
+    if len(kept) >= min_kept or threshold <= floor:
+        return kept, dropped, threshold
+
+    relaxed = max(floor, threshold - 0.08)
+    if relaxed >= threshold:
+        return kept, dropped, threshold
+
+    kept2, dropped2 = await _filter_papers_by_question_relevance(
+        question, papers, session_id=session_id, emitter=emitter, threshold=relaxed,
+    )
+    if len(kept2) > len(kept):
+        return kept2, dropped2, relaxed
+    return kept, dropped, threshold
+
+
+async def _fetch_papers_multi_intent(
+    intents: list[str],
+    *,
+    per_intent: int,
+    max_total: int,
+) -> list[dict[str, Any]]:
+    """Fetch from arXiv (fallback Semantic Scholar) per search intent; merge and dedupe."""
+    seen: set[str] = set()
+    merged: list[dict[str, Any]] = []
+    for intent in intents:
+        if len(merged) >= max_total:
+            break
+        batch = await _fetch_arxiv(intent, max_results=per_intent)
+        if not batch:
+            batch = await _fetch_semantic_scholar(intent, max_results=per_intent)
+        for paper in batch:
+            pid = str(paper.get("id") or "")
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            merged.append(paper)
+            if len(merged) >= max_total:
+                break
+    return merged
 
 
 async def _upsert_papers(session_factory: async_sessionmaker, papers: list[dict[str, Any]]) -> None:
@@ -230,15 +336,17 @@ def _parse_pdf_bytes(content: bytes) -> dict[str, Any]:
         texts: list[str] = []
         for i in range(min(page_count, 50)):
             page = doc.load_page(i)
-            raw = page.get_text("text") or ""
-            # Quick encoding normalization for mojibake-like apostrophes/dashes in extracted text.
+            raw = page.get_text("text", sort=True) or ""
             if "â" in raw:
                 try:
                     raw = raw.encode("latin-1").decode("utf-8", errors="replace")
                 except UnicodeError:
                     pass
-            texts.append(raw)
-        body = "\n\n".join(texts).replace("\x00", "").strip()[:200_000]
+            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            # Drop isolated page numbers / very short header/footer noise.
+            cleaned = [ln for ln in lines if not (len(ln) <= 3 and ln.isdigit())]
+            texts.append("\n".join(cleaned))
+        body = re.sub(r"\n{3,}", "\n\n", "\n\n".join(texts)).replace("\x00", "").strip()[:200_000]
         sections_json = {
             "page_count": page_count,
             "body": body,
@@ -272,13 +380,14 @@ async def _filter_papers_by_question_relevance(
     session_id: str,
     emitter: EventEmitter,
     threshold: float = 0.4,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Drop papers whose title+abstract embedding similarity to the question is below *threshold*."""
     if not papers:
-        return []
+        return [], []
     api_key = (settings.embed_api_secret or "").strip()
     if not api_key:
-        return papers
+        tagged = [dict(p, _relevance_score=None) for p in papers]
+        return tagged, []
 
     texts = [question[:8000]] + [
         f"{p.get('title') or ''}\n{p.get('abstract') or ''}"[:8000] for p in papers
@@ -294,19 +403,29 @@ async def _filter_papers_by_question_relevance(
             timeout=90.0,
         )
     except Exception:
-        return papers
+        tagged = [dict(p, _relevance_score=None) for p in papers]
+        return tagged, []
     if not vectors or len(vectors) != len(texts):
-        return papers
+        tagged = [dict(p, _relevance_score=None) for p in papers]
+        return tagged, []
 
     qvec = vectors[0]
     kept: list[dict[str, Any]] = []
     dropped: list[dict[str, Any]] = []
+    dropped_meta: list[dict[str, Any]] = []
+    kept_meta: list[dict[str, Any]] = []
     for paper, pvec in zip(papers, vectors[1:], strict=True):
         sim = _cosine_question_paper(qvec, pvec)
+        tagged = dict(paper)
+        tagged["_relevance_score"] = round(sim, 4)
         if sim >= threshold:
-            kept.append(paper)
+            kept.append(tagged)
+            kept_meta.append(
+                {"paper_id": paper.get("id"), "title": paper.get("title"), "similarity": round(sim, 4)}
+            )
         else:
-            dropped.append(
+            dropped.append(tagged)
+            dropped_meta.append(
                 {"paper_id": paper.get("id"), "title": paper.get("title"), "similarity": round(sim, 4)}
             )
 
@@ -318,10 +437,11 @@ async def _filter_papers_by_question_relevance(
             "threshold": threshold,
             "kept_count": len(kept),
             "dropped_count": len(dropped),
-            "dropped": dropped[:24],
+            "kept": kept_meta[:24],
+            "dropped": dropped_meta[:24],
         },
     )
-    return kept
+    return kept, dropped
 
 
 async def _enrich_papers_with_pdf(
@@ -331,14 +451,17 @@ async def _enrich_papers_with_pdf(
     emitter: EventEmitter,
     session_factory: async_sessionmaker,
 ) -> None:
-    async with httpx.AsyncClient(timeout=90.0) as client:
-        for paper in papers:
-            pdf_url = paper.get("pdf_url")
-            if not pdf_url:
-                continue
-            sections = paper.get("sections_json")
-            if isinstance(sections, dict) and sections.get("body"):
-                continue
+    parallelism = max(1, settings.literature_pdf_parallelism)
+    sem = asyncio.Semaphore(parallelism)
+
+    async def _parse_one(paper: dict[str, Any], client: httpx.AsyncClient) -> None:
+        pdf_url = paper.get("pdf_url")
+        if not pdf_url:
+            return
+        sections = paper.get("sections_json")
+        if isinstance(sections, dict) and sections.get("body"):
+            return
+        async with sem:
             try:
                 content = await _download_pdf_bytes(client, pdf_url)
                 parsed = await asyncio.to_thread(_parse_pdf_bytes, content)
@@ -372,6 +495,9 @@ async def _enrich_papers_with_pdf(
                     payload={"arxiv_id": paper.get("id"), "error": str(exc), "skipped": True},
                 )
 
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        await asyncio.gather(*(_parse_one(p, client) for p in papers))
+
 
 async def build_prior(
     parsed: ParsedQuestion,
@@ -382,68 +508,173 @@ async def build_prior(
     paper_ttl_days: int,
     llm: LLMClient,
 ) -> Prior:
+    del paper_ttl_days  # legacy param; query cache TTL is settings-driven
+    question = parsed.text
     await emitter.emit(
         session_id=session_id,
         event_type=EventType.LIT_FETCH_STARTED,
         step="literature.fetch",
-        payload={"query": parsed.text},
+        payload={"query": question},
     )
 
-    cached = await _load_cached_papers(session_factory, ttl_days=paper_ttl_days)
-    papers = list(cached)
-    if papers:
-        for paper in papers:
+    expansion = await expand_query(llm, session_id, question)
+    search_intents = build_search_intents(question, expansion)
+
+    cached_ids, cache_match = await lookup_cached_paper_ids(session_factory, question)
+    papers_fetched: list[dict[str, Any]] = []
+    did_live_fetch = False
+
+    if cached_ids:
+        papers_fetched = await load_papers_by_ids(session_factory, cached_ids)
+        for paper in papers_fetched:
             await emitter.emit(
                 session_id=session_id,
                 event_type=EventType.LIT_PAPER_CACHED,
                 step="literature.cache_hit",
-                payload={"arxiv_id": paper["id"], "title": paper["title"]},
-            )
-    else:
-        papers = await _fetch_arxiv(parsed.text)
-        if not papers:
-            papers = await _fetch_semantic_scholar(parsed.text)
-        await _upsert_papers(session_factory, papers)
-        for paper in papers:
-            await emitter.emit(
-                session_id=session_id,
-                event_type=EventType.LIT_PAPER_FOUND,
-                step="literature.fetch",
-                payload={"arxiv_id": paper["id"], "title": paper["title"]},
-            )
-            await emitter.emit(
-                session_id=session_id,
-                event_type=EventType.LIT_PAPER_INDEXED,
-                step="literature.index",
-                payload={"arxiv_id": paper["id"], "source": "metadata"},
+                payload={
+                    "arxiv_id": paper["id"],
+                    "title": paper.get("title"),
+                    "cache_match": cache_match,
+                    "query_scoped": True,
+                },
             )
 
-    await _enrich_papers_with_pdf(papers, session_id=session_id, emitter=emitter, session_factory=session_factory)
+    max_rounds = settings.literature_expansion_rounds + 1
+    papers_kept: list[dict[str, Any]] = []
+    papers_dropped: list[dict[str, Any]] = []
+    retrieval_chunks: list[dict[str, Any]] = []
+    evidence_coverage = 0.0
+    gate_passed = False
+    gate_reasons: list[str] = []
+    expansion_round = 0
+    relevance_threshold_used = settings.literature_relevance_threshold
 
-    papers = await _filter_papers_by_question_relevance(
-        parsed.text,
-        papers,
-        session_id=session_id,
-        emitter=emitter,
-        threshold=0.4,
+    for expansion_round in range(max_rounds):
+        if expansion_round > 0 or not papers_fetched:
+            multiplier = expansion_round + 1
+            per_intent = min(settings.literature_fetch_per_intent * multiplier, 25)
+            max_candidates = min(settings.literature_max_candidates * multiplier, 50)
+            papers_fetched = await _fetch_papers_multi_intent(
+                search_intents,
+                per_intent=per_intent,
+                max_total=max_candidates,
+            )
+            did_live_fetch = True
+            cache_match = None
+            await _upsert_papers(session_factory, papers_fetched)
+            for paper in papers_fetched:
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.LIT_PAPER_FOUND,
+                    step="literature.fetch",
+                    payload={
+                        "arxiv_id": paper["id"],
+                        "title": paper.get("title"),
+                        "expansion_round": expansion_round,
+                    },
+                )
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.LIT_PAPER_INDEXED,
+                    step="literature.index",
+                    payload={"arxiv_id": paper["id"], "source": "metadata"},
+                )
+
+        await _enrich_papers_with_pdf(
+            papers_fetched,
+            session_id=session_id,
+            emitter=emitter,
+            session_factory=session_factory,
+        )
+        papers_fetched = await _expand_papers_via_citations(session_factory, papers_fetched)
+
+        papers_kept, papers_dropped, relevance_threshold_used = await _filter_with_adaptive_threshold(
+            question,
+            papers_fetched,
+            session_id=session_id,
+            emitter=emitter,
+        )
+
+        retrieval_chunks = await run_hybrid_retrieval(
+            session_id=session_id,
+            question=question,
+            papers=papers_kept,
+            llm=llm,
+            emitter=emitter,
+            session_factory=session_factory,
+        )
+        kept_ids = {str(p.get("id")) for p in papers_kept if p.get("id")}
+        retrieval_chunks = [c for c in retrieval_chunks if str(c.get("paper_id")) in kept_ids]
+
+        chunk_texts = [str(c.get("text") or "") for c in retrieval_chunks if c.get("text")]
+        evidence_coverage = await compute_evidence_coverage(question, chunk_texts)
+        gate_passed, gate_reasons = gate_corpus_quality(
+            papers_kept=papers_kept,
+            chunk_count=len(retrieval_chunks),
+            evidence_coverage=evidence_coverage,
+        )
+        if gate_passed:
+            break
+
+    diagnostics = build_retrieval_diagnostics(
+        question=question,
+        search_intents=search_intents,
+        cache_match=cache_match,
+        papers_fetched=papers_fetched,
+        papers_kept=papers_kept,
+        papers_dropped=papers_dropped,
+        chunk_count=len(retrieval_chunks),
+        evidence_coverage=evidence_coverage,
+        expansion_round=expansion_round,
+        gate_reasons=gate_reasons,
     )
+    diagnostics["relevance_threshold_used"] = relevance_threshold_used
+    diagnostics["retrieved_chunks"] = [
+        {
+            "paper_id": c.get("paper_id"),
+            "chunk_index": c.get("chunk_index"),
+            "text_preview": (c.get("text") or "")[:240],
+        }
+        for c in retrieval_chunks[:30]
+    ]
 
-    retrieval_chunks = await run_hybrid_retrieval(
-        session_id=session_id,
-        question=parsed.text,
-        papers=papers,
-        llm=llm,
-        emitter=emitter,
-        session_factory=session_factory,
-    )
-    kept_ids = {str(p.get("id")) for p in papers if p.get("id")}
-    retrieval_chunks = [c for c in retrieval_chunks if str(c.get("paper_id")) in kept_ids]
+    if did_live_fetch and papers_fetched:
+        await store_query_cache(
+            session_factory,
+            question,
+            [str(p["id"]) for p in papers_fetched if p.get("id")],
+        )
 
-    return await synthesize_prior_from_papers(
+    if not gate_passed:
+        prior = insufficient_prior(question, diagnostics)
+        await emitter.emit(
+            session_id=session_id,
+            event_type=EventType.LIT_PRIOR_BUILT,
+            step="literature.prior_build",
+            payload={"prior": prior.to_dict(), "skipped_llm": True},
+        )
+        return prior
+
+    prior = await synthesize_prior_from_papers(
         llm=llm,
         session_id=session_id,
-        question=parsed.text,
-        papers=papers,
+        question=question,
+        papers=papers_kept,
         emitter=emitter,
         retrieval_chunks=retrieval_chunks,
     )
+    prior.evidence_coverage = evidence_coverage
+    prior.retrieval_diagnostics = diagnostics
+    prior.evidence_status = classify_evidence_status(
+        prior,
+        evidence_coverage=evidence_coverage,
+        gate_passed=gate_passed,
+    )
+
+    await emitter.emit(
+        session_id=session_id,
+        event_type=EventType.LIT_PRIOR_BUILT,
+        step="literature.prior_build",
+        payload={"prior": prior.to_dict()},
+    )
+    return prior

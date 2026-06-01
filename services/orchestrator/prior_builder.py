@@ -31,6 +31,7 @@ def _prior_fallback(question: str, papers: list[dict[str, Any]]) -> Prior:
             for p in papers
             if p.get("id")
         ],
+        evidence_status="INSUFFICIENT_EVIDENCE",
     )
 
 
