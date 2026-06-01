@@ -1,16 +1,18 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+// The API base is configurable via VITE_API_BASE (defaults to the local stack).
+// We also proxy /api -> backend in dev so EventSource/fetch can use same-origin paths.
 export default defineConfig({
   plugins: [react()],
   server: {
-    port: 3000,
+    port: 5173,
     proxy: {
-      "/research": "http://127.0.0.1:8000",
-      "/stream": "http://127.0.0.1:8000",
-      "/sessions": "http://127.0.0.1:8000",
-      "/health": "http://127.0.0.1:8000",
-      "/tools": "http://127.0.0.1:8000",
+      "/api": {
+        target: process.env.VITE_API_TARGET || "http://localhost:8000",
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/api/, ""),
+      },
     },
   },
 });

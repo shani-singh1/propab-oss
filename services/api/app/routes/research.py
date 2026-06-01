@@ -206,6 +206,28 @@ async def create_campaign(
     )
 
 
+@router.get("/campaigns")
+async def list_campaigns(
+    session_factory: async_sessionmaker = Depends(get_session_factory),
+) -> dict:
+    """List all campaigns (newest first) with the headline fields the dashboard needs."""
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                text(
+                    """
+                    SELECT id, question, status, baseline_metric, best_metric, improvement_pct,
+                           total_hypotheses, total_confirmed, compute_budget_seconds,
+                           compute_seconds_used, started_at, completed_at
+                    FROM research_campaigns
+                    ORDER BY started_at DESC NULLS LAST
+                    """
+                )
+            )
+        ).mappings().all()
+    return {"campaigns": [dict(r) for r in rows]}
+
+
 @router.get("/campaigns/{campaign_id}")
 async def get_campaign_state(
     campaign_id: str,
