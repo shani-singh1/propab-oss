@@ -9,6 +9,8 @@ import math
 import re
 from typing import Any
 
+import re
+
 from propab.config import settings
 from propab.embeddings import embed_texts
 from propab.llm import LLMClient
@@ -162,6 +164,88 @@ Return JSON array ONLY, same length and order as input, shape:
 
 def composite_score(novelty: float, testability: float, impact: float, scope_fit: float) -> float:
     return round(0.30 * novelty + 0.30 * testability + 0.25 * impact + 0.15 * scope_fit, 4)
+
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _token_set(text: str) -> set[str]:
+    return set(_TOKEN_RE.findall((text or "").lower()))
+
+
+def strip_question_suffix(text: str) -> str:
+    """Remove trailing (Question: ...) before relevance scoring."""
+    return re.split(r"\s*\(Question:", (text or "").strip(), maxsplit=1)[0].strip()
+
+
+def compute_question_relevance_score_lexical(
+    question: str,
+    prior_snippets: list[str],
+    hypothesis_text: str,
+) -> float:
+    """
+    Lexical question↔hypothesis relevance (fixes.md P0.3).
+
+    Domain-agnostic: compares hypothesis tokens to question + prior fact tokens.
+    """
+    hyp_toks = _token_set(strip_question_suffix(hypothesis_text))
+    if not hyp_toks:
+        return 0.0
+    corpus = " ".join([question] + list(prior_snippets or []))
+    corpus_toks = _token_set(corpus)
+    if not corpus_toks:
+        return 0.0
+    overlap = len(hyp_toks & corpus_toks) / float(len(hyp_toks))
+    # Reward hypotheses that share rare-ish tokens with the question (not just stopwords).
+    q_overlap = len(hyp_toks & _token_set(question)) / float(max(1, len(_token_set(question))))
+    return round(min(1.0, max(0.0, 0.65 * overlap + 0.35 * q_overlap)), 4)
+
+
+async def compute_question_relevance_scores(
+    question: str,
+    prior: Prior,
+    hypothesis_texts: list[str],
+) -> list[float]:
+    """
+    Embedding-based relevance when API key available; lexical fallback otherwise.
+    """
+    if not hypothesis_texts:
+        return []
+    prior_snippets = _fact_texts_for_embedding(prior)
+    if not settings.embed_api_secret.strip():
+        return [
+            compute_question_relevance_score_lexical(question, prior_snippets, t)
+            for t in hypothesis_texts
+        ]
+
+    texts = [question[:8000]] + [t[:6000] for t in hypothesis_texts]
+    try:
+        vecs = await embed_texts(
+            texts=texts,
+            api_key=settings.embed_api_secret,
+            model=settings.embed_model,
+            provider=settings.embed_provider,
+        )
+    except Exception:
+        return [
+            compute_question_relevance_score_lexical(question, prior_snippets, t)
+            for t in hypothesis_texts
+        ]
+
+    if len(vecs) != len(texts):
+        return [
+            compute_question_relevance_score_lexical(question, prior_snippets, t)
+            for t in hypothesis_texts
+        ]
+
+    qvec = vecs[0]
+    out: list[float] = []
+    for hv, hyp_text in zip(vecs[1:], hypothesis_texts, strict=True):
+        sim = _cosine_similarity(qvec, hv)
+        sim = max(0.0, min(1.0, (sim + 1.0) / 2.0))
+        lex = compute_question_relevance_score_lexical(question, prior_snippets, hyp_text)
+        out.append(round(max(0.0, min(1.0, 0.7 * sim + 0.3 * lex)), 4))
+    return out
 
 
 async def apply_architecture_ranking(

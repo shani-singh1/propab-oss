@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import json
 
+import re
+
 from propab.config import settings
 from propab.events import EventEmitter
 from propab.llm import LLMClient
 from propab.types import EventType
-from services.orchestrator.hypothesis_ranking import apply_architecture_ranking
+from services.orchestrator.campaign_diagnostics import infer_hypothesis_theme
+from services.orchestrator.hypothesis_ranking import (
+    apply_architecture_ranking,
+    compute_question_relevance_scores,
+    strip_question_suffix,
+)
 from services.orchestrator.intake import ParsedQuestion
 from services.orchestrator.schemas import Prior, RankedHypothesis
 
@@ -70,7 +77,8 @@ def _ensure_null_hypothesis(hypotheses: list[RankedHypothesis], question: str) -
     # Force one null hypothesis for scientific falsification.
     target = hypotheses[-1]
     target.text = (
-        f"Null hypothesis: The intervention has no statistically significant effect for this question beyond noise-level differences. "
+        f"Null hypothesis: No falsifiable pattern in the research question holds beyond "
+        f"what random variation would produce under the same verification procedure. "
         f"(Question: {question})"
     )
     if not (target.test_methodology or "").strip():
@@ -118,20 +126,20 @@ Return JSON array only. Each item: {{id, text, test_methodology, gap_reference, 
 """
 
 
-def _is_generic_fallback(text: str) -> bool:
-    """Returns True if hypothesis text looks like a generic/fallback placeholder."""
-    import re
-    stripped = (text or "").strip()
-    if re.match(r"^Hypothesis\s+\d+\s*:", stripped):
+def _is_ml_template_hypothesis(text: str) -> bool:
+    """Generic ML/intervention placeholders that must never enter the tree (fixes.md P0.3)."""
+    core = strip_question_suffix(text).lower()
+    if re.match(r"^hypothesis\s+\d+\s*:", core):
         return True
-    generic_phrases = (
-        "targeted intervention measurably",
-        "a targeted intervention",
-        "the intervention has no statistically significant effect beyond noise",
-        "measured improvement on the primary metric",
+    markers = (
+        "targeted intervention",
+        "the intervention has no statistically significant effect",
+        "baseline metric",
+        "effect size",
+        "noise robustness",
+        "measurably improves the primary metric",
     )
-    lower = stripped.lower()
-    return any(p.lower() in lower for p in generic_phrases)
+    return any(m in core for m in markers)
 
 
 async def generate_ranked_hypotheses(
@@ -153,11 +161,18 @@ async def generate_ranked_hypotheses(
         generated = []
 
     if isinstance(generated, list):
+        themed = []
+        for item in generated:
+            if isinstance(item, dict):
+                text = str(item.get("text") or "")
+                themed.append({**item, "theme": infer_hypothesis_theme(text)})
+            else:
+                themed.append(item)
         await emitter.emit(
             session_id=session_id,
             event_type=EventType.HYPO_GENERATED,
             step="hypothesis.generate",
-            payload={"hypotheses": generated},
+            payload={"hypotheses": themed},
         )
     else:
         await emitter.emit(
@@ -176,8 +191,13 @@ async def generate_ranked_hypotheses(
         raw_text = str(entry.get("text", ""))
 
         # Reject generic fallback phrasing; use domain-specific fallback instead
-        if not raw_text or _is_generic_fallback(raw_text):
+        if not raw_text or _is_ml_template_hypothesis(raw_text):
             raw_text = _fallback_hypothesis_text(parsed.text, rank)
+        if _is_ml_template_hypothesis(raw_text):
+            raw_text = (
+                f"Hypothesis {rank}: A concrete, question-scoped claim about "
+                f"{parsed.text[:120]}..."
+            )
 
         methodology = str(entry.get("test_methodology", ""))
         if not methodology.strip():
@@ -213,4 +233,31 @@ async def generate_ranked_hypotheses(
             session_id=session_id,
         )
     hypotheses = _ensure_null_hypothesis(hypotheses, parsed.text)
+
+    # Question relevance gate (fixes.md P0.3) — reject off-topic / generic templates.
+    threshold = float(getattr(settings, "hypothesis_relevance_threshold", 0.35))
+    texts = [strip_question_suffix(h.text) for h in hypotheses]
+    relevance_scores = await compute_question_relevance_scores(parsed.text, prior, texts)
+    kept: list[RankedHypothesis] = []
+    rejected: list[dict[str, str | float]] = []
+    for h, rel, core_text in zip(hypotheses, relevance_scores, texts, strict=False):
+        if _is_ml_template_hypothesis(h.text):
+            rejected.append({"id": h.id, "text": core_text[:200], "question_relevance_score": rel, "reason": "ml_template"})
+            continue
+        h.scores = dict(h.scores or {})
+        h.scores["question_relevance"] = rel
+        if rel >= threshold:
+            kept.append(h)
+        else:
+            rejected.append({"id": h.id, "text": core_text[:200], "question_relevance_score": rel, "reason": "below_threshold"})
+    if rejected:
+        await emitter.emit(
+            session_id=session_id,
+            event_type=EventType.HYPO_REJECTED,
+            step="hypothesis.relevance_gate",
+            payload={"threshold": threshold, "rejected_count": len(rejected), "rejected": rejected[:12]},
+        )
+    if kept:
+        hypotheses = kept
+
     return hypotheses

@@ -12,6 +12,7 @@ from uuid import uuid4
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from propab.claim_types import classify_claim_type
 from propab.config import settings
 from propab.tools.types import ToolError, ToolResult
 from propab.paper_gate import SUBSTANTIVE_TOOL_NAMES
@@ -101,6 +102,8 @@ def _is_sandbox_wall_timeout(sandbox_out: dict[str, Any]) -> bool:
     msg = str(sandbox_out.get("message", "") or "").lower()
     stderr = str(sandbox_out.get("stderr", "") or "").lower()
     blob = f"{msg} {stderr}"
+    if "unexpected keyword argument 'timeout'" in blob:
+        return False
     if "timeout" in blob or "timed out" in blob or "deadline exceeded" in blob:
         return True
     return False
@@ -1496,6 +1499,9 @@ async def run_sub_agent_async(payload: dict) -> dict:
             min_metric_steps_for_confirm=int(getattr(settings, "min_metric_steps_for_confirm", 2)),
         )
         evidence_obj["verdict_reason"] = verdict_reason
+        claim_type = classify_claim_type(evidence_obj, verdict, hypothesis_text=str(hyp_text or ""))
+        if claim_type:
+            evidence_obj["claim_type"] = claim_type
         # Deterministic verification carries its own (high) confidence; it has no
         # metric steps, so the statistical confidence path would wrongly report 0.0.
         if int(evidence_obj.get("verified_true_steps") or 0) > 0 and verdict == "confirmed":

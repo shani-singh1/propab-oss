@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     literature_min_evidence_coverage: float = 0.35
     literature_expansion_rounds: int = 2
     literature_pdf_parallelism: int = 4
+    literature_skip_pdf: bool = False
+    literature_arxiv_min_interval_sec: float = 6.0
+    literature_arxiv_max_retries: int = 5
     # Think-act agent budgets
     agent_max_steps: int = 12
     agent_min_steps: int = 4
@@ -104,6 +107,12 @@ class Settings(BaseSettings):
     campaign_min_replications: int = 3              # min confirmed replications
     campaign_expand_on_confirmed: bool = True       # expand tree on confirmed findings
     campaign_expand_on_refuted: bool = True         # generate alternatives on refuted
+    campaign_expand_on_inconclusive: bool = True    # refine/decompose inconclusive (fixes.md P1.2)
+    campaign_expansion_merit_novelty_min: float = 0.25
+    campaign_expansion_merit_info_gain_min: float = 0.30
+    campaign_theme_saturation_penalty: float = 0.15
+    campaign_max_inconclusive_expansions: int = 2
+    hypothesis_relevance_threshold: float = 0.35    # question↔hypothesis gate (fixes.md P0.3)
     # Max seconds to wait for in-flight (non-blocking) tree expansions to refill the
     # frontier before falling back to a blocking seed regeneration.
     campaign_expansion_drain_sec: int = 90
@@ -195,6 +204,7 @@ def _apply_profile(s: Settings) -> None:
             "campaign_checkpoint_every": 60,
             "campaign_expand_on_confirmed": False,
             "campaign_expand_on_refuted": False,
+            "campaign_expand_on_inconclusive": False,
             "campaign_frontier_evict_idle_sec": 45,
             "campaign_batch_max_wait_sec": 300,
             "campaign_prior_timeout_sec": 45,
@@ -243,6 +253,11 @@ def _apply_profile(s: Settings) -> None:
             "campaign_baseline_agent_max_seconds": 420,
             "campaign_baseline_agent_max_tool_calls": 14,
             "agent_max_tool_calls": 20,
+            "campaign_prior_timeout_sec": 900,
+            "literature_skip_pdf": True,
+            "literature_max_candidates": 24,
+            "literature_fetch_per_intent": 6,
+            "literature_expansion_rounds": 1,
         },
     }
     selected = profiles.get(profile, profiles["dev"])

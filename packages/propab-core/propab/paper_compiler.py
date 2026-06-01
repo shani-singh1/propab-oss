@@ -162,6 +162,9 @@ def parse_evidence(evidence_summary: str | None) -> dict[str, Any]:
         "confidence_interval": None,
         "n_metric_steps": None,
         "metric_value": None,
+        "verified_true_steps": None,
+        "verified_false_steps": None,
+        "claim_type": None,
     }
     raw = (evidence_summary or "").strip()
     if not raw:
@@ -173,6 +176,11 @@ def parse_evidence(evidence_summary: str | None) -> dict[str, Any]:
             for k in ("p_value", "effect_size", "n_metric_steps", "metric_value"):
                 if isinstance(ev.get(k), (int, float)):
                     out[k] = ev[k]
+            for k in ("verified_true_steps", "verified_false_steps"):
+                if isinstance(ev.get(k), int):
+                    out[k] = ev[k]
+            if ev.get("claim_type"):
+                out["claim_type"] = str(ev["claim_type"])
             ci = ev.get("confidence_interval")
             if isinstance(ci, list) and len(ci) >= 2 and all(isinstance(x, (int, float)) for x in ci[:2]):
                 out["confidence_interval"] = [float(ci[0]), float(ci[1])]
@@ -216,7 +224,10 @@ def _effective_verdict(row: Any) -> str:
     raw = str(row.get("verdict") or "").strip().lower()
     ev = parse_evidence(str(row.get("evidence_summary") or ""))
     n_metric = ev.get("n_metric_steps")
+    vt = ev.get("verified_true_steps")
     if raw == "confirmed" and not n_metric:
+        if isinstance(vt, int) and vt > 0:
+            return "confirmed"
         return "inconclusive"
     if raw in ("confirmed", "refuted", "inconclusive"):
         return raw

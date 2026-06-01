@@ -47,7 +47,7 @@ This hypothesis was {verdict} with confidence {confidence:.2f}.
 Hypothesis: {parent_text}
 
 Finding: {evidence_summary}
-
+{mechanism_block}
 Depth in tree: {depth} (root = 0). Hypotheses at depth >= 8 will not be expanded further.
 
 Generate 3-5 child hypotheses that:
@@ -85,6 +85,16 @@ class HypothesisNode:
     generation: int = 0             # which campaign round spawned this
     evidence_summary: str | None = None
     expansion_type: str | None = None  # boundary | mechanistic | generalization | alternative | retest
+    # fixes.md P0.1 / P4.1 diagnostics
+    claim_type: str | None = None
+    verification_method: str | None = None
+    theme_id: str | None = None
+    question_relevance_score: float | None = None
+    frontier_score: float | None = None
+    expansion_reason: str | None = None
+    mechanism: str | None = None
+    finding: dict[str, Any] | None = None
+    inconclusive_expansions: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -98,6 +108,15 @@ class HypothesisNode:
             "generation": self.generation,
             "evidence_summary": self.evidence_summary,
             "expansion_type": self.expansion_type,
+            "claim_type": self.claim_type,
+            "verification_method": self.verification_method,
+            "theme_id": self.theme_id,
+            "question_relevance_score": self.question_relevance_score,
+            "frontier_score": self.frontier_score,
+            "expansion_reason": self.expansion_reason,
+            "mechanism": self.mechanism,
+            "finding": self.finding,
+            "inconclusive_expansions": self.inconclusive_expansions,
         }
 
     @classmethod
@@ -113,7 +132,25 @@ class HypothesisNode:
             generation=data.get("generation", 0),
             evidence_summary=data.get("evidence_summary"),
             expansion_type=data.get("expansion_type"),
+            claim_type=data.get("claim_type"),
+            verification_method=data.get("verification_method"),
+            theme_id=data.get("theme_id"),
+            question_relevance_score=data.get("question_relevance_score"),
+            frontier_score=data.get("frontier_score"),
+            expansion_reason=data.get("expansion_reason"),
+            mechanism=data.get("mechanism"),
+            finding=data.get("finding"),
+            inconclusive_expansions=int(data.get("inconclusive_expansions") or 0),
         )
+
+
+@dataclass
+class FrontierScoringContext:
+    """Campaign context for information-gain frontier scoring (fixes.md P1.1)."""
+
+    question: str = ""
+    prior_snippets: list[str] = field(default_factory=list)
+    theme_saturation_penalty: float = 0.15
 
 
 @dataclass
@@ -132,8 +169,30 @@ class HypothesisTree:
     confirmed: list[str] = field(default_factory=list)    # confirmed node IDs
     exhausted: list[str] = field(default_factory=list)    # done, no more children
     _generation: int = field(default=0, repr=False)        # current campaign generation
+    _scoring_context: FrontierScoringContext = field(default_factory=FrontierScoringContext, repr=False)
 
     # ── Mutation ─────────────────────────────────────────────────────────────
+
+    def set_scoring_context(
+        self,
+        question: str,
+        prior_snippets: list[str] | None = None,
+        *,
+        theme_saturation_penalty: float = 0.15,
+    ) -> None:
+        self._scoring_context = FrontierScoringContext(
+            question=question,
+            prior_snippets=list(prior_snippets or []),
+            theme_saturation_penalty=theme_saturation_penalty,
+        )
+
+    def theme_counts(self) -> dict[str, int]:
+        """Theme histogram for saturation control (fixes.md P1.4)."""
+        counts: dict[str, int] = {}
+        for node in self.nodes.values():
+            tid = node.theme_id or "general"
+            counts[tid] = counts.get(tid, 0) + 1
+        return counts
 
     def add_seeds(self, hypotheses: list[dict[str, Any]], generation: int = 0) -> list[HypothesisNode]:
         """Add seed (root) hypotheses and push them to the frontier.
@@ -152,6 +211,8 @@ class HypothesisTree:
                 depth=0,
                 generation=generation,
                 expansion_type=None,
+                theme_id=h.get("theme_id"),
+                question_relevance_score=h.get("question_relevance_score"),
             )
             self.nodes[node.id] = node
             if node.id not in self.frontier:
@@ -238,11 +299,15 @@ class HypothesisTree:
             return None
 
         verdict_key = node.verdict if node.verdict in _EXPANSION_INSTRUCTIONS else EXPANSION_INCONCLUSIVE
+        mechanism_block = ""
+        if node.mechanism:
+            mechanism_block = f"\nExtracted mechanism: {node.mechanism}\n"
         return _EXPAND_PROMPT_TEMPLATE.format(
             verdict=node.verdict,
             confidence=node.confidence,
             parent_text=node.text,
             evidence_summary=(node.evidence_summary or "No evidence summary available."),
+            mechanism_block=mechanism_block,
             depth=node.depth,
             expansion_instructions=_EXPANSION_INSTRUCTIONS[verdict_key],
         )
@@ -283,6 +348,8 @@ class HypothesisTree:
                 verdict="pending",
                 generation=generation,
                 expansion_type=item.get("expansion_type"),
+                theme_id=item.get("theme_id"),
+                question_relevance_score=item.get("question_relevance_score"),
             )
             children.append(child)
         return children
@@ -304,7 +371,7 @@ class HypothesisTree:
             return []
 
         if strategy == "highest_expected_value":
-            candidates.sort(key=self._expected_value_score, reverse=True)
+            candidates.sort(key=self._information_gain_score, reverse=True)
         return candidates[:size]
 
     def next_dispatch_candidate(
@@ -330,14 +397,71 @@ class HypothesisTree:
         if not candidates:
             return None
         if strategy == "highest_expected_value":
-            candidates.sort(key=self._expected_value_score, reverse=True)
+            candidates.sort(key=self._information_gain_score, reverse=True)
         return candidates[0]
 
+    def _information_gain_score(self, node: HypothesisNode) -> float:
+        """
+        Expected information gain for frontier ranking (fixes.md P1.1).
+
+        Components: question relevance, novelty (inverse theme saturation),
+        evidence uncertainty from parent verdict, theme coverage bonus.
+        """
+        counts = self.theme_counts()
+        theme_id = node.theme_id or "general"
+        theme_count = counts.get(theme_id, 1)
+        max_count = max(counts.values()) if counts else 1
+        saturation = theme_count / max(max_count, 1)
+        penalty = self._scoring_context.theme_saturation_penalty
+
+        relevance = float(node.question_relevance_score if node.question_relevance_score is not None else 0.5)
+        novelty = max(0.05, 1.0 - saturation * penalty * 3.0)
+
+        parent = self.nodes.get(node.parent_id) if node.parent_id else None
+        if parent is None:
+            uncertainty = 0.55
+        elif parent.verdict == "inconclusive":
+            uncertainty = 0.85
+        elif parent.verdict == "refuted":
+            uncertainty = 0.70
+        elif parent.verdict == "confirmed":
+            uncertainty = 0.45
+        else:
+            uncertainty = 0.60
+
+        coverage_bonus = max(0.0, 1.0 - min(1.0, theme_count / 12.0))
+        depth_bonus = 1.0 / (1.0 + node.depth * 0.25)
+
+        score = (
+            0.30 * relevance
+            + 0.25 * novelty
+            + 0.25 * uncertainty
+            + 0.10 * coverage_bonus
+            + 0.10 * depth_bonus
+        )
+        node.frontier_score = round(score, 4)
+        return score
+
     def _expected_value_score(self, node: HypothesisNode) -> float:
-        depth_score = 1.0 / (1.0 + node.depth * 0.3)
-        lineage_score = 1.5 if (node.parent_id and node.parent_id in self.confirmed) else 1.0
-        specificity_score = min(1.0, len(node.text) / 200.0)
-        return depth_score * lineage_score * 0.5 + specificity_score * 0.5
+        """Legacy alias — delegates to information-gain scoring."""
+        return self._information_gain_score(node)
+
+    def expansion_passes_merit_gate(
+        self,
+        node_id: str,
+        *,
+        novelty_min: float = 0.25,
+        info_gain_min: float = 0.30,
+    ) -> tuple[bool, str]:
+        """Expand only when novelty or information gain exceeds threshold (fixes.md P1.3)."""
+        node = self.nodes.get(node_id)
+        if node is None:
+            return False, "missing_node"
+        relevance = float(node.question_relevance_score if node.question_relevance_score is not None else 0.0)
+        info_gain = self._information_gain_score(node)
+        if relevance >= novelty_min or info_gain >= info_gain_min:
+            return True, f"relevance={relevance:.3f},info_gain={info_gain:.3f}"
+        return False, f"merit_gate_failed:relevance={relevance:.3f},info_gain={info_gain:.3f}"
 
     # ── Serialization ────────────────────────────────────────────────────────
 

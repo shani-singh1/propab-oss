@@ -44,13 +44,25 @@ from propab.campaign import (
     STATUS_BUDGET_EXHAUSTED,
 )
 from propab.campaign_snapshot import write_campaign_snapshot
+from propab.claim_types import build_finding_object, classify_claim_type, extract_mechanism
 from propab.config import settings
 from propab.db import create_redis
 from propab.events import EventEmitter
 from propab.hypothesis_tree import HypothesisNode, HypothesisTree
 from propab.llm import LLMClient
 from propab.types import EventType
+from services.orchestrator.campaign_diagnostics import (
+    classify_verification_method,
+    frontier_snapshot,
+    infer_hypothesis_theme,
+    parse_evidence_obj,
+)
 from services.orchestrator.hypotheses import generate_ranked_hypotheses
+from services.orchestrator.hypothesis_ranking import (
+    compute_question_relevance_score_lexical,
+    strip_question_suffix,
+)
+from services.orchestrator.hypotheses import _is_ml_template_hypothesis
 from services.orchestrator.intake import parse_question
 from services.orchestrator.literature import build_prior
 from services.orchestrator.paper import _session_experiment_step_count, write_paper_minimal
@@ -79,6 +91,53 @@ def _campaign_ledger_from_tree(tree: HypothesisTree) -> dict[str, Any]:
     }
 
 
+def _prior_snippets(prior_dict: dict[str, Any]) -> list[str]:
+    snippets: list[str] = []
+    for f in prior_dict.get("established_facts") or []:
+        if isinstance(f, dict):
+            t = str(f.get("text") or "").strip()
+            if t:
+                snippets.append(t[:600])
+    return snippets
+
+
+def _apply_result_diagnostics(
+    tree: HypothesisTree,
+    node_id: str,
+    verdict: str,
+    confidence: float,
+    evidence: str,
+) -> None:
+    """Persist claim typing and structured findings on the tree node (fixes.md P0.1/P2/P4)."""
+    node = tree.nodes.get(node_id)
+    if node is None:
+        return
+    evidence_obj = parse_evidence_obj(evidence)
+    claim_type = classify_claim_type(evidence_obj, verdict, hypothesis_text=node.text)
+    verification_method = classify_verification_method(evidence)
+    theme = infer_hypothesis_theme(node.text)
+    mechanism = (
+        extract_mechanism(evidence_obj, claim_type=claim_type, hypothesis_text=node.text)
+        if verdict == "confirmed"
+        else None
+    )
+    node.claim_type = claim_type
+    node.verification_method = verification_method
+    node.theme_id = theme
+    if mechanism:
+        node.mechanism = mechanism
+    if verdict in ("confirmed", "refuted") and claim_type:
+        node.finding = build_finding_object(
+            claim=node.text,
+            claim_type=claim_type,
+            evidence=evidence_obj,
+            confidence=confidence,
+            verification_method=verification_method,
+            theme=theme,
+            mechanism=mechanism,
+        )
+
+
 def build_campaign_synthesis_payload(campaign: ResearchCampaign) -> dict[str, Any]:
     """Synthesis dict for paper generation — single source of truth with tree ledger."""
     ledger = _campaign_ledger_from_tree(campaign.hypothesis_tree)
@@ -96,12 +155,21 @@ def build_campaign_synthesis_payload(campaign: ResearchCampaign) -> dict[str, An
         "improvement_pct_over_baseline": round(campaign.improvement_pct * 100, 2),
         "metric_name": campaign.breakthrough_criteria.metric_name,
         "tree_summary": campaign.hypothesis_tree.summary(),
+        "theme_histogram": campaign.hypothesis_tree.theme_counts(),
+        "claim_histogram": {
+            ct: sum(1 for n in campaign.hypothesis_tree.nodes.values() if n.claim_type == ct)
+            for ct in {
+                n.claim_type for n in campaign.hypothesis_tree.nodes.values() if n.claim_type
+            }
+        },
+        "counts_source": "tree_preview_db_authoritative_at_paper_time",
         "confirmed_findings": [
             {
                 "node_id": nid,
                 "text": campaign.hypothesis_tree.nodes[nid].text,
                 "evidence": campaign.hypothesis_tree.nodes[nid].evidence_summary,
                 "depth": campaign.hypothesis_tree.nodes[nid].depth,
+                "claim_type": campaign.hypothesis_tree.nodes[nid].claim_type,
             }
             for nid in campaign.hypothesis_tree.confirmed[:10]
             if nid in campaign.hypothesis_tree.nodes
@@ -663,10 +731,13 @@ async def expand_tree_node(
     llm: LLMClient,
     campaign_id: str,
     generation: int,
+    *,
+    question: str = "",
+    prior_snippets: list[str] | None = None,
 ) -> list[HypothesisNode]:
     """
     Ask the LLM to generate child hypotheses for a node and add them to the tree.
-    Returns the newly created child nodes.
+    Returns the newly created child nodes (after relevance gate).
     """
     prompt = tree.build_expand_prompt(node_id)
     if prompt is None:
@@ -678,8 +749,21 @@ async def expand_tree_node(
             session_id=campaign_id,
         )
         children = tree.parse_expanded_nodes(node_id, raw, generation)
-        tree.add_to_frontier(children)
-        return children
+        threshold = float(getattr(settings, "hypothesis_relevance_threshold", 0.35))
+        snippets = list(prior_snippets or [])
+        filtered: list[HypothesisNode] = []
+        for child in children:
+            child.theme_id = infer_hypothesis_theme(child.text)
+            core = strip_question_suffix(child.text)
+            if _is_ml_template_hypothesis(child.text):
+                continue
+            child.question_relevance_score = compute_question_relevance_score_lexical(
+                question, snippets, core,
+            )
+            if child.question_relevance_score >= threshold:
+                filtered.append(child)
+        tree.add_to_frontier(filtered)
+        return filtered
     except Exception as exc:
         logger.warning("Tree expansion failed for node %s: %s", node_id, exc)
         return []
@@ -694,18 +778,39 @@ async def _expand_node_async(
     generation: int,
     step: str,
     reason: str | None = None,
+    prior_snippets: list[str] | None = None,
+    check_merit_gate: bool = True,
 ) -> None:
-    """Expand a node and emit its event off the dispatch critical path.
+    """Expand a node and emit its event off the dispatch critical path."""
+    node = campaign.hypothesis_tree.nodes.get(node_id)
+    if node and check_merit_gate:
+        ok, merit_reason = campaign.hypothesis_tree.expansion_passes_merit_gate(
+            node_id,
+            novelty_min=float(getattr(settings, "campaign_expansion_merit_novelty_min", 0.25)),
+            info_gain_min=float(getattr(settings, "campaign_expansion_merit_info_gain_min", 0.30)),
+        )
+        node.expansion_reason = merit_reason if reason is None else f"{reason};{merit_reason}"
+        if not ok:
+            await emitter.emit(
+                session_id=campaign.id,
+                event_type=EventType.HYPO_TREE_PRUNED,
+                step="campaign.expansion_merit_gate",
+                payload={"node_id": node_id, "expansion_reason": node.expansion_reason},
+                hypothesis_id=_node_row_id(campaign.id, node_id),
+            )
+            return
+    elif node and reason:
+        node.expansion_reason = reason
 
-    Tree expansion is an LLM call (~tens of seconds). Running it inline in the result
-    loop stalls slot refills (the pipelined dispatcher is suspended at ``yield``), so a
-    freed Celery worker sits idle for the whole call. Spawning this as a background task
-    lets the dispatcher keep workers busy; children land on the frontier when the call
-    returns and are picked up by the next refill.
-    """
     try:
         children = await expand_tree_node(
-            node_id, campaign.hypothesis_tree, llm, campaign.id, generation,
+            node_id,
+            campaign.hypothesis_tree,
+            llm,
+            campaign.id,
+            generation,
+            question=campaign.question,
+            prior_snippets=prior_snippets,
         )
         if children:
             payload: dict[str, Any] = {
@@ -713,8 +818,8 @@ async def _expand_node_async(
                 "children_count": len(children),
                 "tree_size": len(campaign.hypothesis_tree.nodes),
             }
-            if reason:
-                payload["expansion_reason"] = reason
+            if node and node.expansion_reason:
+                payload["expansion_reason"] = node.expansion_reason
             await emitter.emit(
                 session_id=campaign.id,
                 event_type=EventType.HYPO_TREE_EXPANDED,
@@ -750,7 +855,13 @@ async def generate_seed_hypotheses(
         prior_round_findings=prior_context,
     )
     seed_dicts = [
-        {"id": h.id, "text": h.text, "test_methodology": h.test_methodology}
+        {
+            "id": h.id,
+            "text": h.text,
+            "test_methodology": h.test_methodology,
+            "theme_id": infer_hypothesis_theme(h.text),
+            "question_relevance_score": (h.scores or {}).get("question_relevance"),
+        }
         for h in raw_hyps
     ]
     return campaign.hypothesis_tree.add_seeds(seed_dicts, generation=generation)
@@ -1189,7 +1300,29 @@ async def run_campaign_loop(
                 key_papers=[],
                 evidence_status="INSUFFICIENT_EVIDENCE",
             )
+        except Exception as prior_exc:
+            logger.exception("[campaign %s] Prior build failed; continuing with empty prior.", campaign.id)
+            await emitter.emit(
+                session_id=campaign.id,
+                event_type=EventType.LLM_PARSE_ERROR,
+                step="campaign.prior_failed",
+                payload={"message": str(prior_exc)[:500]},
+            )
+            prior = Prior(
+                established_facts=[],
+                contested_claims=[],
+                open_gaps=[],
+                dead_ends=[],
+                key_papers=[],
+                evidence_status="INSUFFICIENT_EVIDENCE",
+            )
         prior_dict = prior.to_dict()
+        prior_snippets = _prior_snippets(prior_dict)
+        campaign.hypothesis_tree.set_scoring_context(
+            campaign.question,
+            prior_snippets,
+            theme_saturation_penalty=float(getattr(settings, "campaign_theme_saturation_penalty", 0.15)),
+        )
         await db_set_research_session_prior(
             campaign.id, session_factory, json.dumps(prior_dict),
         )
@@ -1363,10 +1496,36 @@ async def run_campaign_loop(
                     )
                     continue
 
+                _apply_result_diagnostics(
+                    campaign.hypothesis_tree, node_id, verdict, confidence, evidence,
+                )
+
                 # Recount from the tree (distinct nodes) rather than incrementing per
                 # result — re-dispatched nodes must not inflate the totals, so the
                 # campaign summary stays consistent with the tree and the paper.
                 campaign.recount_from_tree()
+
+                node = campaign.hypothesis_tree.nodes.get(node_id)
+                parent_theme: str | None = None
+                if node and node.parent_id:
+                    parent = campaign.hypothesis_tree.nodes.get(node.parent_id)
+                    if parent:
+                        parent_theme = infer_hypothesis_theme(parent.text)
+                evidence_obj = parse_evidence_obj(evidence)
+                await emitter.emit(
+                    session_id=campaign.id,
+                    event_type=EventType.CAMPAIGN_PROGRESS,
+                    step="campaign.verification_diagnostic",
+                    payload={
+                        "node_id": node_id,
+                        "verdict": verdict,
+                        "theme": infer_hypothesis_theme(node.text if node else ""),
+                        "parent_theme": parent_theme,
+                        "verification_method": classify_verification_method(evidence),
+                        "verified_true_steps": int(evidence_obj.get("verified_true_steps") or 0),
+                        "verified_false_steps": int(evidence_obj.get("verified_false_steps") or 0),
+                    },
+                )
 
                 if verdict == "confirmed":
                     if not first_confirmed_snapshotted:
@@ -1386,6 +1545,7 @@ async def run_campaign_loop(
                                 emitter=emitter,
                                 generation=generation,
                                 step="campaign.tree_expand",
+                                prior_snippets=prior_snippets,
                             )
                         )
                         expansion_tasks.add(task)
@@ -1403,7 +1563,6 @@ async def run_campaign_loop(
                         breakthrough_found = True
 
                 elif verdict == "refuted" and settings.campaign_expand_on_refuted:
-                    # Generate alternatives from refuted hypotheses (non-blocking).
                     task = asyncio.create_task(
                         _expand_node_async(
                             campaign=campaign,
@@ -1413,6 +1572,31 @@ async def run_campaign_loop(
                             generation=generation,
                             step="campaign.tree_expand_alt",
                             reason="refuted_alternative",
+                            prior_snippets=prior_snippets,
+                        )
+                    )
+                    expansion_tasks.add(task)
+                    task.add_done_callback(expansion_tasks.discard)
+
+                elif (
+                    verdict == "inconclusive"
+                    and settings.campaign_expand_on_inconclusive
+                    and node is not None
+                    and node.inconclusive_expansions
+                    < int(getattr(settings, "campaign_max_inconclusive_expansions", 2))
+                ):
+                    node.inconclusive_expansions += 1
+                    node.expansion_type = "retest"
+                    task = asyncio.create_task(
+                        _expand_node_async(
+                            campaign=campaign,
+                            node_id=node_id,
+                            llm=llm,
+                            emitter=emitter,
+                            generation=generation,
+                            step="campaign.tree_expand_inconclusive",
+                            reason="inconclusive_refine",
+                            prior_snippets=prior_snippets,
                         )
                     )
                     expansion_tasks.add(task)
@@ -1426,6 +1610,12 @@ async def run_campaign_loop(
                 if verdict == "confirmed" or breakthrough_found or (now_mono - last_checkpoint) >= checkpoint_secs:
                     await db_save_campaign(campaign, session_factory)
                     last_checkpoint = now_mono
+                    await emitter.emit(
+                        session_id=campaign.id,
+                        event_type=EventType.CAMPAIGN_PROGRESS,
+                        step="campaign.frontier_snapshot",
+                        payload=frontier_snapshot(campaign.hypothesis_tree),
+                    )
 
             # Persist end-of-wave state so progress survives interruption.
             await db_save_campaign(campaign, session_factory)

@@ -67,6 +67,7 @@ class EventType(str, Enum):
     HYPO_DEDUPLICATED = "hypothesis.deduplicated"
     HYPO_PROMOTED = "hypothesis.promoted"
     HYPO_RETIRED = "hypothesis.retired"
+    HYPO_REJECTED = "hypothesis.rejected"
     # Budget / progress
     BUDGET_CHECKPOINT = "budget.checkpoint"
     BUDGET_EXHAUSTED = "budget.exhausted"
