@@ -95,6 +95,13 @@ class HypothesisNode:
     mechanism: str | None = None
     finding: dict[str, Any] | None = None
     inconclusive_expansions: int = 0
+    node_role: str = "DISCOVERY"
+    primary_theme: str | None = None
+    secondary_themes: list[str] = field(default_factory=list)
+    evidence_hash: str | None = None
+    verification_hash: str | None = None
+    replication_level: str | None = None
+    inconclusive_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -117,6 +124,13 @@ class HypothesisNode:
             "mechanism": self.mechanism,
             "finding": self.finding,
             "inconclusive_expansions": self.inconclusive_expansions,
+            "node_role": self.node_role,
+            "primary_theme": self.primary_theme,
+            "secondary_themes": self.secondary_themes,
+            "evidence_hash": self.evidence_hash,
+            "verification_hash": self.verification_hash,
+            "replication_level": self.replication_level,
+            "inconclusive_reason": self.inconclusive_reason,
         }
 
     @classmethod
@@ -141,6 +155,13 @@ class HypothesisNode:
             mechanism=data.get("mechanism"),
             finding=data.get("finding"),
             inconclusive_expansions=int(data.get("inconclusive_expansions") or 0),
+            node_role=data.get("node_role", "DISCOVERY"),
+            primary_theme=data.get("primary_theme"),
+            secondary_themes=data.get("secondary_themes") or [],
+            evidence_hash=data.get("evidence_hash"),
+            verification_hash=data.get("verification_hash"),
+            replication_level=data.get("replication_level"),
+            inconclusive_reason=data.get("inconclusive_reason"),
         )
 
 
@@ -170,6 +191,8 @@ class HypothesisTree:
     exhausted: list[str] = field(default_factory=list)    # done, no more children
     _generation: int = field(default=0, repr=False)        # current campaign generation
     _scoring_context: FrontierScoringContext = field(default_factory=FrontierScoringContext, repr=False)
+    _used_evidence_hashes: set[str] = field(default_factory=set, repr=False)
+    finding_ledger: list[dict[str, Any]] = field(default_factory=list, repr=False)
 
     # ── Mutation ─────────────────────────────────────────────────────────────
 
@@ -187,12 +210,21 @@ class HypothesisTree:
         )
 
     def theme_counts(self) -> dict[str, int]:
-        """Theme histogram for saturation control (fixes.md P1.4)."""
+        """Theme histogram for saturation control (fixes.md P2.2)."""
         counts: dict[str, int] = {}
         for node in self.nodes.values():
-            tid = node.theme_id or "general"
+            tid = node.primary_theme or node.theme_id or "general"
             counts[tid] = counts.get(tid, 0) + 1
         return counts
+
+    def register_evidence_hash(self, h: str) -> bool:
+        """Return True if hash is new; False if reused (P0.2)."""
+        if not h:
+            return True
+        if h in self._used_evidence_hashes:
+            return False
+        self._used_evidence_hashes.add(h)
+        return True
 
     def add_seeds(self, hypotheses: list[dict[str, Any]], generation: int = 0) -> list[HypothesisNode]:
         """Add seed (root) hypotheses and push them to the frontier.
@@ -202,8 +234,11 @@ class HypothesisTree:
         silently overwrites earlier nodes — including confirmed ones, which get reset to
         pending and re-dispatched, corrupting the findings ledger.
         """
+        from propab.research_quality import extract_theme_vector, infer_node_role
+
         added: list[HypothesisNode] = []
         for h in hypotheses:
+            primary, secondary = extract_theme_vector(h["text"])
             node = HypothesisNode(
                 id=str(uuid4()),
                 text=h["text"],
@@ -211,7 +246,10 @@ class HypothesisTree:
                 depth=0,
                 generation=generation,
                 expansion_type=None,
-                theme_id=h.get("theme_id"),
+                node_role=infer_node_role(h["text"]),
+                primary_theme=primary,
+                secondary_themes=secondary,
+                theme_id=h.get("theme_id") or primary,
                 question_relevance_score=h.get("question_relevance_score"),
             )
             self.nodes[node.id] = node
@@ -244,9 +282,17 @@ class HypothesisTree:
         Returns False if ``node_id`` is not in the tree (caller should not count
         this as a completed campaign hypothesis).
         """
+        from propab.research_quality import NODE_ROLE_CONTROL, extract_theme_vector, infer_node_role, is_discovery_node
+
         node = self.nodes.get(node_id)
         if node is None:
             return False
+        node.node_role = infer_node_role(node.text)
+        if not node.primary_theme:
+            primary, secondary = extract_theme_vector(node.text)
+            node.primary_theme = primary
+            node.secondary_themes = secondary
+            node.theme_id = primary
         node.verdict = verdict
         node.confidence = confidence
         if evidence_summary:
@@ -255,9 +301,12 @@ class HypothesisTree:
         if node_id in self.frontier:
             self.frontier.remove(node_id)
 
-        if verdict == "confirmed":
+        if verdict == "confirmed" and is_discovery_node(node):
             if node_id not in self.confirmed:
                 self.confirmed.append(node_id)
+        elif verdict == "confirmed" and getattr(node, "node_role", "") == NODE_ROLE_CONTROL:
+            node.verdict = "inconclusive"
+            node.inconclusive_reason = node.inconclusive_reason or "control_calibration"
         else:
             # A node re-evaluated to a non-confirmed verdict must leave the confirmed
             # list, or ``confirmed_count`` (len of list) diverges from the verdict scan.
@@ -288,8 +337,12 @@ class HypothesisTree:
         Build the LLM prompt for expanding a node.  Returns None if the node
         should not be expanded (exhausted, too deep, already has children, etc.).
         """
+        from propab.research_quality import is_discovery_node
+
         node = self.nodes.get(node_id)
         if node is None or node.verdict == "pending":
+            return None
+        if not is_discovery_node(node):
             return None
         if node.id in self.exhausted:
             return None
@@ -336,10 +389,13 @@ class HypothesisTree:
         except (json.JSONDecodeError, IndexError, ValueError):
             return []
 
+        from propab.research_quality import extract_theme_vector, infer_node_role
+
         children: list[HypothesisNode] = []
         for item in items:
             if not isinstance(item, dict) or not item.get("text"):
                 continue
+            primary, secondary = extract_theme_vector(item["text"])
             child = HypothesisNode(
                 id=str(uuid4()),
                 text=item["text"],
@@ -348,7 +404,10 @@ class HypothesisTree:
                 verdict="pending",
                 generation=generation,
                 expansion_type=item.get("expansion_type"),
-                theme_id=item.get("theme_id"),
+                node_role=infer_node_role(item["text"]),
+                primary_theme=primary,
+                secondary_themes=secondary,
+                theme_id=item.get("theme_id") or primary,
                 question_relevance_score=item.get("question_relevance_score"),
             )
             children.append(child)
@@ -408,7 +467,7 @@ class HypothesisTree:
         evidence uncertainty from parent verdict, theme coverage bonus.
         """
         counts = self.theme_counts()
-        theme_id = node.theme_id or "general"
+        theme_id = node.primary_theme or node.theme_id or "general"
         theme_count = counts.get(theme_id, 1)
         max_count = max(counts.values()) if counts else 1
         saturation = theme_count / max(max_count, 1)
@@ -472,6 +531,7 @@ class HypothesisTree:
             "confirmed": self.confirmed,
             "exhausted": self.exhausted,
             "generation": self._generation,
+            "finding_ledger": self.finding_ledger,
         }
 
     @classmethod
@@ -482,6 +542,10 @@ class HypothesisTree:
         tree.confirmed = data.get("confirmed", [])
         tree.exhausted = data.get("exhausted", [])
         tree._generation = data.get("generation", 0)
+        tree.finding_ledger = list(data.get("finding_ledger") or [])
+        for f in tree.finding_ledger:
+            for eh in f.get("evidence_hashes") or []:
+                tree._used_evidence_hashes.add(str(eh))
         return tree
 
     # ── Summary helpers ──────────────────────────────────────────────────────
@@ -503,8 +567,18 @@ class HypothesisTree:
 
     def confirmed_findings_text(self, max_n: int = 10) -> str:
         """Compact text of top confirmed findings for hypothesis generation prompts."""
+        from propab.research_quality import paper_eligible_finding
+
         lines: list[str] = []
+        for entry in self.finding_ledger[-max_n:]:
+            if isinstance(entry, dict) and paper_eligible_finding(entry):
+                lines.append(
+                    f"- [{entry.get('claim_type')}, {entry.get('replication_level')}] "
+                    f"{entry.get('claim', '')[:300]}"
+                )
         for nid in self.confirmed[:max_n]:
+            if len(lines) >= max_n:
+                break
             node = self.nodes.get(nid)
             if node:
                 ev = (node.evidence_summary or "")[:200]

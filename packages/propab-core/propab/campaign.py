@@ -272,7 +272,13 @@ class ResearchCampaign:
             if n.verdict in ("confirmed", "refuted", "inconclusive")
         ]
         self.total_hypotheses = len(evaluated)
-        self.total_confirmed = sum(1 for n in evaluated if n.verdict == "confirmed")
+        from propab.research_quality import NODE_ROLE_CONTROL
+
+        self.total_confirmed = sum(
+            1
+            for n in evaluated
+            if n.verdict == "confirmed" and getattr(n, "node_role", NODE_ROLE_CONTROL) != NODE_ROLE_CONTROL
+        )
 
     def count_replications(self, hypothesis_id: str) -> int:
         """

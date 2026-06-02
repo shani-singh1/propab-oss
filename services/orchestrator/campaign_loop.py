@@ -44,7 +44,23 @@ from propab.campaign import (
     STATUS_BUDGET_EXHAUSTED,
 )
 from propab.campaign_snapshot import write_campaign_snapshot
-from propab.claim_types import build_finding_object, classify_claim_type, extract_mechanism
+from propab.research_quality import (
+    NODE_ROLE_CONTROL,
+    NODE_ROLE_DISCOVERY,
+    build_canonical_finding,
+    build_mechanism_object,
+    classify_claim_strength,
+    classify_inconclusive_reason,
+    compute_evidence_hash,
+    compute_replication_level,
+    compute_verification_hash,
+    extract_theme_vector,
+    infer_node_role,
+    is_discovery_node,
+    paper_eligible_finding,
+    should_retest_inconclusive,
+    extract_theme_vector,
+)
 from propab.config import settings
 from propab.db import create_redis
 from propab.events import EventEmitter
@@ -77,8 +93,14 @@ _NODE_ID_NAMESPACE = UUID("c3e7a1f0-4b2d-4e8a-95cf-0d1e3f5a7c9b")
 
 def _campaign_ledger_from_tree(tree: HypothesisTree) -> dict[str, Any]:
     """Ledger shape aligned with AccumulatedLedger.summary() for paper_sections / gates."""
-    confirmed = list(tree.confirmed)
-    refuted = [nid for nid, n in tree.nodes.items() if n.verdict == "refuted"]
+    confirmed = [
+        nid for nid in tree.confirmed
+        if nid in tree.nodes and is_discovery_node(tree.nodes[nid])
+    ]
+    refuted = [
+        nid for nid, n in tree.nodes.items()
+        if n.verdict == "refuted" and is_discovery_node(n)
+    ]
     inconclusive = [nid for nid, n in tree.nodes.items() if n.verdict == "inconclusive"]
     return {
         "confirmed": confirmed,
@@ -107,40 +129,119 @@ def _apply_result_diagnostics(
     verdict: str,
     confidence: float,
     evidence: str,
+    *,
+    failure_reason: str | None = None,
 ) -> None:
-    """Persist claim typing and structured findings on the tree node (fixes.md P0.1/P2/P4)."""
+    """Persist quality metadata on tree nodes (fixes.md P0–P4)."""
     node = tree.nodes.get(node_id)
     if node is None:
         return
+    node.node_role = infer_node_role(node.text)
+
     evidence_obj = parse_evidence_obj(evidence)
-    claim_type = classify_claim_type(evidence_obj, verdict, hypothesis_text=node.text)
+    ev_hash = compute_evidence_hash(evidence_obj)
+    ver_hash = compute_verification_hash(evidence_obj)
+    node.evidence_hash = ev_hash
+    node.verification_hash = ver_hash
+
+    primary, secondary = extract_theme_vector(node.text)
+    node.primary_theme = primary
+    node.secondary_themes = secondary
+    node.theme_id = primary
+
+    claim_strength = classify_claim_strength(evidence_obj, verdict, hypothesis_text=node.text)
+    node.claim_type = claim_strength
     verification_method = classify_verification_method(evidence)
-    theme = infer_hypothesis_theme(node.text)
-    mechanism = (
-        extract_mechanism(evidence_obj, claim_type=claim_type, hypothesis_text=node.text)
-        if verdict == "confirmed"
-        else None
+
+    sibling_confirmed = 0
+    if node.parent_id and node.parent_id in tree.nodes:
+        parent = tree.nodes[node.parent_id]
+        sibling_confirmed = sum(
+            1 for c in parent.children
+            if c in tree.nodes and tree.nodes[c].verdict == "confirmed"
+        )
+    node.replication_level = compute_replication_level(
+        evidence_obj, hypothesis_text=node.text, sibling_confirmed=sibling_confirmed,
     )
-    node.claim_type = claim_type
-    node.verification_method = verification_method
-    node.theme_id = theme
-    if mechanism:
-        node.mechanism = mechanism
-    if verdict in ("confirmed", "refuted") and claim_type:
-        node.finding = build_finding_object(
+
+    if verdict == "inconclusive":
+        node.inconclusive_reason = classify_inconclusive_reason(
+            evidence_obj, failure_reason=failure_reason,
+            verdict_reason=str(evidence_obj.get("verdict_reason") or ""),
+        )
+
+    effective_verdict = verdict
+    if node.node_role == NODE_ROLE_CONTROL and verdict == "confirmed":
+        effective_verdict = "inconclusive"
+        node.verdict = "inconclusive"
+        node.inconclusive_reason = "control_calibration"
+        if node_id in tree.confirmed:
+            tree.confirmed.remove(node_id)
+
+    elif verdict == "confirmed" and is_discovery_node(node):
+        if not tree.register_evidence_hash(ev_hash):
+            effective_verdict = "inconclusive"
+            node.verdict = "inconclusive"
+            node.inconclusive_reason = "duplicate_evidence"
+            node.confidence = min(confidence, 0.4)
+            if node_id in tree.confirmed:
+                tree.confirmed.remove(node_id)
+        elif node.replication_level == "T1" and confidence < 0.7:
+            pass  # keep T1 but allow confirm
+
+    mechanism_text = None
+    mechanism_obj = None
+    if effective_verdict == "confirmed" and is_discovery_node(node):
+        mechanism_text = str(evidence_obj.get("verdict_reason") or node.text)[:400]
+        mechanism_obj = build_mechanism_object(
             claim=node.text,
-            claim_type=claim_type,
+            mechanism=mechanism_text,
             evidence=evidence_obj,
+        )
+        if mechanism_obj:
+            node.mechanism = mechanism_obj.get("mechanism")
+
+    node.verification_method = verification_method
+
+    if effective_verdict in ("confirmed", "refuted") and claim_strength and is_discovery_node(node):
+        node.finding = build_canonical_finding(
+            claim_id=node_id,
+            claim=node.text,
+            claim_type=claim_strength,
+            replication_level=node.replication_level or "T1",
             confidence=confidence,
             verification_method=verification_method,
-            theme=theme,
-            mechanism=mechanism,
+            primary_theme=primary,
+            secondary_themes=secondary,
+            mechanism_obj=mechanism_obj,
+            evidence_hash=ev_hash,
+            verification_hash=ver_hash,
+            node_role=node.node_role,
         )
+        if effective_verdict == "confirmed":
+            tree.finding_ledger.append(node.finding)
 
 
 def build_campaign_synthesis_payload(campaign: ResearchCampaign) -> dict[str, Any]:
     """Synthesis dict for paper generation — single source of truth with tree ledger."""
     ledger = _campaign_ledger_from_tree(campaign.hypothesis_tree)
+    ledger_findings = [
+        f for f in campaign.hypothesis_tree.finding_ledger if paper_eligible_finding(f)
+    ][:10]
+    if not ledger_findings:
+        ledger_findings = [
+            {
+                "node_id": nid,
+                "claim": campaign.hypothesis_tree.nodes[nid].text,
+                "text": campaign.hypothesis_tree.nodes[nid].text,
+                "claim_type": campaign.hypothesis_tree.nodes[nid].claim_type,
+                "replication_level": campaign.hypothesis_tree.nodes[nid].replication_level,
+                "verification_method": campaign.hypothesis_tree.nodes[nid].verification_method,
+                "confidence": campaign.hypothesis_tree.nodes[nid].confidence,
+            }
+            for nid in campaign.hypothesis_tree.confirmed[:10]
+            if nid in campaign.hypothesis_tree.nodes
+        ]
     return {
         "campaign_id": campaign.id,
         "status": campaign.status,
@@ -163,17 +264,7 @@ def build_campaign_synthesis_payload(campaign: ResearchCampaign) -> dict[str, An
             }
         },
         "counts_source": "tree_preview_db_authoritative_at_paper_time",
-        "confirmed_findings": [
-            {
-                "node_id": nid,
-                "text": campaign.hypothesis_tree.nodes[nid].text,
-                "evidence": campaign.hypothesis_tree.nodes[nid].evidence_summary,
-                "depth": campaign.hypothesis_tree.nodes[nid].depth,
-                "claim_type": campaign.hypothesis_tree.nodes[nid].claim_type,
-            }
-            for nid in campaign.hypothesis_tree.confirmed[:10]
-            if nid in campaign.hypothesis_tree.nodes
-        ],
+        "confirmed_findings": ledger_findings,
     }
 
 
@@ -753,7 +844,11 @@ async def expand_tree_node(
         snippets = list(prior_snippets or [])
         filtered: list[HypothesisNode] = []
         for child in children:
-            child.theme_id = infer_hypothesis_theme(child.text)
+            primary, secondary = extract_theme_vector(child.text)
+            child.primary_theme = primary
+            child.secondary_themes = secondary
+            child.theme_id = primary
+            child.node_role = infer_node_role(child.text)
             core = strip_question_suffix(child.text)
             if _is_ml_template_hypothesis(child.text):
                 continue
@@ -783,6 +878,8 @@ async def _expand_node_async(
 ) -> None:
     """Expand a node and emit its event off the dispatch critical path."""
     node = campaign.hypothesis_tree.nodes.get(node_id)
+    if node is not None and not is_discovery_node(node):
+        return
     if node and check_merit_gate:
         ok, merit_reason = campaign.hypothesis_tree.expansion_passes_merit_gate(
             node_id,
@@ -1497,7 +1594,12 @@ async def run_campaign_loop(
                     continue
 
                 _apply_result_diagnostics(
-                    campaign.hypothesis_tree, node_id, verdict, confidence, evidence,
+                    campaign.hypothesis_tree,
+                    node_id,
+                    verdict,
+                    confidence,
+                    evidence,
+                    failure_reason=str(result.get("failure_reason") or result.get("error") or ""),
                 )
 
                 # Recount from the tree (distinct nodes) rather than incrementing per
@@ -1527,7 +1629,9 @@ async def run_campaign_loop(
                     },
                 )
 
-                if verdict == "confirmed":
+                effective_verdict = node.verdict if node else verdict
+
+                if effective_verdict == "confirmed" and node is not None and is_discovery_node(node):
                     if not first_confirmed_snapshotted:
                         first_confirmed_snapshotted = True
                         await asyncio.to_thread(
@@ -1562,7 +1666,7 @@ async def run_campaign_loop(
                     if campaign.breakthrough_criteria.is_breakthrough(result_with_replications):
                         breakthrough_found = True
 
-                elif verdict == "refuted" and settings.campaign_expand_on_refuted:
+                elif effective_verdict == "refuted" and node is not None and is_discovery_node(node) and settings.campaign_expand_on_refuted:
                     task = asyncio.create_task(
                         _expand_node_async(
                             campaign=campaign,
@@ -1579,9 +1683,11 @@ async def run_campaign_loop(
                     task.add_done_callback(expansion_tasks.discard)
 
                 elif (
-                    verdict == "inconclusive"
+                    effective_verdict == "inconclusive"
                     and settings.campaign_expand_on_inconclusive
                     and node is not None
+                    and is_discovery_node(node)
+                    and should_retest_inconclusive(node)
                     and node.inconclusive_expansions
                     < int(getattr(settings, "campaign_max_inconclusive_expansions", 2))
                 ):
@@ -1607,7 +1713,7 @@ async def run_campaign_loop(
                 # This removes the per-result write amplification that slowed campaigns.
                 now_mono = time.monotonic()
                 checkpoint_secs = max(5, int(getattr(settings, "campaign_checkpoint_every", 60) or 60))
-                if verdict == "confirmed" or breakthrough_found or (now_mono - last_checkpoint) >= checkpoint_secs:
+                if effective_verdict == "confirmed" or breakthrough_found or (now_mono - last_checkpoint) >= checkpoint_secs:
                     await db_save_campaign(campaign, session_factory)
                     last_checkpoint = now_mono
                     await emitter.emit(

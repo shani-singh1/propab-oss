@@ -49,7 +49,7 @@ def frontier_snapshot(tree: HypothesisTree) -> dict[str, Any]:
     claim_histogram: dict[str, int] = {}
     for n in nodes.values():
         by_verdict[n.verdict] = by_verdict.get(n.verdict, 0) + 1
-        tid = n.theme_id or "general"
+        tid = n.primary_theme or n.theme_id or "general"
         theme_histogram[tid] = theme_histogram.get(tid, 0) + 1
         if n.claim_type:
             claim_histogram[n.claim_type] = claim_histogram.get(n.claim_type, 0) + 1

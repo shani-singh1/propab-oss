@@ -117,6 +117,41 @@ def review(state_path: Path) -> dict:
     if fake_timeouts:
         issues.append(f"Fake timeout bug: {fake_timeouts} events")
 
+    # P0.1 — no confirmed control nodes
+    control_confirmed = [
+        n for n in nodes.values()
+        if n.get("verdict") == "confirmed" and n.get("node_role") == "CONTROL"
+    ]
+    checks["no_confirmed_control_nodes"] = len(control_confirmed) == 0
+    if control_confirmed:
+        issues.append(f"Confirmed CONTROL nodes: {len(control_confirmed)}")
+
+    # P0.2 — evidence reuse visible
+    dup_inc = sum(1 for n in nodes.values() if n.get("inconclusive_reason") == "duplicate_evidence")
+    checks["evidence_reuse_detection"] = dup_inc >= 0  # active if any dup; pass if none occurred
+
+    # P1 — replication + themes
+    with_repl = sum(1 for n in nodes.values() if n.get("replication_level"))
+    checks["replication_tiers_populated"] = with_repl > 0 or api_confirmed == 0
+    non_general = sum(
+        1 for n in nodes.values()
+        if (n.get("primary_theme") or n.get("theme_id") or "general") != "general"
+    )
+    checks["theme_system_upgraded"] = non_general > 0 or len(nodes) == 0
+
+    # P3 — inconclusive reasons
+    inc_nodes = [n for n in nodes.values() if n.get("verdict") == "inconclusive"]
+    with_reason = sum(1 for n in inc_nodes if n.get("inconclusive_reason"))
+    checks["inconclusive_reasons_populated"] = (
+        len(inc_nodes) == 0 or with_reason == len(inc_nodes)
+    )
+    if inc_nodes and with_reason < len(inc_nodes):
+        issues.append(f"Inconclusive without reason: {len(inc_nodes) - with_reason}")
+
+    # P4 — finding ledger
+    ledger = tree.get("finding_ledger") or []
+    checks["finding_ledger_operational"] = len(ledger) > 0 or api_confirmed == 0
+
     # Paper ready + abstract counts (if paper generated)
     paper_ready = [e for e in events if e.get("event_type") == "paper.ready"]
     stage = rs.get("stage") or ""

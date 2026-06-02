@@ -229,6 +229,11 @@ def _effective_verdict(row: Any) -> str:
         if isinstance(vt, int) and vt > 0:
             return "confirmed"
         return "inconclusive"
+    if raw == "confirmed":
+        from propab.research_quality import is_control_hypothesis
+
+        if is_control_hypothesis(str(row.get("text") or "")):
+            return "inconclusive"
     if raw in ("confirmed", "refuted", "inconclusive"):
         return raw
     return "inconclusive"
@@ -264,6 +269,45 @@ async def _fetch_result_rows(session_factory: async_sessionmaker, session_id: st
     return [dict(r) for r in rows]
 
 
+def _enrich_finding_row(row: dict[str, Any], ev: dict[str, Any], verdict: str) -> dict[str, Any] | None:
+    """Build a paper-facing finding dict; None if filtered (P5.1)."""
+    from propab.research_quality import (
+        classify_claim_strength,
+        compute_replication_level,
+        extract_theme_vector,
+        infer_node_role,
+        is_control_hypothesis,
+        paper_eligible_finding,
+    )
+
+    text = str(row.get("text") or "").strip()
+    if is_control_hypothesis(text) or infer_node_role(text) == "CONTROL":
+        return None
+    claim_type = classify_claim_strength(ev, verdict, hypothesis_text=text)
+    replication = compute_replication_level(ev, hypothesis_text=text)
+    primary, secondary = extract_theme_vector(text)
+    conf = float(row.get("confidence")) if row.get("confidence") is not None else None
+    entry = {
+        "id": str(row.get("id")),
+        "rank": row.get("rank"),
+        "round": _human_round_num(row.get("round_number")),
+        "text": text,
+        "key_finding": str(row.get("key_finding") or "").strip(),
+        "confidence": conf,
+        "stats": ev,
+        "stats_text": format_stats(ev),
+        "claim_type": claim_type,
+        "replication_level": replication,
+        "verification_method": ev.get("verification_method"),
+        "primary_theme": primary,
+        "secondary_themes": secondary,
+        "node_role": "DISCOVERY",
+    }
+    if not paper_eligible_finding(entry):
+        return None
+    return entry
+
+
 async def compile_session_findings(session_factory: async_sessionmaker, session_id: str) -> dict[str, Any]:
     """
     Authoritative, DB-derived view of session outcomes. Used to keep the abstract,
@@ -281,18 +325,10 @@ async def compile_session_findings(session_factory: async_sessionmaker, session_
             unexecuted += 1
             continue
         ev = parse_evidence(str(row.get("evidence_summary") or ""))
-        buckets[verdict].append(
-            {
-                "id": str(row.get("id")),
-                "rank": row.get("rank"),
-                "round": _human_round_num(row.get("round_number")),
-                "text": str(row.get("text") or "").strip(),
-                "key_finding": str(row.get("key_finding") or "").strip(),
-                "confidence": float(row.get("confidence")) if row.get("confidence") is not None else None,
-                "stats": ev,
-                "stats_text": format_stats(ev),
-            }
-        )
+        enriched = _enrich_finding_row(row, ev, verdict)
+        if enriched is None:
+            continue
+        buckets[verdict].append(enriched)
     for b in buckets.values():
         b.sort(key=lambda f: (f.get("confidence") or 0.0), reverse=True)
     counts = {
@@ -462,6 +498,17 @@ def _finding_sentence(f: dict[str, Any]) -> str:
     claim = claim.strip().rstrip(".")
     stats = f.get("stats_text") or ""
     sent = _latex_escape(claim[:400])
+    meta: list[str] = []
+    if f.get("claim_type"):
+        meta.append(f"claim type: {f['claim_type']}")
+    if f.get("replication_level"):
+        meta.append(f"replication: {f['replication_level']}")
+    if isinstance(f.get("confidence"), (int, float)):
+        meta.append(f"confidence: {float(f['confidence']):.2f}")
+    if f.get("verification_method"):
+        meta.append(f"verification: {f['verification_method']}")
+    if meta:
+        sent += f" [{', '.join(meta)}]"
     if stats and stats != "no inferential statistic recorded":
         sent += f" ({stats})"
     return sent + "."
@@ -477,16 +524,19 @@ def _findings_table(findings: list[dict[str, Any]]) -> str:
         "\\caption{Summary of supported findings and their statistical evidence.}",
         "\\begin{tabular}{p{0.46\\linewidth} c p{0.30\\linewidth}}",
         "\\hline",
-        "\\textbf{Finding} & \\textbf{Confidence} & \\textbf{Statistical evidence} \\\\",
+        "\\textbf{Finding} & \\textbf{Claim / replication} & \\textbf{Statistical evidence} \\\\",
         "\\hline",
     ]
     for f in findings[:20]:
         claim = (f.get("key_finding") or f.get("text") or "").strip().rstrip(".")
-        cell = _latex_escape(claim[:220])
+        cell = _latex_escape(claim[:180])
         conf = f.get("confidence")
         conf_s = f"{float(conf):.2f}" if isinstance(conf, (int, float)) else "--"
+        ctype = f.get("claim_type") or "--"
+        repl = f.get("replication_level") or "--"
+        mid = _latex_escape(f"{ctype}, {repl}, conf={conf_s}")
         stats = f.get("stats_text") or "--"
-        lines.append(f"{cell} & {conf_s} & {stats} \\\\")
+        lines.append(f"{cell} & {mid} & {stats} \\\\")
     lines.extend(["\\hline", "\\end{tabular}", "\\end{table}"])
     return "\n".join(lines)
 
