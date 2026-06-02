@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import re
+import time
 from typing import Any
 from xml.etree import ElementTree
 
@@ -33,6 +35,95 @@ from services.orchestrator.literature_quality import (
 from services.orchestrator.prior_builder import synthesize_prior_from_papers
 from services.orchestrator.retrieval import expand_query, run_hybrid_retrieval
 from services.orchestrator.schemas import Prior
+
+logger = logging.getLogger(__name__)
+
+_arxiv_lock = asyncio.Lock()
+_arxiv_last_request_at = 0.0
+_arxiv_cooldown_until = 0.0
+_external_apis_rate_limited = False
+
+
+async def _arxiv_throttle() -> None:
+    """arXiv asks for >=3s between requests; serialize to avoid 429 bursts."""
+    global _arxiv_last_request_at, _arxiv_cooldown_until
+    async with _arxiv_lock:
+        now = time.monotonic()
+        if now < _arxiv_cooldown_until:
+            await asyncio.sleep(_arxiv_cooldown_until - now)
+        gap = max(0.0, float(settings.literature_arxiv_min_interval_sec))
+        now = time.monotonic()
+        wait = gap - (now - _arxiv_last_request_at)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _arxiv_last_request_at = time.monotonic()
+
+
+def _arxiv_or_query(intents: list[str]) -> str:
+    """Build one arXiv OR query from several intents (fewer API calls)."""
+    clauses: list[str] = []
+    for intent in intents[:4]:
+        words = [w for w in re.split(r"\W+", intent.lower()) if len(w) > 2][:6]
+        if not words:
+            continue
+        clauses.append("all:" + "+".join(words))
+    if not clauses:
+        return ""
+    if len(clauses) == 1:
+        return clauses[0]
+    return " OR ".join(clauses)
+
+
+async def _fetch_arxiv_combined(intents: list[str], max_results: int) -> list[dict[str, Any]]:
+    q = _arxiv_or_query(intents)
+    if not q:
+        return []
+    url = "https://export.arxiv.org/api/query"
+    params = {"search_query": q, "start": 0, "max_results": max_results}
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await _arxiv_http_get(client, url, params=params)
+        if response is None:
+            return []
+        response.raise_for_status()
+        return _parse_arxiv_feed(response.text)
+    except httpx.HTTPError as exc:
+        logger.warning("arxiv combined fetch failed: %s", exc)
+        return []
+
+async def _arxiv_http_get(client: httpx.AsyncClient, url: str, *, params: dict[str, Any]) -> httpx.Response | None:
+    global _arxiv_cooldown_until, _external_apis_rate_limited
+    if _external_apis_rate_limited:
+        return None
+    attempts = max(1, int(settings.literature_arxiv_max_retries))
+    for attempt in range(attempts):
+        await _arxiv_throttle()
+        try:
+            response = await client.get(url, params=params)
+        except (httpx.TimeoutException, httpx.HTTPError) as exc:
+            logger.warning("arxiv HTTP error (attempt %s/%s): %s", attempt + 1, attempts, exc)
+            if attempt + 1 >= attempts:
+                return None
+            await asyncio.sleep(2.0 * (attempt + 1))
+            continue
+        if response.status_code == 429:
+            retry_after = response.headers.get("Retry-After")
+            try:
+                delay = float(retry_after) if retry_after else 8.0 + attempt * 4.0
+            except ValueError:
+                delay = 8.0 + attempt * 4.0
+            _arxiv_cooldown_until = max(_arxiv_cooldown_until, time.monotonic() + delay)
+            logger.warning("arxiv rate limited (429); cooling down %.1fs", delay)
+            if attempt + 1 >= min(2, attempts):
+                _external_apis_rate_limited = True
+                return None
+            await asyncio.sleep(delay)
+            continue
+        if response.status_code >= 500 and attempt + 1 < attempts:
+            await asyncio.sleep(2.0 * (attempt + 1))
+            continue
+        return response
+    return None
 
 
 def _parse_arxiv_feed(xml_text: str) -> list[dict[str, Any]]:
@@ -103,12 +194,34 @@ async def _persist_paper_citations(
 
 
 async def _fetch_semantic_scholar(query: str, max_results: int = 5) -> list[dict[str, Any]]:
+    global _external_apis_rate_limited
+    if _external_apis_rate_limited:
+        return []
     url = "https://api.semanticscholar.org/graph/v1/paper/search"
     params = {"query": query, "limit": max_results, "fields": "paperId,title,abstract,externalIds,authors"}
-    async with httpx.AsyncClient(timeout=25) as client:
-        response = await client.get(url, params=params)
-        response.raise_for_status()
-        payload = response.json()
+    payload: dict[str, Any] = {}
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(url, params=params)
+            if response.status_code == 429:
+                delay = 6.0 * (attempt + 1)
+                logger.warning("semantic scholar 429 for %r; sleep %.1fs", query[:60], delay)
+                if attempt + 1 >= 2:
+                    _external_apis_rate_limited = True
+                    return []
+                await asyncio.sleep(delay)
+                continue
+            response.raise_for_status()
+            payload = response.json()
+            break
+        except (httpx.TimeoutException, httpx.HTTPError) as exc:
+            logger.warning("semantic scholar fetch failed for %r: %s", query[:80], exc)
+            if attempt + 1 >= 2:
+                return []
+            await asyncio.sleep(2.0 * (attempt + 1))
+    else:
+        return []
     papers: list[dict[str, Any]] = []
     for item in payload.get("data") or []:
         ext = item.get("externalIds") or {}
@@ -138,10 +251,16 @@ async def _fetch_semantic_scholar(query: str, max_results: int = 5) -> list[dict
 async def _fetch_arxiv(query: str, max_results: int = 5) -> list[dict[str, Any]]:
     url = "https://export.arxiv.org/api/query"
     params = {"search_query": f"all:{query}", "start": 0, "max_results": max_results}
-    async with httpx.AsyncClient(timeout=20) as client:
-        response = await client.get(url, params=params)
-    response.raise_for_status()
-    return _parse_arxiv_feed(response.text)
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            response = await _arxiv_http_get(client, url, params=params)
+        if response is None:
+            return []
+        response.raise_for_status()
+        return _parse_arxiv_feed(response.text)
+    except httpx.HTTPError as exc:
+        logger.warning("arxiv fetch failed for %r: %s", query[:80], exc)
+        return []
 
 
 async def _fetch_arxiv_by_ids(arxiv_ids: list[str]) -> list[dict[str, Any]]:
@@ -151,10 +270,16 @@ async def _fetch_arxiv_by_ids(arxiv_ids: list[str]) -> list[dict[str, Any]]:
         return []
     url = "https://export.arxiv.org/api/query"
     params = {"id_list": ",".join(ids), "max_results": len(ids)}
-    async with httpx.AsyncClient(timeout=25) as client:
-        response = await client.get(url, params=params)
-    response.raise_for_status()
-    return _parse_arxiv_feed(response.text)
+    try:
+        async with httpx.AsyncClient(timeout=45.0) as client:
+            response = await _arxiv_http_get(client, url, params=params)
+        if response is None:
+            return []
+        response.raise_for_status()
+        return _parse_arxiv_feed(response.text)
+    except httpx.HTTPError as exc:
+        logger.warning("arxiv id_list fetch failed: %s", exc)
+        return []
 
 
 async def _expand_papers_via_citations(
@@ -238,15 +363,17 @@ async def _fetch_papers_multi_intent(
     per_intent: int,
     max_total: int,
 ) -> list[dict[str, Any]]:
-    """Fetch from arXiv (fallback Semantic Scholar) per search intent; merge and dedupe."""
+    """Fetch per intent via Semantic Scholar first; one combined arXiv query as backup."""
+    if _external_apis_rate_limited:
+        return []
     seen: set[str] = set()
     merged: list[dict[str, Any]] = []
+    min_target = max(2, settings.literature_min_papers_kept)
+
     for intent in intents:
-        if len(merged) >= max_total:
+        if len(merged) >= max_total or _external_apis_rate_limited:
             break
-        batch = await _fetch_arxiv(intent, max_results=per_intent)
-        if not batch:
-            batch = await _fetch_semantic_scholar(intent, max_results=per_intent)
+        batch = await _fetch_semantic_scholar(intent, max_results=per_intent)
         for paper in batch:
             pid = str(paper.get("id") or "")
             if not pid or pid in seen:
@@ -255,7 +382,83 @@ async def _fetch_papers_multi_intent(
             merged.append(paper)
             if len(merged) >= max_total:
                 break
+        if intent != intents[-1]:
+            await asyncio.sleep(1.0)
+
+    if len(merged) < min_target and not _external_apis_rate_limited:
+        combined = await _fetch_arxiv_combined(intents, max_results=max_total)
+        for paper in combined:
+            pid = str(paper.get("id") or "")
+            if not pid or pid in seen:
+                continue
+            seen.add(pid)
+            merged.append(paper)
+            if len(merged) >= max_total:
+                break
+
+    if len(merged) < min_target and not _external_apis_rate_limited:
+        for intent in intents[:1]:
+            if len(merged) >= max_total:
+                break
+            batch = await _fetch_arxiv(intent, max_results=per_intent)
+            for paper in batch:
+                pid = str(paper.get("id") or "")
+                if not pid or pid in seen:
+                    continue
+                seen.add(pid)
+                merged.append(paper)
+                if len(merged) >= max_total:
+                    break
+
     return merged
+
+
+async def _fetch_papers_from_db_fallback(
+    session_factory: async_sessionmaker,
+    question: str,
+    *,
+    session_id: str,
+    emitter: EventEmitter,
+    pool_limit: int = 300,
+    max_results: int,
+) -> list[dict[str, Any]]:
+    """Relevance-filtered fallback when live APIs are empty or rate-limited (not global last-N reuse)."""
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, title, abstract, authors, pdf_url, sections_json
+                    FROM papers
+                    WHERE COALESCE(abstract, '') <> '' OR COALESCE(title, '') <> ''
+                    ORDER BY ingested_at DESC
+                    LIMIT :lim
+                    """
+                ),
+                {"lim": pool_limit},
+            )
+        ).mappings().all()
+    pool = [dict(r) for r in rows]
+    if not pool:
+        return []
+    kept, dropped = await _filter_papers_by_question_relevance(
+        question,
+        pool,
+        session_id=session_id,
+        emitter=emitter,
+        threshold=settings.literature_relevance_threshold,
+    )
+    await emitter.emit(
+        session_id=session_id,
+        event_type=EventType.CAMPAIGN_PROGRESS,
+        step="literature.db_corpus_fallback",
+        payload={
+            "pool_count": len(pool),
+            "kept_count": len(kept),
+            "dropped_count": len(dropped),
+        },
+    )
+    return kept[:max_results]
 
 
 async def _upsert_papers(session_factory: async_sessionmaker, papers: list[dict[str, Any]]) -> None:
@@ -384,10 +587,11 @@ async def _filter_papers_by_question_relevance(
     """Drop papers whose title+abstract embedding similarity to the question is below *threshold*."""
     if not papers:
         return [], []
+    if getattr(settings, "literature_skip_relevance_embed", False):
+        return [dict(p, _relevance_score=None) for p in papers], []
     api_key = (settings.embed_api_secret or "").strip()
     if not api_key:
-        tagged = [dict(p, _relevance_score=None) for p in papers]
-        return tagged, []
+        return [], [dict(p, _relevance_score=None) for p in papers]
 
     texts = [question[:8000]] + [
         f"{p.get('title') or ''}\n{p.get('abstract') or ''}"[:8000] for p in papers
@@ -403,11 +607,14 @@ async def _filter_papers_by_question_relevance(
             timeout=90.0,
         )
     except Exception:
-        tagged = [dict(p, _relevance_score=None) for p in papers]
-        return tagged, []
+        logger.warning(
+            "literature relevance embed failed; keeping all papers (fail-open for prior/seed)",
+            exc_info=True,
+        )
+        return [dict(p, _relevance_score=None) for p in papers], []
     if not vectors or len(vectors) != len(texts):
-        tagged = [dict(p, _relevance_score=None) for p in papers]
-        return tagged, []
+        logger.warning("literature relevance embed size mismatch; keeping all papers (fail-open)")
+        return [dict(p, _relevance_score=None) for p in papers], []
 
     qvec = vectors[0]
     kept: list[dict[str, Any]] = []
@@ -550,7 +757,7 @@ async def build_prior(
     relevance_threshold_used = settings.literature_relevance_threshold
 
     for expansion_round in range(max_rounds):
-        if expansion_round > 0 or not papers_fetched:
+        if not papers_fetched:
             multiplier = expansion_round + 1
             per_intent = min(settings.literature_fetch_per_intent * multiplier, 25)
             max_candidates = min(settings.literature_max_candidates * multiplier, 50)
@@ -561,6 +768,22 @@ async def build_prior(
             )
             did_live_fetch = True
             cache_match = None
+            min_target = max(2, settings.literature_min_papers_kept)
+            if len(papers_fetched) < min_target:
+                db_batch = await _fetch_papers_from_db_fallback(
+                    session_factory,
+                    question,
+                    session_id=session_id,
+                    emitter=emitter,
+                    max_results=max_candidates,
+                )
+                seen_ids = {str(p.get("id")) for p in papers_fetched if p.get("id")}
+                for paper in db_batch:
+                    pid = str(paper.get("id") or "")
+                    if not pid or pid in seen_ids:
+                        continue
+                    seen_ids.add(pid)
+                    papers_fetched.append(paper)
             await _upsert_papers(session_factory, papers_fetched)
             for paper in papers_fetched:
                 await emitter.emit(
@@ -585,7 +808,7 @@ async def build_prior(
             session_id=session_id,
             emitter=emitter,
             session_factory=session_factory,
-        )
+        ) if not getattr(settings, "literature_skip_pdf", False) else None
         papers_fetched = await _expand_papers_via_citations(session_factory, papers_fetched)
 
         papers_kept, papers_dropped, relevance_threshold_used = await _filter_with_adaptive_threshold(
@@ -594,6 +817,11 @@ async def build_prior(
             session_id=session_id,
             emitter=emitter,
         )
+
+        if cache_match and not papers_kept and papers_fetched:
+            papers_fetched = []
+            cache_match = None
+            continue
 
         retrieval_chunks = await run_hybrid_retrieval(
             session_id=session_id,
@@ -613,7 +841,15 @@ async def build_prior(
             chunk_count=len(retrieval_chunks),
             evidence_coverage=evidence_coverage,
         )
-        if gate_passed:
+        coverage_only_fail = (
+            not gate_passed
+            and all(r.startswith("low_evidence_coverage") for r in gate_reasons)
+            and len(papers_kept) >= settings.literature_min_papers_kept
+            and len(retrieval_chunks) >= settings.literature_min_retrieval_chunks
+        )
+        if gate_passed or coverage_only_fail:
+            if coverage_only_fail:
+                gate_reasons = list(gate_reasons) + ["proceeding_with_low_coverage"]
             break
 
     diagnostics = build_retrieval_diagnostics(
@@ -638,11 +874,11 @@ async def build_prior(
         for c in retrieval_chunks[:30]
     ]
 
-    if did_live_fetch and papers_fetched:
+    if gate_passed and papers_kept:
         await store_query_cache(
             session_factory,
             question,
-            [str(p["id"]) for p in papers_fetched if p.get("id")],
+            [str(p["id"]) for p in papers_kept if p.get("id")],
         )
 
     if not gate_passed:

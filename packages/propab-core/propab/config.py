@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     literature_expansion_rounds: int = 2
     literature_pdf_parallelism: int = 4
     literature_skip_pdf: bool = False
+    literature_skip_relevance_embed: bool = False
     literature_arxiv_min_interval_sec: float = 6.0
     literature_arxiv_max_retries: int = 5
     # Think-act agent budgets

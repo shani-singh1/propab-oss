@@ -81,6 +81,8 @@ async def _run(args: argparse.Namespace) -> int:
             max_hypotheses=args.max_hypotheses,
         )
         results.append(r)
+        if i < len(selected) and not args.dry_run:
+            await asyncio.sleep(float(getattr(args, "pause_sec", 2.0)))
         status = "OK" if r.ok else "FAIL"
         print(
             f"    {status} disc={r.discovery_count} ctrl={r.control_count} "
@@ -101,9 +103,10 @@ async def _run(args: argparse.Namespace) -> int:
         "checks": {
             "empty_generation_lt_5pct": report.pass_empty_rate,
             "discovery_ge_3_per_question": report.pass_discovery_count,
-            "control_ratio_lt_20pct": report.pass_control_ratio,
+            "control_ratio_lte_20pct": report.pass_control_ratio,
             "theme_diversity": report.pass_theme_diversity,
         },
+        "all_questions_ok": len([r for r in report.results if r.ok]) == len(report.results),
         "passed": report.passed,
         "results": [
             {
@@ -138,8 +141,8 @@ async def _run(args: argparse.Namespace) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Seed-generation validation suite (fixes.md Phase 1)")
     parser.add_argument("--limit", type=int, default=25, help="Number of questions (max 25)")
-    parser.add_argument("--timeout", type=int, default=120, help="Seconds per question (total)")
-    parser.add_argument("--prior-timeout", type=int, default=90, help="Seconds for literature+prior")
+    parser.add_argument("--timeout", type=int, default=200, help="Seconds per question (total)")
+    parser.add_argument("--prior-timeout", type=int, default=150, help="Seconds for literature+prior")
     parser.add_argument("--max-hypotheses", type=int, default=5, help="Seeds per question")
     parser.add_argument("--dry-run", action="store_true", help="List questions only")
     parser.add_argument(
@@ -147,6 +150,7 @@ def main() -> None:
         action="store_true",
         help="Skip literature/prior fetch (seed+gate only; use when embed API is rate-limited)",
     )
+    parser.add_argument("--pause-sec", type=float, default=2.0, help="Pause between questions (rate limits)")
     args = parser.parse_args()
     args.limit = max(1, min(args.limit, 25))
     sys.exit(asyncio.run(_run(args)))

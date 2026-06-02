@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
-
 import re
+from typing import Any
 
 from propab.config import settings
 from propab.events import EventEmitter
@@ -229,6 +229,36 @@ def _ensure_null_hypothesis(hypotheses: list[RankedHypothesis], question: str) -
     return hypotheses
 
 
+def _parse_hypothesis_json(raw: str) -> list[dict[str, Any]]:
+    """Parse LLM hypothesis array; tolerate markdown fences and trailing prose."""
+    text = (raw or "").strip()
+    if not text:
+        return []
+    for marker in ("```json", "```JSON", "```"):
+        if marker in text:
+            inner = text.split(marker, 1)[1].split("```", 1)[0].strip()
+            if inner.startswith("["):
+                try:
+                    data = json.loads(inner)
+                    return data if isinstance(data, list) else []
+                except json.JSONDecodeError:
+                    pass
+    try:
+        data = json.loads(text)
+        if isinstance(data, list):
+            return [x for x in data if isinstance(x, dict)]
+    except json.JSONDecodeError:
+        pass
+    m = re.search(r"\[[\s\S]*\]", text)
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            return data if isinstance(data, list) else []
+        except json.JSONDecodeError:
+            pass
+    return []
+
+
 def _build_hypothesis_prompt(
     parsed: ParsedQuestion,
     prior: Prior,
@@ -343,18 +373,19 @@ async def generate_ranked_hypotheses(
 ) -> list[RankedHypothesis]:
     prompt = _build_hypothesis_prompt(parsed, prior, max_hypotheses, prior_round_findings)
     raw = await llm.call(prompt=prompt, purpose="hypothesis_generation", session_id=session_id)
-    try:
-        generated = json.loads(raw)
-    except json.JSONDecodeError:
-        generated = []
+    generated = _parse_hypothesis_json(raw)
+    if not generated:
+        raw_retry = await llm.call(
+            prompt=prompt + "\n\nReturn ONLY a JSON array of exactly "
+            f"{max_hypotheses} hypothesis objects. No markdown.",
+            purpose="hypothesis_generation_retry",
+            session_id=session_id,
+        )
+        generated = _parse_hypothesis_json(raw_retry)
     if meta is not None:
-        if isinstance(generated, list):
-            raw_count = sum(1 for x in generated if isinstance(x, dict) and x.get("text"))
-            meta["llm_empty"] = raw_count == 0
-            meta["raw_llm_count"] = raw_count
-        else:
-            meta["llm_empty"] = True
-            meta["raw_llm_count"] = 0
+        raw_count = sum(1 for x in generated if isinstance(x, dict) and x.get("text"))
+        meta["llm_empty"] = raw_count == 0
+        meta["raw_llm_count"] = raw_count
 
     if isinstance(generated, list):
         themed = []

@@ -12,6 +12,15 @@ def _db_path(session_id: str, data_dir: str) -> Path:
 
 def write_session_chunks(session_id: str, data_dir: str, rows: list[tuple[str, int, str]]) -> None:
     path = _db_path(session_id, data_dir)
+    # Duplicate (paper_id, chunk_index) from repeated papers in one batch breaks INSERT.
+    seen: set[tuple[str, int]] = set()
+    deduped: list[tuple[str, int, str]] = []
+    for pid, idx, txt in rows:
+        key = (pid, idx)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((pid, idx, txt))
     conn = sqlite3.connect(path)
     try:
         conn.execute(
@@ -25,7 +34,10 @@ def write_session_chunks(session_id: str, data_dir: str, rows: list[tuple[str, i
             """
         )
         conn.execute("DELETE FROM chunk")
-        conn.executemany("INSERT INTO chunk (paper_id, chunk_index, text) VALUES (?, ?, ?)", rows)
+        conn.executemany(
+            "INSERT OR REPLACE INTO chunk (paper_id, chunk_index, text) VALUES (?, ?, ?)",
+            deduped,
+        )
         conn.commit()
     finally:
         conn.close()

@@ -93,11 +93,13 @@ class _NullEmitter(EventEmitter):
 
 
 def _apply_fast_literature_profile() -> None:
-    """Tighter literature for 1–2 min/question seed checks."""
+    """Tighter literature for seed checks; avoid embed rate-limit stalls."""
     settings.literature_fetch_per_intent = min(settings.literature_fetch_per_intent, 4)
     settings.literature_max_candidates = min(settings.literature_max_candidates, 12)
     settings.literature_expansion_rounds = 1
     settings.literature_skip_pdf = True
+    # Skip question↔paper embedding filter (429-prone); retrieval still runs BM25-only.
+    settings.literature_skip_relevance_embed = True
 
 
 def analyze_hypotheses(hypotheses: list[Any], *, llm_empty: bool, raw_count: int) -> dict[str, Any]:
@@ -144,6 +146,7 @@ def evaluate_suite(results: list[SeedQuestionResult]) -> SeedSuiteReport:
     pass_discovery = len(ok_results) > 0 and all(r.discovery_count >= 3 for r in ok_results)
     pass_control = mean_control <= 0.20
     pass_themes = non_general_q >= max(1, int(0.8 * n_ok))
+    pass_all_completed = len(ok_results) == len(results)
 
     return SeedSuiteReport(
         results=results,
@@ -155,7 +158,7 @@ def evaluate_suite(results: list[SeedQuestionResult]) -> SeedSuiteReport:
         pass_discovery_count=pass_discovery,
         pass_control_ratio=pass_control,
         pass_theme_diversity=pass_themes,
-        passed=pass_empty and pass_discovery and pass_control and pass_themes,
+        passed=pass_empty and pass_discovery and pass_control and pass_themes and pass_all_completed,
     )
 
 
@@ -165,8 +168,8 @@ async def run_seed_pipeline_for_question(
     *,
     session_factory: async_sessionmaker,
     llm: LLMClient,
-    prior_timeout_sec: int = 90,
-    total_timeout_sec: int = 120,
+    prior_timeout_sec: int = 150,
+    total_timeout_sec: int = 200,
     max_hypotheses: int | None = None,
 ) -> SeedQuestionResult:
     t0 = time.monotonic()
