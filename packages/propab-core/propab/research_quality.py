@@ -63,6 +63,11 @@ _THEME_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("parametric_family", ("parametric", "family", "closed-form")),
     ("finite_verification", ("exhaust", "scan", "up to n", "for all n", "counterexample")),
     ("unit_fraction", ("unit fraction", "egyptian", "1/n")),
+    ("cache_policy", ("cache", "lru", "miss rate", "replacement policy", "belady")),
+    ("scheduling", ("scheduling", "waiting time", "round-robin", "srpt", "queueing", "m/m/1")),
+    ("auction", ("auction", "second-price", "bidder", "revenue equivalence")),
+    ("collatz", ("collatz", "3n+1", "stopping time")),
+    ("prime_gaps", ("prime gap", "cramér", "twin prime")),
 ]
 
 
