@@ -190,6 +190,9 @@ class ResearchCampaign:
     compute_budget_seconds: int = 14400      # 4 hours default
     compute_seconds_used: int = 0
 
+    # Lifetime policy: "accepted" (default) or "candidate" (calibration evaluation)
+    policy_mode: str = "accepted"
+
     # Timestamps
     started_at: str = field(default_factory=lambda: datetime.now(tz=UTC).isoformat())
     last_checkpoint: str = ""
@@ -318,6 +321,7 @@ class ResearchCampaign:
             "started_at": self.started_at,
             "last_checkpoint": self.last_checkpoint,
             "checkpoint_every": self.checkpoint_every,
+            "policy_mode": self.policy_mode,
         }
 
     @classmethod
@@ -341,6 +345,7 @@ class ResearchCampaign:
             started_at=data.get("started_at", datetime.now(tz=UTC).isoformat()),
             last_checkpoint=data.get("last_checkpoint", ""),
             checkpoint_every=data.get("checkpoint_every", 300),
+            policy_mode=data.get("policy_mode", "accepted"),
         )
         # Preserve elapsed wall-clock budget accounting when loading from DB.
         used = float(data.get("compute_seconds_used", 0) or 0)

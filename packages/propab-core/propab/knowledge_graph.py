@@ -146,10 +146,16 @@ class KnowledgeGraph:
                 break
         return facts
 
-    def theme_success_rates(self) -> dict[str, float]:
-        """Fraction confirmed among tested claims per theme."""
+    def theme_success_rates(
+        self,
+        *,
+        campaign_ids: set[str] | None = None,
+    ) -> dict[str, float]:
+        """Fraction confirmed among tested claims per theme (optional bucket filter)."""
         by_theme: dict[str, list[str]] = {}
         for c in self.claims.values():
+            if campaign_ids is not None and c.campaign_id and c.campaign_id not in campaign_ids:
+                continue
             by_theme.setdefault(c.theme, []).append(c.verdict)
         rates: dict[str, float] = {}
         for theme, verdicts in by_theme.items():

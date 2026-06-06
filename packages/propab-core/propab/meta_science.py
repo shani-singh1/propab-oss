@@ -33,6 +33,10 @@ class CampaignObservation:
     policy_generation: int
     knowledge_claims: int
     knowledge_failures: int
+    budget_bucket: str = "3h"
+    domain_bucket: str = "general"
+    policy_id: str | None = None
+    policy_mode: str = "accepted"
     recorded_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
@@ -48,14 +52,53 @@ class MetaScienceLedger:
         self.observations.append(obs)
         self.observations.sort(key=lambda x: x.recorded_at)
 
-    def learning_curve(self) -> dict[str, list[float]]:
+    def observations_in_bucket(
+        self,
+        *,
+        budget_bucket: str,
+        domain_bucket: str,
+    ) -> list[CampaignObservation]:
+        return [
+            o for o in self.observations
+            if o.budget_bucket == budget_bucket and o.domain_bucket == domain_bucket
+        ]
+
+    def baseline_observation(
+        self,
+        *,
+        budget_bucket: str,
+        domain_bucket: str,
+        exclude_campaign_id: str | None = None,
+        policy_mode: str = "accepted",
+    ) -> CampaignObservation | None:
+        """Last observation in bucket (for delta / evaluation baseline)."""
+        rows = self.observations_in_bucket(
+            budget_bucket=budget_bucket,
+            domain_bucket=domain_bucket,
+        )
+        if exclude_campaign_id:
+            rows = [o for o in rows if o.campaign_id != exclude_campaign_id]
+        if not rows:
+            return None
+        return rows[-1]
+
+    def learning_curve(
+        self,
+        *,
+        budget_bucket: str | None = None,
+        domain_bucket: str | None = None,
+    ) -> dict[str, list[float]]:
+        obs = self.observations
+        if budget_bucket and domain_bucket:
+            obs = self.observations_in_bucket(
+                budget_bucket=budget_bucket,
+                domain_bucket=domain_bucket,
+            )
         return {
-            "closure_ratio": [o.closure_ratio for o in self.observations],
-            "confirmed_rate": [
-                o.confirmed / max(1, o.tested) for o in self.observations
-            ],
-            "theme_entropy": [o.theme_entropy for o in self.observations],
-            "general_fraction": [o.general_theme_fraction for o in self.observations],
+            "closure_ratio": [o.closure_ratio for o in obs],
+            "confirmed_rate": [o.confirmed / max(1, o.tested) for o in obs],
+            "theme_entropy": [o.theme_entropy for o in obs],
+            "general_fraction": [o.general_theme_fraction for o in obs],
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -63,7 +106,10 @@ class MetaScienceLedger:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> MetaScienceLedger:
-        obs = [CampaignObservation(**o) for o in (data.get("observations") or [])]
+        obs: list[CampaignObservation] = []
+        for o in (data.get("observations") or []):
+            fields = {k: v for k, v in o.items() if k in CampaignObservation.__dataclass_fields__}
+            obs.append(CampaignObservation(**fields))
         return cls(observations=obs)
 
     def save(self, path: Path | None = None) -> Path:

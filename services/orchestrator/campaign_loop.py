@@ -90,6 +90,7 @@ from services.orchestrator.lifetime_knowledge import (
     lifetime_context_for_seeds,
     load_lifetime_state,
 )
+from services.orchestrator.policy_analyst import llm_policy_analyst
 from services.orchestrator.literature import build_prior
 from services.orchestrator.paper import _session_experiment_step_count, write_paper_minimal
 from services.orchestrator.schemas import Prior
@@ -1464,9 +1465,17 @@ async def run_campaign_loop(
                 evidence_status="INSUFFICIENT_EVIDENCE",
             )
         prior_dict = prior.to_dict()
-        knowledge_graph, search_policy, _meta_ledger = load_lifetime_state()
-        prior_dict = enrich_prior_from_lifetime(prior_dict, knowledge_graph, search_policy)
-        lifetime_seed_context = lifetime_context_for_seeds(knowledge_graph, search_policy)
+        domain = parsed.domain
+        lifetime = load_lifetime_state(campaign, session_domain=domain)
+        prior_dict = enrich_prior_from_lifetime(
+            prior_dict,
+            lifetime.graph,
+            lifetime.policy,
+            policy_record=lifetime.policy_record,
+        )
+        lifetime_seed_context = lifetime_context_for_seeds(lifetime.graph, lifetime.policy)
+        search_policy = lifetime.policy
+        knowledge_graph = lifetime.graph
         prior_snippets = _prior_snippets(prior_dict)
         theme_penalty = float(getattr(settings, "campaign_theme_saturation_penalty", 0.15))
         if search_policy.saturated_themes:
@@ -1482,6 +1491,11 @@ async def run_campaign_loop(
             step="lifetime.knowledge_loaded",
             payload={
                 "policy_generation": search_policy.generation,
+                "policy_id": lifetime.policy_record.id,
+                "policy_status": lifetime.policy_record.status.value,
+                "policy_mode": campaign.policy_mode,
+                "budget_bucket": lifetime.budget_bucket,
+                "domain_bucket": lifetime.domain_bucket,
                 "claims_in_store": len(knowledge_graph.claims),
                 "failures_in_store": len(knowledge_graph.failures),
                 "theories_in_store": len(knowledge_graph.theories),
@@ -1507,8 +1521,6 @@ async def run_campaign_loop(
                     ),
                 },
             )
-        domain = parsed.domain
-
         # ── Stage 2: Measure baseline if not yet done ─────────────────────
         if abs(campaign.baseline_metric) < 1e-12 and abs(campaign.breakthrough_criteria.baseline_value) < 1e-12:
             await db_set_research_session_stage(campaign.id, session_factory, stage="campaign.baseline")
@@ -1868,7 +1880,41 @@ async def run_campaign_loop(
 
         await asyncio.to_thread(write_campaign_snapshot, "pre_paper", campaign, prior_dict)
 
-        lifetime_report = await asyncio.to_thread(ingest_campaign, campaign)
+        tree_sum = campaign.hypothesis_tree.summary()
+        analyst_overlay = None
+        try:
+            parent = lifetime.store.accepted_policy(
+                domain_bucket=lifetime.domain_bucket,
+                budget_bucket=lifetime.budget_bucket,
+            )
+            rationale, predicted, fals, params = await llm_policy_analyst(
+                parent=parent,
+                graph=lifetime.graph,
+                meta=lifetime.meta,
+                budget_bucket=lifetime.budget_bucket,
+                domain_bucket=lifetime.domain_bucket,
+                campaign_metrics={"closure_ratio": tree_sum.get("closure_ratio", 0)},
+                llm=llm,
+                session_id=campaign.id,
+            )
+            analyst_overlay = {
+                "rationale": rationale,
+                "predicted_effects": predicted.to_dict(),
+                "falsification_conditions": fals,
+                "mutation_params": params,
+            }
+        except Exception as analyst_exc:  # noqa: BLE001
+            logger.warning(
+                "[campaign %s] Policy analyst skipped (%s); ingest uses deterministic narrative.",
+                campaign.id,
+                analyst_exc,
+            )
+        lifetime_report = await asyncio.to_thread(
+            ingest_campaign,
+            campaign,
+            session_domain=domain,
+            analyst_overlay=analyst_overlay,
+        )
         await emitter.emit(
             session_id=campaign.id,
             event_type=EventType.CAMPAIGN_PROGRESS,

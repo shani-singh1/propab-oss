@@ -6,12 +6,14 @@ from propab.campaign import ResearchCampaign
 from propab.knowledge_graph import Claim, FailureRecord, KnowledgeGraph, new_id
 from propab.meta_science import MetaScienceLedger
 from propab.negative_knowledge import extract_confirmed_claims, extract_failures_from_campaign
-from propab.search_policy import SearchPolicy, update_policy_from_graph
+from propab.policy_store import PolicyStore
+from propab.search_policy import update_policy_from_graph
 from propab.theory_objects import form_theories_from_claims
 from services.orchestrator.lifetime_knowledge import (
     enrich_prior_from_lifetime,
     ingest_campaign,
     lifetime_context_for_seeds,
+    load_lifetime_state,
 )
 
 
@@ -19,11 +21,12 @@ def _tmp_lifetime(monkeypatch, tmp_path):
     monkeypatch.setattr(config.settings, "propab_data_dir", str(tmp_path))
 
 
-def test_ingest_campaign_builds_claims_and_policy(monkeypatch, tmp_path):
+def test_ingest_campaign_builds_claims_and_candidate(monkeypatch, tmp_path):
     _tmp_lifetime(monkeypatch, tmp_path)
     campaign = ResearchCampaign(
         id="00000000-0000-0000-0000-0000000000aa",
-        question="Which network metrics predict contagion speed?",
+        question="Which network metrics predict contagion speed on graphs?",
+        compute_budget_seconds=10800,
     )
     campaign.hypothesis_tree.finding_ledger = [
         {
@@ -47,13 +50,14 @@ def test_ingest_campaign_builds_claims_and_policy(monkeypatch, tmp_path):
     ]
     report = ingest_campaign(campaign)
     assert report["claims_added"] == 2
-    assert report["policy_generation"] == 1
+    assert report["candidate_policy_id"]
+    assert report["candidate_status"] == "CANDIDATE"
 
     graph = KnowledgeGraph.load()
-    policy = SearchPolicy.load()
+    store = PolicyStore.load()
     assert len(graph.claims) == 2
-    assert "spectral" in policy.theme_boost
     assert campaign.id in graph.campaign_ids
+    assert len(store.policies) >= 2  # accepted + candidate
 
 
 def test_campaign_nplus1_prior_differs(monkeypatch, tmp_path):
@@ -75,17 +79,21 @@ def test_campaign_nplus1_prior_differs(monkeypatch, tmp_path):
         verdict="refuted",
     ))
     graph.save()
-    policy = SearchPolicy(generation=3, theme_boost={"modularity": 0.2})
-    policy.save()
+    store = PolicyStore()
+    rec = store.accepted_policy(domain_bucket="graphs", budget_bucket="3h")
+    rec.boosts = {"modularity": 0.2}
+    store.save()
+    policy = rec.to_search_policy()
 
     prior = enrich_prior_from_lifetime(
         {"established_facts": [], "dead_ends": []},
         graph,
         policy,
+        policy_record=rec,
     )
     assert any("Modularity" in f["text"] for f in prior["established_facts"])
     assert any("Random rewiring" in d["text"] for d in prior["dead_ends"])
-    assert prior["search_policy_generation"] == 3
+    assert prior["policy_status"] == "ACCEPTED"
     ctx = lifetime_context_for_seeds(graph, policy)
     assert "modularity" in ctx.lower()
 
@@ -110,7 +118,7 @@ def test_extract_failures_skips_controls():
     assert failures[0].verdict == "refuted"
 
 
-def test_policy_updates_from_theme_rates():
+def test_legacy_update_policy_from_graph_still_works():
     graph = KnowledgeGraph()
     for i in range(4):
         graph.add_claim(Claim(
@@ -120,6 +128,7 @@ def test_policy_updates_from_theme_rates():
             theme="spectral",
             confidence=0.8,
         ))
+    from propab.search_policy import SearchPolicy
     policy = SearchPolicy()
     updated = update_policy_from_graph(policy, graph, campaign_metrics={"closure_ratio": 0.3})
     assert updated.generation == 1
@@ -145,10 +154,12 @@ def test_meta_science_learning_curve(monkeypatch, tmp_path):
         policy_generation=1,
         knowledge_claims=3,
         knowledge_failures=1,
+        budget_bucket="3h",
+        domain_bucket="graphs",
     ))
     meta.save()
     loaded = MetaScienceLedger.load()
-    curve = loaded.learning_curve()
+    curve = loaded.learning_curve(budget_bucket="3h", domain_bucket="graphs")
     assert curve["closure_ratio"] == [0.3]
     assert curve["confirmed_rate"][0] == 0.3
 

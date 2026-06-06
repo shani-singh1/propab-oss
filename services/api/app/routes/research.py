@@ -125,6 +125,8 @@ class CampaignRequest(BaseModel):
     breakthrough_criteria: BreakthroughCriteriaRequest = Field(
         default_factory=BreakthroughCriteriaRequest
     )
+    # "accepted" uses bucket-local accepted policy; "candidate" runs calibration evaluation
+    policy_mode: str = Field(default="accepted", pattern="^(accepted|candidate)$")
 
 
 class CampaignResponse(BaseModel):
@@ -175,6 +177,7 @@ async def create_campaign(
         breakthrough_criteria=criteria,
         compute_budget_seconds=int(request.compute_budget_hours * 3600),
         checkpoint_every=settings.campaign_checkpoint_every,
+        policy_mode=request.policy_mode,
     )
 
     # Persist initial state so it can be queried immediately

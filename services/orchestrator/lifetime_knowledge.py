@@ -1,15 +1,17 @@
 """
 Wire roadmap Phases A/D/E/G into campaign start and end.
 
-Campaign N+1 loads knowledge + policy from Campaign N.
+Campaign N+1 loads ACCEPTED policy for its bucket.
+Campaign end proposes CANDIDATE only — never auto-promotes.
 """
 from __future__ import annotations
 
 import logging
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from propab.campaign import ResearchCampaign
-from propab.knowledge_graph import KnowledgeGraph, new_id
+from propab.knowledge_graph import KnowledgeGraph
 from propab.mechanism_extractor import extract_mechanism_from_finding
 from propab.meta_science import CampaignObservation, MetaScienceLedger
 from propab.negative_knowledge import (
@@ -17,20 +19,74 @@ from propab.negative_knowledge import (
     extract_failures_from_campaign,
     merge_failures_into_graph,
 )
-from propab.search_policy import SearchPolicy, update_policy_from_graph
+from propab.policy_buckets import budget_bucket, domain_bucket
+from propab.policy_evaluation import evaluate_candidate_policy
+from propab.policy_fitness_ledger import FitnessRecord, PolicyFitnessLedger
+from propab.policy_record import PolicyRecord, PolicyStatus
+from propab.policy_store import PolicyStore
+from propab.search_policy import SearchPolicy
 from propab.theory_objects import form_theories_from_claims, merge_theories_into_graph
+from services.orchestrator.policy_analyst import propose_policy_narrative_sync
 
 logger = logging.getLogger(__name__)
 
 
-def load_lifetime_state() -> tuple[KnowledgeGraph, SearchPolicy, MetaScienceLedger]:
-    return KnowledgeGraph.load(), SearchPolicy.load(), MetaScienceLedger.load()
+@dataclass
+class LifetimeState:
+    graph: KnowledgeGraph
+    policy: SearchPolicy
+    policy_record: PolicyRecord
+    meta: MetaScienceLedger
+    store: PolicyStore
+    budget_bucket: str
+    domain_bucket: str
+
+
+def load_lifetime_state(
+    campaign: ResearchCampaign,
+    *,
+    session_domain: str = "",
+    policy_mode: Literal["accepted", "candidate"] | None = None,
+) -> LifetimeState:
+    """Load knowledge + bucket-local policy; bind campaign to active policy."""
+    graph = KnowledgeGraph.load()
+    meta = MetaScienceLedger.load()
+    store = PolicyStore.load()
+    bb = budget_bucket(campaign.compute_budget_seconds)
+    db = domain_bucket(campaign.question, session_domain)
+    mode: Literal["accepted", "candidate"] = (
+        "candidate" if (policy_mode or campaign.policy_mode) == "candidate" else "accepted"
+    )
+    baseline_id: str | None = None
+    if mode == "candidate":
+        base_obs = meta.baseline_observation(budget_bucket=bb, domain_bucket=db)
+        if base_obs:
+            baseline_id = base_obs.campaign_id
+    record = store.bind_campaign(
+        campaign_id=campaign.id,
+        policy_mode=mode,
+        domain_bucket=db,
+        budget_bucket=bb,
+        baseline_campaign_id=baseline_id,
+    )
+    store.save()
+    return LifetimeState(
+        graph=graph,
+        policy=record.to_search_policy(),
+        policy_record=record,
+        meta=meta,
+        store=store,
+        budget_bucket=bb,
+        domain_bucket=db,
+    )
 
 
 def enrich_prior_from_lifetime(
     prior_dict: dict[str, Any],
     graph: KnowledgeGraph,
     policy: SearchPolicy,
+    *,
+    policy_record: PolicyRecord | None = None,
 ) -> dict[str, Any]:
     """Inject cross-campaign facts and dead ends into prior (Campaign N+1 differs)."""
     out = dict(prior_dict or {})
@@ -55,26 +111,14 @@ def enrich_prior_from_lifetime(
     if theories:
         out["lifetime_theories"] = theories[:8]
     out["search_policy_generation"] = policy.generation
+    out["policy_id"] = policy_record.id if policy_record else None
+    out["policy_status"] = policy_record.status.value if policy_record else "ACCEPTED"
     out["theme_policy"] = {
         "boost": dict(policy.theme_boost),
         "penalty": dict(policy.theme_penalty),
         "saturated": list(policy.saturated_themes),
     }
     return out
-
-
-def apply_policy_to_tree_scoring(
-    campaign: ResearchCampaign,
-    policy: SearchPolicy,
-) -> None:
-    """Adjust frontier theme saturation from learned policy."""
-    penalty = 0.15
-    if policy.saturated_themes:
-        penalty = min(0.35, 0.15 + 0.05 * len(policy.saturated_themes))
-    campaign.hypothesis_tree.set_scoring_context(
-        campaign.question,
-        theme_saturation_penalty=penalty,
-    )
 
 
 def lifetime_context_for_seeds(graph: KnowledgeGraph, policy: SearchPolicy) -> str:
@@ -96,9 +140,21 @@ def ingest_campaign(
     campaign: ResearchCampaign,
     *,
     snapshot_metrics: dict[str, Any] | None = None,
+    session_domain: str = "",
+    analyst_overlay: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Persist campaign outcomes into lifetime knowledge + policy + meta-science."""
-    graph, policy, meta = load_lifetime_state()
+    """
+    Persist knowledge; evaluate candidate if calibration run; propose new candidate.
+    Never overwrites ACCEPTED policy without evaluation.
+    """
+    graph = KnowledgeGraph.load()
+    meta = MetaScienceLedger.load()
+    store = PolicyStore.load()
+    fitness = PolicyFitnessLedger.load()
+    bb = budget_bucket(campaign.compute_budget_seconds)
+    db = domain_bucket(campaign.question, session_domain)
+    binding = store.active_bindings.get(campaign.id)
+
     cid = campaign.id
     if cid not in graph.campaign_ids:
         graph.campaign_ids.append(cid)
@@ -128,7 +184,13 @@ def ingest_campaign(
         "closure_ratio": tree_sum.get("closure_ratio", 0),
         **(snapshot_metrics or {}),
     }
-    policy = update_policy_from_graph(policy, graph, campaign_metrics=metrics)
+
+    active_record = (
+        store.get_policy(binding.policy_id)
+        if binding
+        else store.accepted_policy(domain_bucket=db, budget_bucket=bb)
+    )
+    policy_mode = binding.policy_mode if binding else "accepted"
 
     theme_hist = tree.theme_counts()
     total = max(1, len(tree.nodes))
@@ -146,25 +208,103 @@ def ingest_campaign(
         theme_entropy=compute_theme_entropy(theme_hist),
         general_theme_fraction=round(general_frac, 4),
         compute_seconds=int(summary.get("compute_seconds_used") or 0),
-        policy_generation=policy.generation,
+        policy_generation=active_record.generation if active_record else 0,
         knowledge_claims=len(graph.claims),
         knowledge_failures=len(graph.failures),
+        budget_bucket=bb,
+        domain_bucket=db,
+        policy_id=active_record.id if active_record else None,
+        policy_mode=policy_mode,
     )
     meta.record(obs)
 
+    evaluation_report: dict[str, Any] | None = None
+    if (
+        binding
+        and binding.policy_mode == "candidate"
+        and active_record
+        and active_record.status == PolicyStatus.CANDIDATE
+    ):
+        baseline = meta.baseline_observation(
+            budget_bucket=bb,
+            domain_bucket=db,
+            exclude_campaign_id=cid,
+        )
+        if baseline:
+            accepted, detail = evaluate_candidate_policy(
+                predicted=active_record.predicted_effects,
+                baseline_obs=baseline,
+                current_obs=obs,
+                budget_bucket=bb,
+            )
+            fitness.record(FitnessRecord(
+                policy_id=active_record.id,
+                campaign_id=cid,
+                budget_bucket=bb,
+                domain_bucket=db,
+                predictions=detail["predicted"],
+                observations=detail["observed"],
+                residuals=detail["residuals"],
+                accept_or_reject=detail["accept_or_reject"],
+                detail=detail,
+            ))
+            if accepted:
+                store.accept_policy(active_record.id)
+            else:
+                store.reject_policy(active_record.id)
+            evaluation_report = {
+                "policy_id": active_record.id,
+                "accepted": accepted,
+                **detail,
+            }
+
+    parent = store.accepted_policy(domain_bucket=db, budget_bucket=bb)
+    if analyst_overlay:
+        rationale = str(analyst_overlay.get("rationale") or "")
+        from propab.policy_record import PredictedEffects
+        predicted = PredictedEffects.from_dict(analyst_overlay.get("predicted_effects"))
+        fals = list(analyst_overlay.get("falsification_conditions") or [])
+        params = analyst_overlay.get("mutation_params") or {}
+    else:
+        rationale, predicted, fals, params = propose_policy_narrative_sync(
+            parent=parent,
+            graph=graph,
+            meta=meta,
+            budget_bucket=bb,
+            domain_bucket=db,
+            campaign_metrics=metrics,
+        )
+
+    candidate = store.add_candidate(
+        parent=parent,
+        params=params,
+        rationale=rationale,
+        predicted=predicted,
+        falsification=fals,
+    )
+
+    store.unbind_campaign(cid)
     graph.save()
-    policy.save()
+    store.save()
     meta.save()
+    fitness.save()
 
     report = {
         "campaign_id": cid,
         "claims_added": len(claims),
         "failures_added": n_fail,
         "theories_added": n_theory,
-        "policy_generation": policy.generation,
-        "theme_boost": policy.theme_boost,
-        "theme_penalty": policy.theme_penalty,
+        "budget_bucket": bb,
+        "domain_bucket": db,
+        "active_policy_id": active_record.id if active_record else None,
+        "active_policy_status": active_record.status.value if active_record else None,
+        "candidate_policy_id": candidate.id,
+        "candidate_status": candidate.status.value,
+        "evaluation": evaluation_report,
+        "theme_boost": candidate.boosts,
+        "theme_penalty": candidate.penalties,
         "observations": len(meta.observations),
+        "rejected_policies": len(store.rejected_ids),
     }
     logger.info("[lifetime] ingested campaign %s: %s", cid, report)
     return report
