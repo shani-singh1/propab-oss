@@ -150,6 +150,7 @@ async def test_gate_failure_returns_insufficient_without_llm(emitter, llm) -> No
         patch("services.orchestrator.literature.expand_query", new_callable=AsyncMock) as eq,
         patch("services.orchestrator.literature.lookup_cached_paper_ids", new_callable=AsyncMock, return_value=([], None)),
         patch("services.orchestrator.literature._fetch_papers_multi_intent", new_callable=AsyncMock, return_value=ML_PAPERS[:1]),
+        patch("services.orchestrator.literature._fetch_papers_from_db_fallback", new_callable=AsyncMock, return_value=[]),
         patch("services.orchestrator.literature._upsert_papers", new_callable=AsyncMock),
         patch("services.orchestrator.literature._enrich_papers_with_pdf", new_callable=AsyncMock),
         patch("services.orchestrator.literature._expand_papers_via_citations", new_callable=AsyncMock, side_effect=lambda _s, p: p),

@@ -23,10 +23,11 @@ def test_control_hypothesis_detection():
 
 
 def test_theme_vector_not_all_general():
-    primary, secondary = extract_theme_vector(
+    primary, secondary, conf = extract_theme_vector(
         "Targeted removal of highest-degree nodes increases spectral gap in Barabási–Albert graphs"
     )
     assert primary != "general"
+    assert conf >= 0.5
     assert "targeted_removal" in [primary, *secondary] or "scale_free" in [primary, *secondary]
 
 
@@ -81,13 +82,14 @@ def test_paper_eligible_filters_control():
         evidence_hash="abc",
         verification_hash="def",
         node_role=NODE_ROLE_CONTROL,
+        verdict="confirmed",
     )
     assert not paper_eligible_finding(finding)
 
 
 def test_inconclusive_reason_populated():
     reason = classify_inconclusive_reason({"verdict_reason": "timeout after 120s"})
-    assert reason == "timeout"
+    assert reason == "code_timeout"
 
 
 def test_retest_gate_requires_information_gain():

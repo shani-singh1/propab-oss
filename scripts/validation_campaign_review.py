@@ -151,6 +151,15 @@ def review(state_path: Path) -> dict:
     # P4 — finding ledger
     ledger = tree.get("finding_ledger") or []
     checks["finding_ledger_operational"] = len(ledger) > 0 or api_confirmed == 0
+    null_verdict_ledger = sum(1 for e in ledger if not e.get("verdict"))
+    checks["ledger_verdicts_populated"] = len(ledger) == 0 or null_verdict_ledger == 0
+    if ledger and null_verdict_ledger:
+        issues.append(f"Ledger entries with null verdict: {null_verdict_ledger}")
+
+    coarse_inc = sum(1 for n in inc_nodes if n.get("inconclusive_reason") == "verification_failure")
+    checks["no_coarse_verification_failure"] = coarse_inc == 0
+    if coarse_inc:
+        issues.append(f"Coarse verification_failure still present: {coarse_inc}")
 
     # Paper ready + abstract counts (if paper generated)
     paper_ready = [e for e in events if e.get("event_type") == "paper.ready"]

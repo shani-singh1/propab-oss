@@ -285,7 +285,7 @@ def _enrich_finding_row(row: dict[str, Any], ev: dict[str, Any], verdict: str) -
         return None
     claim_type = classify_claim_strength(ev, verdict, hypothesis_text=text)
     replication = compute_replication_level(ev, hypothesis_text=text)
-    primary, secondary = extract_theme_vector(text)
+    primary, secondary, _ = extract_theme_vector(text)
     conf = float(row.get("confidence")) if row.get("confidence") is not None else None
     entry = {
         "id": str(row.get("id")),

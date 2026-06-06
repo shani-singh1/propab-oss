@@ -150,6 +150,19 @@ async def synthesize_prior_from_papers(
         for c in retrieval[:20]
     ]
 
+    paper_titles = [str(p.get("title") or p.get("id") or "") for p in papers if p.get("title") or p.get("id")]
+    await emitter.emit(
+        session_id=session_id,
+        event_type=EventType.CAMPAIGN_PROGRESS,
+        step="literature.prior_corpus",
+        payload={
+            "phase": "prior_synthesis",
+            "paper_count": len(papers),
+            "paper_titles": paper_titles[:24],
+            "chunk_count": len(retrieval),
+        },
+    )
+
     prompt = f"""You are a research prior builder.
 
 Research question:

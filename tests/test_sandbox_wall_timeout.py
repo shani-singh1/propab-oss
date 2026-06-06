@@ -26,3 +26,16 @@ def test_stderr_deadline() -> None:
 
 def test_plain_validation_error_not_timeout() -> None:
     assert _is_sandbox_wall_timeout({"ok": False, "message": "SyntaxError: invalid syntax"}) is False
+
+
+def test_docker_sdk_timeout_kwarg_mismatch_not_wall_timeout() -> None:
+    assert (
+        _is_sandbox_wall_timeout(
+            {
+                "ok": False,
+                "error_type": "execution_error",
+                "message": "run() got an unexpected keyword argument 'timeout'",
+            }
+        )
+        is False
+    )

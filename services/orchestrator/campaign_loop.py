@@ -49,17 +49,21 @@ from propab.research_quality import (
     NODE_ROLE_DISCOVERY,
     build_canonical_finding,
     build_mechanism_object,
+    build_refutation_mechanism,
+    build_verification_escalation,
     classify_claim_strength,
     classify_inconclusive_reason,
     compute_evidence_hash,
     compute_replication_level,
     compute_verification_hash,
     extract_theme_vector,
+    failure_signature_from_reason,
+    infer_finding_links,
     infer_node_role,
     is_discovery_node,
+    is_valid_evidence_for_hash,
     paper_eligible_finding,
     should_retest_inconclusive,
-    extract_theme_vector,
 )
 from propab.config import settings
 from propab.db import create_redis
@@ -80,6 +84,12 @@ from services.orchestrator.hypothesis_ranking import (
 )
 from services.orchestrator.hypotheses import _is_ml_template_hypothesis
 from services.orchestrator.intake import parse_question
+from services.orchestrator.lifetime_knowledge import (
+    enrich_prior_from_lifetime,
+    ingest_campaign,
+    lifetime_context_for_seeds,
+    load_lifetime_state,
+)
 from services.orchestrator.literature import build_prior
 from services.orchestrator.paper import _session_experiment_step_count, write_paper_minimal
 from services.orchestrator.schemas import Prior
@@ -132,22 +142,31 @@ def _apply_result_diagnostics(
     *,
     failure_reason: str | None = None,
 ) -> None:
-    """Persist quality metadata on tree nodes (fixes.md P0–P4)."""
+    """Persist quality metadata on tree nodes (fixes.md P0–P4 post-contagion)."""
     node = tree.nodes.get(node_id)
     if node is None:
         return
     node.node_role = infer_node_role(node.text)
+    node.lineage_length = tree.lineage_length(node_id)
 
     evidence_obj = parse_evidence_obj(evidence)
+    if verdict == "inconclusive" and not is_valid_evidence_for_hash(evidence_obj):
+        fr_blob = (failure_reason or evidence or "").lower()
+        if "timeout" in fr_blob or "revoke" in fr_blob:
+            evidence_obj.setdefault("verdict_reason", "code timeout")
+        elif not evidence_obj.get("verdict_reason"):
+            evidence_obj["verdict_reason"] = "no metric-bearing steps executed"
+
     ev_hash = compute_evidence_hash(evidence_obj)
     ver_hash = compute_verification_hash(evidence_obj)
     node.evidence_hash = ev_hash
     node.verification_hash = ver_hash
 
-    primary, secondary = extract_theme_vector(node.text)
+    primary, secondary, theme_conf = extract_theme_vector(node.text)
     node.primary_theme = primary
     node.secondary_themes = secondary
     node.theme_id = primary
+    node.theme_confidence = theme_conf
 
     claim_strength = classify_claim_strength(evidence_obj, verdict, hypothesis_text=node.text)
     node.claim_type = claim_strength
@@ -164,11 +183,12 @@ def _apply_result_diagnostics(
         evidence_obj, hypothesis_text=node.text, sibling_confirmed=sibling_confirmed,
     )
 
+    vr = str(evidence_obj.get("verdict_reason") or "")
     if verdict == "inconclusive":
         node.inconclusive_reason = classify_inconclusive_reason(
-            evidence_obj, failure_reason=failure_reason,
-            verdict_reason=str(evidence_obj.get("verdict_reason") or ""),
+            evidence_obj, failure_reason=failure_reason, verdict_reason=vr,
         )
+        node.failure_signature = failure_signature_from_reason(node.inconclusive_reason, verdict_reason=vr)
 
     effective_verdict = verdict
     if node.node_role == NODE_ROLE_CONTROL and verdict == "confirmed":
@@ -179,31 +199,43 @@ def _apply_result_diagnostics(
             tree.confirmed.remove(node_id)
 
     elif verdict == "confirmed" and is_discovery_node(node):
-        if not tree.register_evidence_hash(ev_hash):
+        if ev_hash is None:
+            effective_verdict = "inconclusive"
+            node.verdict = "inconclusive"
+            node.inconclusive_reason = "metric_missing"
+            node.failure_signature = failure_signature_from_reason(node.inconclusive_reason, verdict_reason=vr)
+            if node_id in tree.confirmed:
+                tree.confirmed.remove(node_id)
+        elif not tree.register_evidence_hash(ev_hash):
             effective_verdict = "inconclusive"
             node.verdict = "inconclusive"
             node.inconclusive_reason = "duplicate_evidence"
             node.confidence = min(confidence, 0.4)
             if node_id in tree.confirmed:
                 tree.confirmed.remove(node_id)
-        elif node.replication_level == "T1" and confidence < 0.7:
-            pass  # keep T1 but allow confirm
 
-    mechanism_text = None
     mechanism_obj = None
     if effective_verdict == "confirmed" and is_discovery_node(node):
-        mechanism_text = str(evidence_obj.get("verdict_reason") or node.text)[:400]
         mechanism_obj = build_mechanism_object(
             claim=node.text,
-            mechanism=mechanism_text,
+            mechanism=vr or None,
             evidence=evidence_obj,
+            verdict="confirmed",
         )
         if mechanism_obj:
-            node.mechanism = mechanism_obj.get("mechanism")
+            node.mechanism = mechanism_obj.get("effect") or mechanism_obj.get("mechanism")
+    elif effective_verdict == "refuted" and is_discovery_node(node):
+        mechanism_obj = build_refutation_mechanism(
+            claim=node.text,
+            evidence=evidence_obj,
+            verdict_reason=vr or str(failure_reason or "hypothesis refuted"),
+        )
+        node.mechanism = mechanism_obj.get("effect")
 
     node.verification_method = verification_method
 
     if effective_verdict in ("confirmed", "refuted") and claim_strength and is_discovery_node(node):
+        links = infer_finding_links(tree.finding_ledger, {"claim_id": node_id, "primary_theme": primary, "verdict": effective_verdict, "secondary_themes": secondary}, parent_id=node.parent_id)
         node.finding = build_canonical_finding(
             claim_id=node_id,
             claim=node.text,
@@ -217,9 +249,12 @@ def _apply_result_diagnostics(
             evidence_hash=ev_hash,
             verification_hash=ver_hash,
             node_role=node.node_role,
+            verdict=effective_verdict,
+            theme_confidence=theme_conf,
+            links=links,
+            failure_signature=node.failure_signature,
         )
-        if effective_verdict == "confirmed":
-            tree.finding_ledger.append(node.finding)
+        tree.finding_ledger.append(node.finding)
 
 
 def build_campaign_synthesis_payload(campaign: ResearchCampaign) -> dict[str, Any]:
@@ -844,10 +879,11 @@ async def expand_tree_node(
         snippets = list(prior_snippets or [])
         filtered: list[HypothesisNode] = []
         for child in children:
-            primary, secondary = extract_theme_vector(child.text)
+            primary, secondary, theme_conf = extract_theme_vector(child.text)
             child.primary_theme = primary
             child.secondary_themes = secondary
             child.theme_id = primary
+            child.theme_confidence = theme_conf
             child.node_role = infer_node_role(child.text)
             core = strip_question_suffix(child.text)
             if _is_ml_template_hypothesis(child.text):
@@ -936,12 +972,16 @@ async def generate_seed_hypotheses(
     emitter: EventEmitter,
     session_factory: async_sessionmaker,
     generation: int,
+    *,
+    lifetime_context: str = "",
 ) -> list[HypothesisNode]:
     """
     Generate seed hypotheses when the frontier is empty (new campaign or exhausted tree).
     Reuses the existing hypothesis generator but plants results in the tree.
     """
     prior_context = campaign.hypothesis_tree.confirmed_findings_text(max_n=10)
+    if lifetime_context.strip():
+        prior_context = f"{lifetime_context.strip()}\n\n{prior_context}".strip()
     raw_hyps = await generate_ranked_hypotheses(
         parsed_question,
         prior,
@@ -1022,6 +1062,14 @@ async def _campaign_dispatch_sub_agent(
         payload={"hypothesis_id": node.id, "depth": node.depth, "generation": node.generation},
         hypothesis_id=db_hid,
     )
+    parent = campaign.hypothesis_tree.nodes.get(node.parent_id) if node.parent_id else None
+    verification_escalation = build_verification_escalation(node, parent=parent)
+    agent_limits: dict[str, Any] = {}
+    if verification_escalation.get("prefer_smaller_experiment"):
+        scale = float(verification_escalation.get("max_steps_scale") or 0.75)
+        agent_limits["max_steps"] = max(5, int(int(settings.agent_max_steps) * scale))
+        agent_limits["max_tool_calls"] = max(3, int(int(getattr(settings, "agent_max_tool_calls", 12) or 12) * scale))
+
     ar = run_sub_agent_task.delay({
         "session_id": campaign.id,
         "hypothesis_id": db_hid,
@@ -1036,6 +1084,8 @@ async def _campaign_dispatch_sub_agent(
         "prior": prior_dict,
         "domain": domain,
         "question": campaign.question,
+        "verification_escalation": verification_escalation,
+        "agent_limits": agent_limits or None,
     })
     return {"ar": ar, "nid": node.id, "db_hid": db_hid, "enq_mono": time.monotonic()}
 
@@ -1414,11 +1464,30 @@ async def run_campaign_loop(
                 evidence_status="INSUFFICIENT_EVIDENCE",
             )
         prior_dict = prior.to_dict()
+        knowledge_graph, search_policy, _meta_ledger = load_lifetime_state()
+        prior_dict = enrich_prior_from_lifetime(prior_dict, knowledge_graph, search_policy)
+        lifetime_seed_context = lifetime_context_for_seeds(knowledge_graph, search_policy)
         prior_snippets = _prior_snippets(prior_dict)
+        theme_penalty = float(getattr(settings, "campaign_theme_saturation_penalty", 0.15))
+        if search_policy.saturated_themes:
+            theme_penalty = min(0.35, theme_penalty + 0.05 * len(search_policy.saturated_themes))
         campaign.hypothesis_tree.set_scoring_context(
             campaign.question,
             prior_snippets,
-            theme_saturation_penalty=float(getattr(settings, "campaign_theme_saturation_penalty", 0.15)),
+            theme_saturation_penalty=theme_penalty,
+        )
+        await emitter.emit(
+            session_id=campaign.id,
+            event_type=EventType.CAMPAIGN_PROGRESS,
+            step="lifetime.knowledge_loaded",
+            payload={
+                "policy_generation": search_policy.generation,
+                "claims_in_store": len(knowledge_graph.claims),
+                "failures_in_store": len(knowledge_graph.failures),
+                "theories_in_store": len(knowledge_graph.theories),
+                "theme_boost": search_policy.theme_boost,
+                "theme_penalty": search_policy.theme_penalty,
+            },
         )
         await db_set_research_session_prior(
             campaign.id, session_factory, json.dumps(prior_dict),
@@ -1478,6 +1547,8 @@ async def run_campaign_loop(
 
         # ── Stage 3: Campaign loop ────────────────────────────────────────
         last_checkpoint = time.monotonic()
+        campaign_started_mono = time.monotonic()
+        prior_theme_histogram: dict[str, int] | None = None
         generation = campaign.hypothesis_tree._generation
         # Recompute counters from any resumed tree so a reloaded campaign reports
         # distinct-node totals from the first wave (not stale persisted increments).
@@ -1522,6 +1593,7 @@ async def run_campaign_loop(
                 try:
                     seeds = await generate_seed_hypotheses(
                         campaign, prior, parsed, llm, emitter, session_factory, generation,
+                        lifetime_context=lifetime_seed_context,
                     )
                 except Exception as seed_exc:  # noqa: BLE001 — degrade, don't crash the campaign
                     logger.warning(
@@ -1716,11 +1788,17 @@ async def run_campaign_loop(
                 if effective_verdict == "confirmed" or breakthrough_found or (now_mono - last_checkpoint) >= checkpoint_secs:
                     await db_save_campaign(campaign, session_factory)
                     last_checkpoint = now_mono
+                    snap = frontier_snapshot(
+                        campaign.hypothesis_tree,
+                        campaign_started_mono=campaign_started_mono,
+                        prior_theme_histogram=prior_theme_histogram,
+                    )
+                    prior_theme_histogram = dict(snap.get("theme_histogram") or {})
                     await emitter.emit(
                         session_id=campaign.id,
                         event_type=EventType.CAMPAIGN_PROGRESS,
                         step="campaign.frontier_snapshot",
-                        payload=frontier_snapshot(campaign.hypothesis_tree),
+                        payload=snap,
                     )
 
             # Persist end-of-wave state so progress survives interruption.
@@ -1789,6 +1867,14 @@ async def run_campaign_loop(
             campaign = loaded
 
         await asyncio.to_thread(write_campaign_snapshot, "pre_paper", campaign, prior_dict)
+
+        lifetime_report = await asyncio.to_thread(ingest_campaign, campaign)
+        await emitter.emit(
+            session_id=campaign.id,
+            event_type=EventType.CAMPAIGN_PROGRESS,
+            step="lifetime.ingested",
+            payload=lifetime_report,
+        )
 
         # Write a paper with whatever we found
         await db_set_research_session_stage(campaign.id, session_factory, stage="campaign.paper")

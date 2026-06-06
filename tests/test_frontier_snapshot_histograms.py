@@ -21,3 +21,6 @@ def test_frontier_snapshot_includes_histograms() -> None:
     assert snap["claim_histogram"][CLAIM_FINITE_VERIFIED] == 1
     assert snap["tested"] == 1
     assert snap["pending"] == 1
+    assert "theme_entropy" in snap
+    assert "closure_ratio" in snap
+    assert "replication_health" in snap

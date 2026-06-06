@@ -115,7 +115,7 @@ def analyze_hypotheses(hypotheses: list[Any], *, llm_empty: bool, raw_count: int
             control += 1
         else:
             discovery += 1
-        primary, _ = extract_theme_vector(text)
+        primary, _, _ = extract_theme_vector(text)
         themes.append(primary)
     return {
         "llm_empty_generation": llm_empty,

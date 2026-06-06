@@ -1493,10 +1493,17 @@ async def run_sub_agent_async(payload: dict) -> dict:
         # Use significance module for the gate check
         sig_result = check_significance(successful_tool_outputs)
 
+        _vesc = payload.get("verification_escalation") if isinstance(payload.get("verification_escalation"), dict) else {}
+        min_metric_steps = int(_vesc.get("min_metric_steps") or getattr(settings, "min_metric_steps_for_confirm", 2))
+        if _vesc.get("require_replication"):
+            min_metric_steps = max(min_metric_steps, 3)
+        if _vesc.get("extra_significance_rounds"):
+            min_metric_steps = max(min_metric_steps, 2)
+
         verdict, verdict_reason = classify_verdict(
             evidence_obj,
             sig_result,
-            min_metric_steps_for_confirm=int(getattr(settings, "min_metric_steps_for_confirm", 2)),
+            min_metric_steps_for_confirm=min_metric_steps,
         )
         evidence_obj["verdict_reason"] = verdict_reason
         claim_type = classify_claim_type(evidence_obj, verdict, hypothesis_text=str(hyp_text or ""))

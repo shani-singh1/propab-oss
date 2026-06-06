@@ -1,31 +1,29 @@
-"""Lightweight campaign diagnostics (fixes.md): logging only, no orchestration changes."""
+"""Campaign diagnostics (fixes.md P4.2, P5): online metrics + frontier snapshots."""
 from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any
 
 from propab.hypothesis_tree import HypothesisTree
+from propab.research_quality import (
+    REPLICATION_T1,
+    REPLICATION_T2,
+    REPLICATION_T3,
+    compute_theme_concentration,
+    compute_theme_entropy,
+    extract_theme_vector,
+)
 
 
 def infer_hypothesis_theme(text: str) -> str:
-    """Coarse theme bucket from hypothesis wording (domain-agnostic heuristics)."""
-    t = (text or "").lower()
-    if any(k in t for k in (" mod ", " modulo ", " residue", " ≡ ", " congruen")):
-        return "residue_class"
-    if any(k in t for k in ("parametric", "family", "identity", "closed-form", "closed form")):
-        return "parametric_family"
-    if any(k in t for k in ("exhaust", "search depth", "up to n", "for all n", "counterexample")):
-        return "finite_verification"
-    if any(k in t for k in ("density", "proportion", "mean number", "count of")):
-        return "statistical_density"
-    if any(k in t for k in ("unit fraction", "egyptian", "1/x", "1/n")):
-        return "unit_fraction"
-    return "general"
+    """Coarse theme bucket — delegates to extract_theme_vector (P4.1)."""
+    primary, _, _ = extract_theme_vector(text)
+    return primary
 
 
 def classify_verification_method(evidence_summary: str) -> str:
-    """Classify how a hypothesis was verified from worker evidence text."""
     raw = evidence_summary or ""
     low = raw.lower()
     if "counterexample" in low or "verified_false" in low or '"verified": false' in low:
@@ -41,8 +39,49 @@ def classify_verification_method(evidence_summary: str) -> str:
     return "unknown"
 
 
-def frontier_snapshot(tree: HypothesisTree) -> dict[str, Any]:
-    """Counts for periodic frontier diagnostics (fixes.md P4.2)."""
+def _theme_lifetime(tree: HypothesisTree) -> dict[str, int]:
+    """P4.2 — generations spanned per theme (max gen - min gen per theme)."""
+    by_theme: dict[str, list[int]] = {}
+    for n in tree.nodes.values():
+        tid = n.primary_theme or n.theme_id or "general"
+        by_theme.setdefault(tid, []).append(int(n.generation))
+    return {
+        t: (max(gens) - min(gens) if gens else 0)
+        for t, gens in by_theme.items()
+    }
+
+
+def _replication_health(tree: HypothesisTree) -> dict[str, int]:
+    """P5 — T1/T2/T3 distribution on tested nodes."""
+    counts = {REPLICATION_T1: 0, REPLICATION_T2: 0, REPLICATION_T3: 0}
+    for n in tree.nodes.values():
+        if n.verdict == "pending":
+            continue
+        tier = n.replication_level or REPLICATION_T1
+        if tier in counts:
+            counts[tier] += 1
+    return counts
+
+
+def _knowledge_velocity(tree: HypothesisTree, *, started_at_mono: float | None = None) -> dict[str, float]:
+    """P5 — findings and mechanisms per hour (approximate from node counts)."""
+    elapsed_h = max(0.01, (time.monotonic() - started_at_mono) / 3600.0) if started_at_mono else 1.0
+    confirmed = sum(1 for n in tree.nodes.values() if n.verdict == "confirmed")
+    with_mech = sum(1 for n in tree.nodes.values() if n.mechanism or (n.finding and n.finding.get("mechanisms")))
+    return {
+        "findings_per_hour": round(confirmed / elapsed_h, 3),
+        "mechanisms_per_hour": round(with_mech / elapsed_h, 3),
+        "elapsed_hours": round(elapsed_h, 3),
+    }
+
+
+def frontier_snapshot(
+    tree: HypothesisTree,
+    *,
+    campaign_started_mono: float | None = None,
+    prior_theme_histogram: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """Counts + P4.2 theme evolution + P5 campaign analytics."""
     nodes = tree.nodes
     by_verdict: dict[str, int] = {}
     theme_histogram: dict[str, int] = {}
@@ -53,24 +92,57 @@ def frontier_snapshot(tree: HypothesisTree) -> dict[str, Any]:
         theme_histogram[tid] = theme_histogram.get(tid, 0) + 1
         if n.claim_type:
             claim_histogram[n.claim_type] = claim_histogram.get(n.claim_type, 0) + 1
+
     pending = by_verdict.get("pending", 0)
     executed = sum(v for k, v in by_verdict.items() if k != "pending")
+    decisive = by_verdict.get("confirmed", 0) + by_verdict.get("refuted", 0)
+
+    theme_entropy = compute_theme_entropy(theme_histogram)
+    theme_concentration = compute_theme_concentration(theme_histogram)
+    general_frac = round(theme_histogram.get("general", 0) / max(1, len(nodes)), 4)
+
+    theme_drift = 0.0
+    if prior_theme_histogram:
+        keys = set(prior_theme_histogram) | set(theme_histogram)
+        drift = sum(
+            abs(theme_histogram.get(k, 0) - prior_theme_histogram.get(k, 0))
+            for k in keys
+        )
+        theme_drift = round(drift / max(1, len(nodes)), 4)
+
+    lineages = [n.lineage_length or tree.lineage_length(n.id) for n in nodes.values()]
+    avg_lineage = round(sum(lineages) / len(lineages), 2) if lineages else 0.0
+
     return {
         "generated": len(nodes),
         "executed": executed,
         "pending": pending,
         "tested": executed,
         "frontier_size": len(tree.frontier),
-        "confirmed": len(tree.confirmed),
+        "confirmed": by_verdict.get("confirmed", 0),
         "by_verdict": by_verdict,
         "theme_histogram": theme_histogram,
         "claim_histogram": claim_histogram,
         "max_depth": max((n.depth for n in nodes.values()), default=0),
+        "max_lineage": max(lineages) if lineages else 0,
+        "avg_lineage": avg_lineage,
+        "generation_histogram": tree.generation_histogram(),
+        "theme_entropy": theme_entropy,
+        "theme_concentration": theme_concentration,
+        "theme_lifetime": _theme_lifetime(tree),
+        "general_theme_fraction": general_frac,
+        "closure_ratio": round(decisive / executed, 4) if executed else 0.0,
+        "replication_health": _replication_health(tree),
+        "knowledge_velocity": _knowledge_velocity(tree, started_at_mono=campaign_started_mono),
+        "search_coherence": {
+            "theme_drift": theme_drift,
+            "lineage_drift": avg_lineage,
+        },
+        "ledger_size": len(tree.finding_ledger),
     }
 
 
 def parse_evidence_obj(evidence_summary: str) -> dict[str, Any]:
-    """Best-effort parse of evidence= JSON embedded in evidence_summary."""
     if not evidence_summary:
         return {}
     m = re.search(r"evidence=(\{.*?\});", evidence_summary)

@@ -102,6 +102,9 @@ class HypothesisNode:
     verification_hash: str | None = None
     replication_level: str | None = None
     inconclusive_reason: str | None = None
+    failure_signature: str | None = None
+    theme_confidence: float | None = None
+    lineage_length: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -131,6 +134,9 @@ class HypothesisNode:
             "verification_hash": self.verification_hash,
             "replication_level": self.replication_level,
             "inconclusive_reason": self.inconclusive_reason,
+            "failure_signature": self.failure_signature,
+            "theme_confidence": self.theme_confidence,
+            "lineage_length": self.lineage_length,
         }
 
     @classmethod
@@ -162,6 +168,9 @@ class HypothesisNode:
             verification_hash=data.get("verification_hash"),
             replication_level=data.get("replication_level"),
             inconclusive_reason=data.get("inconclusive_reason"),
+            failure_signature=data.get("failure_signature"),
+            theme_confidence=data.get("theme_confidence"),
+            lineage_length=data.get("lineage_length"),
         )
 
 
@@ -238,7 +247,7 @@ class HypothesisTree:
 
         added: list[HypothesisNode] = []
         for h in hypotheses:
-            primary, secondary = extract_theme_vector(h["text"])
+            primary, secondary, theme_conf = extract_theme_vector(h["text"])
             node = HypothesisNode(
                 id=str(uuid4()),
                 text=h["text"],
@@ -250,6 +259,8 @@ class HypothesisTree:
                 primary_theme=primary,
                 secondary_themes=secondary,
                 theme_id=h.get("theme_id") or primary,
+                theme_confidence=theme_conf,
+                lineage_length=1,
                 question_relevance_score=h.get("question_relevance_score"),
             )
             self.nodes[node.id] = node
@@ -289,10 +300,13 @@ class HypothesisTree:
             return False
         node.node_role = infer_node_role(node.text)
         if not node.primary_theme:
-            primary, secondary = extract_theme_vector(node.text)
+            primary, secondary, theme_conf = extract_theme_vector(node.text)
             node.primary_theme = primary
             node.secondary_themes = secondary
             node.theme_id = primary
+            node.theme_confidence = theme_conf
+        if node.lineage_length is None:
+            node.lineage_length = self.lineage_length(node_id)
         node.verdict = verdict
         node.confidence = confidence
         if evidence_summary:
@@ -395,7 +409,7 @@ class HypothesisTree:
         for item in items:
             if not isinstance(item, dict) or not item.get("text"):
                 continue
-            primary, secondary = extract_theme_vector(item["text"])
+            primary, secondary, theme_conf = extract_theme_vector(item["text"])
             child = HypothesisNode(
                 id=str(uuid4()),
                 text=item["text"],
@@ -408,6 +422,8 @@ class HypothesisTree:
                 primary_theme=primary,
                 secondary_themes=secondary,
                 theme_id=item.get("theme_id") or primary,
+                theme_confidence=theme_conf,
+                lineage_length=self.lineage_length(parent.id) + 1 if parent.id else 1,
                 question_relevance_score=item.get("question_relevance_score"),
             )
             children.append(child)
@@ -459,13 +475,36 @@ class HypothesisTree:
             candidates.sort(key=self._information_gain_score, reverse=True)
         return candidates[0]
 
+    def lineage_length(self, node_id: str) -> int:
+        """P1.1 — ancestry depth by parent chain (population lineage, not tree depth fiction)."""
+        length = 0
+        cur: str | None = node_id
+        seen: set[str] = set()
+        while cur and cur not in seen:
+            seen.add(cur)
+            length += 1
+            n = self.nodes.get(cur)
+            if n is None:
+                break
+            cur = n.parent_id
+        return max(1, length)
+
+    def generation_histogram(self) -> dict[str, int]:
+        hist: dict[str, int] = {}
+        for n in self.nodes.values():
+            g = str(n.generation)
+            hist[g] = hist.get(g, 0) + 1
+        return hist
+
     def _information_gain_score(self, node: HypothesisNode) -> float:
         """
-        Expected information gain for frontier ranking (fixes.md P1.1).
+        Expected information gain × closure probability (fixes.md P1.2).
 
-        Components: question relevance, novelty (inverse theme saturation),
-        evidence uncertainty from parent verdict, theme coverage bonus.
+        Components: relevance, novelty, parent uncertainty, coverage; scaled by
+        closure_probability so high-IG exploration balances decisive outcomes.
         """
+        from propab.research_quality import estimate_closure_probability
+
         counts = self.theme_counts()
         theme_id = node.primary_theme or node.theme_id or "general"
         theme_count = counts.get(theme_id, 1)
@@ -489,15 +528,18 @@ class HypothesisTree:
             uncertainty = 0.60
 
         coverage_bonus = max(0.0, 1.0 - min(1.0, theme_count / 12.0))
-        depth_bonus = 1.0 / (1.0 + node.depth * 0.25)
+        lineage = float(node.lineage_length or self.lineage_length(node.id))
+        lineage_bonus = min(0.15, lineage * 0.03)
 
-        score = (
+        info_gain = (
             0.30 * relevance
             + 0.25 * novelty
             + 0.25 * uncertainty
             + 0.10 * coverage_bonus
-            + 0.10 * depth_bonus
+            + 0.10 * min(1.0, lineage_bonus * 5)
         )
+        closure = estimate_closure_probability(node, parent=parent)
+        score = info_gain * closure
         node.frontier_score = round(score, 4)
         return score
 
@@ -554,14 +596,19 @@ class HypothesisTree:
         verdicts: dict[str, int] = {}
         for node in self.nodes.values():
             verdicts[node.verdict] = verdicts.get(node.verdict, 0) + 1
+        lineages = [n.lineage_length or self.lineage_length(n.id) for n in self.nodes.values()]
+        tested = sum(v for k, v in verdicts.items() if k != "pending")
+        decisive = verdicts.get("confirmed", 0) + verdicts.get("refuted", 0)
         return {
             "total_nodes": len(self.nodes),
             "frontier_size": len(self.frontier),
-            # Count by verdict (authoritative) rather than len(self.confirmed); the list is a
-            # convenience index for lineage scoring and must never define the reported count.
             "confirmed_count": verdicts.get("confirmed", 0),
             "exhausted_count": len(self.exhausted),
             "max_depth": max((n.depth for n in self.nodes.values()), default=0),
+            "max_lineage": max(lineages) if lineages else 0,
+            "avg_lineage": round(sum(lineages) / len(lineages), 2) if lineages else 0.0,
+            "max_generation": max((n.generation for n in self.nodes.values()), default=0),
+            "closure_ratio": round(decisive / tested, 4) if tested else 0.0,
             "verdict_counts": verdicts,
         }
 
