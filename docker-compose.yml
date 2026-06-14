@@ -90,6 +90,7 @@ services:
     build:
       context: .
       dockerfile: services/worker/Dockerfile
+    command: ["celery", "-A", "services.worker.celery_app", "worker", "--loglevel=info", "--concurrency=16"]
     environment:
       - DATABASE_URL=postgresql+asyncpg://propab:propab@postgres:5432/propab
       - REDIS_URL=redis://redis:6379/0

@@ -63,15 +63,26 @@ class MetaScienceLedger:
             if o.budget_bucket == budget_bucket and o.domain_bucket == domain_bucket
         ]
 
+    def observation_for_campaign(self, campaign_id: str) -> CampaignObservation | None:
+        for o in self.observations:
+            if o.campaign_id == campaign_id:
+                return o
+        return None
+
     def baseline_observation(
         self,
         *,
         budget_bucket: str,
         domain_bucket: str,
         exclude_campaign_id: str | None = None,
+        pin_campaign_id: str | None = None,
         policy_mode: str = "accepted",
     ) -> CampaignObservation | None:
         """Last observation in bucket (for delta / evaluation baseline)."""
+        if pin_campaign_id:
+            pinned = self.observation_for_campaign(pin_campaign_id)
+            if pinned is not None:
+                return pinned
         rows = self.observations_in_bucket(
             budget_bucket=budget_bucket,
             domain_bucket=domain_bucket,

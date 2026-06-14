@@ -90,6 +90,9 @@ from services.orchestrator.lifetime_knowledge import (
     lifetime_context_for_seeds,
     load_lifetime_state,
 )
+from propab.entropy_trajectory import summarize_entropy_trajectory, trajectory_point_from_snapshot
+from propab.layer05.simulation_fitness_ledger import SimulationFitnessLedger
+from propab.policy_fitness_ledger import PolicyFitnessLedger
 from services.orchestrator.policy_analyst import llm_policy_analyst
 from services.orchestrator.literature import build_prior
 from services.orchestrator.paper import _session_experiment_step_count, write_paper_minimal
@@ -1561,6 +1564,7 @@ async def run_campaign_loop(
         last_checkpoint = time.monotonic()
         campaign_started_mono = time.monotonic()
         prior_theme_histogram: dict[str, int] | None = None
+        entropy_trajectory_points: list[dict] = []
         generation = campaign.hypothesis_tree._generation
         # Recompute counters from any resumed tree so a reloaded campaign reports
         # distinct-node totals from the first wave (not stale persisted increments).
@@ -1806,6 +1810,7 @@ async def run_campaign_loop(
                         prior_theme_histogram=prior_theme_histogram,
                     )
                     prior_theme_histogram = dict(snap.get("theme_histogram") or {})
+                    entropy_trajectory_points.append(trajectory_point_from_snapshot(snap))
                     await emitter.emit(
                         session_id=campaign.id,
                         event_type=EventType.CAMPAIGN_PROGRESS,
@@ -1881,21 +1886,30 @@ async def run_campaign_loop(
         await asyncio.to_thread(write_campaign_snapshot, "pre_paper", campaign, prior_dict)
 
         tree_sum = campaign.hypothesis_tree.summary()
+        trajectory_summary = summarize_entropy_trajectory(entropy_trajectory_points)
         analyst_overlay = None
         try:
             parent = lifetime.store.accepted_policy(
                 domain_bucket=lifetime.domain_bucket,
                 budget_bucket=lifetime.budget_bucket,
             )
+            fitness = await asyncio.to_thread(PolicyFitnessLedger.load)
+            sim_fitness = await asyncio.to_thread(SimulationFitnessLedger.load)
             rationale, predicted, fals, params = await llm_policy_analyst(
                 parent=parent,
                 graph=lifetime.graph,
                 meta=lifetime.meta,
                 budget_bucket=lifetime.budget_bucket,
                 domain_bucket=lifetime.domain_bucket,
-                campaign_metrics={"closure_ratio": tree_sum.get("closure_ratio", 0)},
+                campaign_metrics={
+                    "closure_ratio": tree_sum.get("closure_ratio", 0),
+                    "entropy_trajectory": trajectory_summary.to_dict(),
+                },
                 llm=llm,
                 session_id=campaign.id,
+                trajectory_summary=trajectory_summary,
+                fitness=fitness,
+                simulation_fitness=sim_fitness,
             )
             analyst_overlay = {
                 "rationale": rationale,
@@ -1914,6 +1928,7 @@ async def run_campaign_loop(
             campaign,
             session_domain=domain,
             analyst_overlay=analyst_overlay,
+            snapshot_metrics={"entropy_trajectory": trajectory_summary.to_dict()},
         )
         await emitter.emit(
             session_id=campaign.id,

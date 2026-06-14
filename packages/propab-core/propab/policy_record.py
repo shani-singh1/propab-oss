@@ -18,18 +18,37 @@ class PolicyStatus(str, Enum):
 @dataclass
 class PredictedEffects:
     closure_ratio_delta: float = 0.0
-    theme_entropy_delta: float = 0.0
     compute_efficiency_delta: float = 0.0
     refute_ratio_delta: float = 0.0
+    # V2 entropy dynamics (replaces theme_entropy_delta per fixes.md P1)
+    start_H: float = 0.0
+    growth_rate: float = 0.0
+    saturation_H: float = 0.0
+    cross_H_1_5_at_tested: float = 0.0
+    cross_H_2_0_at_tested: float = 0.0
+    theme_entropy_delta: float = 0.0  # legacy — ignored when V2 fields are set
 
     def to_dict(self) -> dict[str, float]:
         return asdict(self)
+
+    def uses_entropy_dynamics(self) -> bool:
+        return any(
+            getattr(self, k, 0) != 0
+            for k in (
+                "start_H",
+                "growth_rate",
+                "saturation_H",
+                "cross_H_1_5_at_tested",
+                "cross_H_2_0_at_tested",
+            )
+        )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> PredictedEffects:
         if not data:
             return cls()
-        return cls(**{k: float(data.get(k) or 0) for k in cls.__dataclass_fields__})
+        fields = {k: float(data.get(k) or 0) for k in cls.__dataclass_fields__}
+        return cls(**fields)
 
 
 @dataclass

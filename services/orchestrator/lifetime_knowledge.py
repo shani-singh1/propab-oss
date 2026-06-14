@@ -20,6 +20,7 @@ from propab.negative_knowledge import (
     merge_failures_into_graph,
 )
 from propab.policy_buckets import budget_bucket, domain_bucket
+from propab.entropy_trajectory import EntropyTrajectorySummary, summarize_entropy_trajectory
 from propab.policy_evaluation import evaluate_candidate_policy
 from propab.policy_fitness_ledger import FitnessRecord, PolicyFitnessLedger
 from propab.policy_record import PolicyRecord, PolicyStatus
@@ -180,6 +181,14 @@ def ingest_campaign(
 
     summary = campaign.summary()
     tree_sum = tree.summary()
+    raw_traj = (snapshot_metrics or {}).get("entropy_trajectory")
+    trajectory_summary: EntropyTrajectorySummary | None = None
+    if isinstance(raw_traj, dict) and raw_traj.get("n_snapshots", 0) > 0:
+        trajectory_summary = EntropyTrajectorySummary(**{
+            k: raw_traj[k]
+            for k in EntropyTrajectorySummary.__dataclass_fields__
+            if k in raw_traj
+        })
     metrics = {
         "closure_ratio": tree_sum.get("closure_ratio", 0),
         **(snapshot_metrics or {}),
@@ -219,16 +228,12 @@ def ingest_campaign(
     meta.record(obs)
 
     evaluation_report: dict[str, Any] | None = None
-    if (
-        binding
-        and binding.policy_mode == "candidate"
-        and active_record
-        and active_record.status == PolicyStatus.CANDIDATE
-    ):
+    if binding and binding.policy_mode == "candidate" and active_record:
         baseline = meta.baseline_observation(
             budget_bucket=bb,
             domain_bucket=db,
             exclude_campaign_id=cid,
+            pin_campaign_id=binding.baseline_campaign_id,
         )
         if baseline:
             accepted, detail = evaluate_candidate_policy(
@@ -236,7 +241,13 @@ def ingest_campaign(
                 baseline_obs=baseline,
                 current_obs=obs,
                 budget_bucket=bb,
+                trajectory_summary=trajectory_summary,
             )
+            detail = {
+                **detail,
+                "baseline_campaign_id": baseline.campaign_id,
+                "accepted_policy_id": store.accepted.get(f"{db}:{bb}"),
+            }
             fitness.record(FitnessRecord(
                 policy_id=active_record.id,
                 campaign_id=cid,
@@ -248,12 +259,15 @@ def ingest_campaign(
                 accept_or_reject=detail["accept_or_reject"],
                 detail=detail,
             ))
-            if accepted:
-                store.accept_policy(active_record.id)
-            else:
-                store.reject_policy(active_record.id)
+            # Residual batch: always record evaluation; promote/reject at most once.
+            if active_record.status == PolicyStatus.CANDIDATE:
+                if accepted:
+                    store.accept_policy(active_record.id)
+                else:
+                    store.reject_policy(active_record.id)
             evaluation_report = {
                 "policy_id": active_record.id,
+                "policy_status_at_eval": active_record.status.value,
                 "accepted": accepted,
                 **detail,
             }
@@ -273,6 +287,8 @@ def ingest_campaign(
             budget_bucket=bb,
             domain_bucket=db,
             campaign_metrics=metrics,
+            trajectory_summary=trajectory_summary,
+            fitness=fitness,
         )
 
     candidate = store.add_candidate(
