@@ -63,6 +63,16 @@ python scripts/run_operator_credit.py --all-db   # priors from gold corpus
 
 See [docs/campaign_era_partitioning.md](./docs/campaign_era_partitioning.md).
 
+**Demo execution** (capability proof, architecture frozen):
+
+```bash
+python scripts/build_demo_assets.py          # P6 assets from gold corpus
+python scripts/run_demo_pilot.py --minutes 15  # P4 pilot
+python scripts/run_demo_main.py --hours 3    # P5 main run
+```
+
+See [docs/demo_execution.md](./docs/demo_execution.md).
+
 ### Roadmap phases (`ARCHITECTURE.md` §16)
 
 | Phase | Scope | Repo status |
