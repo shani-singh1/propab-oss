@@ -7,7 +7,9 @@ from propab.operator_credit.counterfactual_replay import CounterfactualSpec, run
 from propab.operator_credit.credit_cycle import OperatorCreditReport, run_operator_credit_cycle
 from propab.operator_credit.db_trace_loader import (
     CampaignDBBundle,
+    campaign_ids_from_trajectory,
     extract_traces_from_db_bundle,
+    load_bundles_from_db,
     load_bundles_from_trajectory_file,
 )
 from propab.operator_credit.difference_rewards import DifferenceRewardLedger, OperatorCredit
@@ -41,8 +43,10 @@ __all__ = [
     "OperatorStatistics",
     "OperatorTraceLedger",
     "SearchStateV3",
-    "extract_traces_from_db_bundle",
+    "campaign_ids_from_trajectory",
     "ingest_trajectory_file",
+    "extract_traces_from_db_bundle",
+    "load_bundles_from_db",
     "load_bundles_from_trajectory_file",
     "run_counterfactual_suite",
     "run_operator_bench_suite",

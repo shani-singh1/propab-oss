@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from propab.hypothesis_tree import HypothesisNode, HypothesisTree
@@ -122,6 +123,7 @@ def extract_traces_from_db_bundle(bundle: CampaignDBBundle) -> OperatorTraceLedg
             tool_calls=bundle.tool_calls,
             hypothesis_db_ids=bundle.hypothesis_db_ids,
         )
+        trace.source = "db" if bundle.tool_calls else "tree"
         ledger.add(trace)
     return ledger
 
@@ -232,6 +234,22 @@ async def load_campaign_db_bundle(campaign_id: str) -> CampaignDBBundle:
         bundle.baseline_campaign_id = binding.baseline_campaign_id
 
     return bundle
+
+
+async def load_bundles_from_db(campaign_ids: list[str]) -> list[CampaignDBBundle]:
+    """Load multiple campaign bundles from Postgres."""
+    return [await load_campaign_db_bundle(cid) for cid in campaign_ids]
+
+
+def campaign_ids_from_trajectory(path: Path | str) -> list[str]:
+    """Extract campaign IDs from entropy trajectory JSON."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    ids: list[str] = []
+    for camp in data.get("campaigns") or []:
+        cid = camp.get("campaign_id")
+        if cid:
+            ids.append(str(cid))
+    return ids
 
 
 def load_bundles_from_trajectory_file(

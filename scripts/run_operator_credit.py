@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -21,6 +22,27 @@ sys.path.insert(0, str(ROOT / "services" / "orchestrator"))
 from propab.operator_credit.credit_cycle import run_operator_credit_cycle
 
 
+async def _all_db_campaign_ids() -> list[str]:
+    from sqlalchemy import text
+
+    from propab.config import settings
+    from propab.db import create_engine, create_session_factory
+
+    engine = create_engine(settings.database_url)
+    session_factory = create_session_factory(engine)
+    async with session_factory() as db:
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT id::text FROM research_campaigns "
+                    "WHERE hypothesis_tree_json IS NOT NULL ORDER BY id"
+                ),
+            )
+        ).fetchall()
+    await engine.dispose()
+    return [str(r[0]) for r in rows]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Operator credit assignment")
     parser.add_argument(
@@ -28,6 +50,16 @@ def main() -> int:
         default=str(ROOT / "artifacts" / "entropy_trajectories.json"),
     )
     parser.add_argument("--no-persist", action="store_true")
+    parser.add_argument(
+        "--all-db",
+        action="store_true",
+        help="Use all campaigns with hypothesis trees in Postgres",
+    )
+    parser.add_argument(
+        "--no-db",
+        action="store_true",
+        help="Skip Postgres; use offline trajectory/snapshot approximations only",
+    )
     parser.add_argument(
         "--out",
         default=str(ROOT / "artifacts" / "operator_credit_report.json"),
@@ -39,9 +71,16 @@ def main() -> int:
         print(f"Trajectories not found: {traj}", file=sys.stderr)
         return 1
 
+    campaign_ids = None
+    if args.all_db:
+        campaign_ids = asyncio.run(_all_db_campaign_ids())
+        print(f"Loading {len(campaign_ids)} campaigns from Postgres...", flush=True)
+
     report, traces, credits = run_operator_credit_cycle(
         trajectory_path=traj,
+        campaign_ids=campaign_ids,
         persist=not args.no_persist,
+        use_db=not args.no_db,
     )
     payload = {
         "layer": "operator_credit",
