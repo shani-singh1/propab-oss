@@ -62,7 +62,22 @@ def test_db_bundle_enriched_trace():
     assert trace.expansion_type == "mechanistic"
     assert len(trace.tool_calls) == 1
     assert trace.duration_ms == 120
-    assert trace.source == "tree"
+
+
+def test_db_bundle_source_tagging():
+    tree = _tree_with_tools()
+    bundle = CampaignDBBundle(
+        campaign_id="c1",
+        tree=tree,
+        tool_calls=[ToolCallRecord("numeric_summary", True, 50, "db-h1")],
+        hypothesis_db_ids={"n1": "db-h1"},
+    )
+    ledger = extract_traces_from_db_bundle(bundle)
+    assert all(t.source == "db" for t in ledger.traces)
+
+    offline = CampaignDBBundle(campaign_id="c1", tree=tree)
+    ledger2 = extract_traces_from_db_bundle(offline)
+    assert all(t.source == "tree" for t in ledger2.traces)
 
 
 def test_extract_traces_from_db_bundle():
@@ -144,6 +159,19 @@ def test_search_state_v3_vector():
     vec = state.to_vector()
     assert len(vec) == 15
     assert 0 <= state.uncertainty <= 1
+    assert state.search_phase() in ("cold_start", "growth", "plateau")
+
+
+def test_search_state_v3_phase_from_snapshot():
+    cold = SearchStateV3.from_snapshot({"tested": 2, "theme_entropy": 0.5, "closure_ratio": 0.1})
+    assert cold.search_phase() in ("cold_start", "growth")
+    plateau = SearchStateV3.from_snapshot({
+        "tested": 50,
+        "theme_entropy": 0.8,
+        "closure_ratio": 0.7,
+        "theme_histogram": {"a": 40, "b": 5},
+    })
+    assert plateau.search_phase() in ("plateau", "growth")
 
 
 def test_operator_bench_suite():
@@ -157,6 +185,9 @@ def test_operator_bench_suite():
     )
     assert len(bench.results) > 0
     assert bench.weakest_family
+    assert "cold_start" in bench.by_phase
+    assert "growth" in bench.by_phase
+    assert "plateau" in bench.by_phase
 
 
 def test_corpus_ingest(tmp_path):
@@ -201,8 +232,10 @@ def test_full_credit_cycle_with_tree(tmp_path, monkeypatch):
         trajectory_path=traj,
         trees={"c1": tree},
         persist=True,
+        use_db=False,
     )
     assert report.n_traces_from_tree == 2
+    assert report.n_traces_from_db == 0
     assert report.n_dag_edges > 0
     assert report.n_hierarchical_credits > 0
     assert report.n_counterfactuals > 0

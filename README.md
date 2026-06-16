@@ -243,6 +243,33 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full tool submission checklist.
 
 ---
 
+## Offline operator credit (Layer 0.5+)
+
+Zero-token infrastructure for operator evolution: DB-backed traces, counterfactual replay,
+hierarchical credit, and OperatorBench. Requires Postgres with completed campaigns.
+
+```bash
+# 1. Start stack (Postgres must be up)
+docker compose up -d postgres redis migrate
+
+# 2. Extract entropy trajectories from existing campaigns (once)
+python scripts/extract_entropy_trajectories.py
+
+# 3. Harvest DB-backed operator traces
+python scripts/harvest_db_traces.py
+
+# 4. Full credit cycle (prefers Postgres; falls back to snapshots)
+python scripts/run_operator_credit.py
+
+# Offline-only (no DB):
+python scripts/run_operator_credit.py --no-db
+```
+
+Outputs land in `artifacts/operator_credit_report.json` and `data/lifetime_knowledge/`.
+Theory doc: [docs/search_dynamics.md](./docs/search_dynamics.md).
+
+---
+
 ## Architecture
 
 Full system design, agent contracts, event schema, data layer, and failure handling:
