@@ -138,8 +138,11 @@ def build_difference_rewards(
 
     if trees and candidate_policy and baseline_policy:
         for cid, tree in trees.items():
-            snaps = snapshots_by_campaign.get(cid, [])
-            if not snaps:
+            snaps = [
+                s for s in snapshots_by_campaign.get(cid, [])
+                if s.get("theme_entropy") is not None
+            ]
+            if len(snaps) < 2:
                 continue
             branching_credit = replay_branching_counterfactual(
                 campaign_id=cid,

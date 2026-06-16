@@ -55,7 +55,23 @@ class SearchStateV3:
         d = asdict(self)
         d["vector"] = self.to_vector()
         d["dim"] = len(self.to_vector())
+        d["search_phase"] = self.search_phase()
         return d
+
+    def search_phase(self) -> str:
+        """
+        Classify search phase per search_dynamics.md:
+        cold_start → growth → plateau.
+        """
+        if self.saturation >= 0.6 and self.diversity <= 0.35:
+            return "plateau"
+        if self.uncertainty >= 0.45 and self.closure_ratio <= 0.35:
+            return "cold_start"
+        if self.diversity >= 0.25 and self.saturation < 0.6:
+            return "growth"
+        if self.closure_ratio >= 0.5 and self.entropy < 1.2:
+            return "plateau"
+        return "growth"
 
     @classmethod
     def from_snapshot(

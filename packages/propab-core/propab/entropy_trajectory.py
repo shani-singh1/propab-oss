@@ -22,10 +22,14 @@ class EntropyTrajectorySummary:
         return asdict(self)
 
 
+def _entropy_value(point: dict[str, Any]) -> float:
+    return float(point.get("theme_entropy") or 0)
+
+
 def _classify_growth_pattern(points: list[dict[str, Any]]) -> str:
     if len(points) < 3:
         return "insufficient_data"
-    hs = [float(p["theme_entropy"]) for p in points]
+    hs = [_entropy_value(p) for p in points]
     start, end = hs[0], hs[-1]
     peak = max(hs)
     peak_idx = hs.index(peak)
@@ -42,7 +46,7 @@ def _classify_growth_pattern(points: list[dict[str, Any]]) -> str:
 
 def _cross_at(points: list[dict[str, Any]], threshold: float) -> int | None:
     for p in points:
-        if float(p.get("theme_entropy") or 0) >= threshold:
+        if _entropy_value(p) >= threshold:
             tested = p.get("tested")
             return int(tested) if tested is not None else None
     return None
@@ -52,7 +56,7 @@ def _plateau_at_tested(points: list[dict[str, Any]], *, epsilon: float = 0.06) -
     """First tested count where entropy stays within epsilon for 2+ consecutive snaps."""
     if len(points) < 2:
         return None
-    hs = [float(p["theme_entropy"]) for p in points]
+    hs = [_entropy_value(p) for p in points]
     tested = [int(p.get("tested") or 0) for p in points]
     for i in range(len(hs) - 1):
         if abs(hs[i + 1] - hs[i]) <= epsilon:
@@ -65,8 +69,8 @@ def _plateau_at_tested(points: list[dict[str, Any]], *, epsilon: float = 0.06) -
 def _growth_rate(points: list[dict[str, Any]]) -> float:
     if len(points) < 2:
         return 0.0
-    h0 = float(points[0]["theme_entropy"])
-    h1 = float(points[-1]["theme_entropy"])
+    h0 = _entropy_value(points[0])
+    h1 = _entropy_value(points[-1])
     t0 = int(points[0].get("tested") or 1)
     t1 = int(points[-1].get("tested") or t0)
     dt = max(1, t1 - t0)
@@ -88,7 +92,7 @@ def summarize_entropy_trajectory(points: list[dict[str, Any]]) -> EntropyTraject
             saturation_H=0.0,
             n_snapshots=0,
         )
-    hs = [float(p["theme_entropy"]) for p in points]
+    hs = [_entropy_value(p) for p in points]
     return EntropyTrajectorySummary(
         H_start=round(hs[0], 4),
         H_mid=round(hs[len(hs) // 2], 4),
