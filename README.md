@@ -54,6 +54,15 @@ docker compose -f docker-compose.yml -f docker-compose.mount-dev.yml restart wor
 
 For full campaign monitoring once the API is up: `python scripts/start_campaign_v1.py` then `python scripts/monitor_campaign.py`.
 
+**Campaign era partitioning** (separate history from current learning):
+
+```bash
+python scripts/partition_campaign_eras.py --with-credits
+python scripts/run_operator_credit.py --all-db   # priors from gold corpus
+```
+
+See [docs/campaign_era_partitioning.md](./docs/campaign_era_partitioning.md).
+
 ### Roadmap phases (`ARCHITECTURE.md` §16)
 
 | Phase | Scope | Repo status |

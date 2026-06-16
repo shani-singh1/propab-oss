@@ -106,7 +106,7 @@ def test_credit_cycle_on_trajectories(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "propab_data_dir", str(data_dir))
 
     report, traces, credits = run_operator_credit_cycle(
-        trajectory_path=traj, persist=True,
+        trajectory_path=traj, persist=True, use_db=False,
     )
     assert report.n_campaigns == 1
     assert report.n_traces >= 1
