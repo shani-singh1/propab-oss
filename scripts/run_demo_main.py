@@ -92,6 +92,8 @@ def main() -> int:
             "after campaigns complete."
         ),
     }
+    if len(results) == 1:
+        payload["campaign_id"] = results[0]["campaign_id"]
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
