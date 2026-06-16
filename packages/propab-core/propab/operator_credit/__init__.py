@@ -2,6 +2,11 @@
 
 from propab.operator_credit.bandit import OperatorBandit
 from propab.operator_credit.campaign_corpus import CampaignCorpus, ingest_trajectory_file
+from propab.operator_credit.campaign_era import (
+    CampaignEraPartition,
+    GoldCorpus,
+    EraId,
+)
 from propab.operator_credit.campaign_family_dag import CampaignFamilyDAG
 from propab.operator_credit.counterfactual_replay import CounterfactualSpec, run_counterfactual_suite
 from propab.operator_credit.credit_cycle import OperatorCreditReport, run_operator_credit_cycle
@@ -26,7 +31,10 @@ __all__ = [
     "OPERATOR_FAMILIES",
     "CampaignCorpus",
     "CampaignDBBundle",
+    "CampaignEraPartition",
     "CampaignFamilyDAG",
+    "EraId",
+    "GoldCorpus",
     "CounterfactualSpec",
     "CreditLevel",
     "DifferenceRewardLedger",

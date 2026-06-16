@@ -68,6 +68,8 @@ class OperatorCreditReport:
     registry: dict[str, Any]
     weak_operators: list[dict[str, Any]]
     elapsed_ms: float
+    era_partition: dict[str, Any] = field(default_factory=dict)
+    gold_corpus: dict[str, Any] = field(default_factory=dict)
     family_dag: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -112,6 +114,7 @@ def run_operator_credit_cycle(
     trees: dict[str, HypothesisTree | dict[str, Any]] | None = None,
     persist: bool = True,
     use_db: bool = True,
+    use_gold_priors: bool = True,
 ) -> tuple[OperatorCreditReport, OperatorTraceLedger, DifferenceRewardLedger]:
     t0 = time.perf_counter()
     traj_path = Path(trajectory_path or "artifacts/entropy_trajectories.json")
@@ -163,8 +166,51 @@ def run_operator_credit_cycle(
         baseline_policy=candidate,
     )
 
-    stats = OperatorStatistics()
-    stats.update_from_traces(trace_ledger, credit_ledger)
+    era_partition_summary: dict[str, Any] = {}
+    gold_corpus_summary: dict[str, Any] = {}
+    partition = None
+
+    if use_db and bundles:
+        from propab.operator_credit.campaign_era import (
+            CampaignEraPartition,
+            build_era_definitions,
+            build_experience_archive,
+            build_gold_statistics,
+            compute_cross_era_comparisons,
+            compute_era_local_statistics,
+            select_gold_corpus,
+        )
+        from propab.operator_credit.era_loader import load_campaign_era_metadata
+
+        loaded_ids = [b.campaign_id for b in bundles]
+        era_campaigns = asyncio.run(load_campaign_era_metadata(loaded_ids))
+        gold = select_gold_corpus(era_campaigns)
+        archive = build_experience_archive(era_campaigns)
+        partition = CampaignEraPartition(
+            git_commit=None,
+            eras=build_era_definitions(),
+            campaigns=era_campaigns,
+            gold_corpus=gold,
+            archive=archive,
+        )
+        era_stats = compute_era_local_statistics(
+            partition=partition,
+            traces=trace_ledger,
+            credits=credit_ledger,
+        )
+        partition.era_local_stats = era_stats
+        partition.cross_era_comparisons = compute_cross_era_comparisons(era_stats)
+        era_partition_summary = partition.summary()
+        gold_corpus_summary = gold.to_dict()
+
+        if use_gold_priors and gold.campaign_ids:
+            stats = build_gold_statistics(trace_ledger, credit_ledger, gold)
+        else:
+            stats = OperatorStatistics()
+            stats.update_from_traces(trace_ledger, credit_ledger)
+    else:
+        stats = OperatorStatistics()
+        stats.update_from_traces(trace_ledger, credit_ledger)
 
     priors = OperatorPriors()
     priors.build_from_statistics(stats)
@@ -262,6 +308,9 @@ def run_operator_credit_cycle(
         (base / "operator_bench.json").write_text(
             json.dumps(bench.to_dict(), indent=2), encoding="utf-8",
         )
+        if partition:
+            partition.save()
+            partition.gold_corpus.save()
 
     elapsed = (time.perf_counter() - t0) * 1000
     report = OperatorCreditReport(
@@ -285,6 +334,8 @@ def run_operator_credit_cycle(
         registry=OperatorRegistry().to_dict(),
         weak_operators=weak,
         elapsed_ms=round(elapsed, 2),
+        era_partition=era_partition_summary,
+        gold_corpus=gold_corpus_summary,
         family_dag=family_dag.to_dict(),
     )
     return report, trace_ledger, credit_ledger
