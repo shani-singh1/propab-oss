@@ -1,0 +1,1 @@
+"""Mandrake domain verification tools."""

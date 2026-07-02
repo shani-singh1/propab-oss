@@ -187,6 +187,10 @@ _SIGNIFICANCE_TOOL_NAMES = frozenset({
     "literature_baseline_compare",
 })
 
+_MANDRAKE_TOOL_NAMES = frozenset({"mandrake_verification"})
+
+_GENERIC_STATS_FOR_MANDRAKE = _SIGNIFICANCE_TOOL_NAMES
+
 
 class HypothesisEvidence(TypedDict):
     metric_value: float | None
@@ -297,6 +301,8 @@ def _primary_metric_from_tool_output(out: dict[str, Any]) -> float | None:
         "validation_accuracy",
         "accuracy",
         "metric_value",
+        "mean_r2",
+        "lofo_r2",
         "best_val_accuracy",
         "final_val_accuracy",
     ):
@@ -410,6 +416,99 @@ def _build_evidence(
         verified_true_steps=n_verified_true,
         verified_false_steps=n_verified_false,
     )
+
+
+def _build_mandrake_evidence(
+    *,
+    output: dict[str, Any],
+    verdict: str,
+    reason: str,
+    baseline: dict[str, Any],
+) -> dict[str, Any]:
+    """Structured evidence for campaign tree diagnostics and paper trace."""
+    metric_value = output.get("mean_r2", output.get("lofo_r2"))
+    if metric_value is not None:
+        metric_value = float(metric_value)
+    p_value = output.get("permutation_p")
+    if p_value is not None:
+        p_value = float(p_value)
+    baseline_value = baseline.get("value")
+    if baseline_value is None:
+        fam = output.get("family_baseline_r2")
+        baseline_value = float(fam) if fam is not None else None
+    lofo_gap = output.get("lofo_gap")
+    effect_size = float(lofo_gap) if lofo_gap is not None else None
+    evidence_obj: dict[str, Any] = {
+        "metric_value": metric_value,
+        "baseline_value": baseline_value,
+        "p_value": p_value,
+        "effect_size": effect_size,
+        "lofo_r2": metric_value,
+        "lofo_gap": effect_size,
+        "n_samples": output.get("n_samples"),
+        "n_families": output.get("n_families"),
+        "methodology": output.get("methodology") or "LOFO",
+        "feature_subset": output.get("feature_subset"),
+        "n_tool_steps": 1,
+        "n_metric_steps": 1 if metric_value is not None else 0,
+        "verdict_reason": reason,
+        "verification_tool": "mandrake_verification",
+        "label_shuffle_permutation_p": output.get("label_shuffle_permutation_p"),
+        "label_shuffle_null_p95": output.get("label_shuffle_null_p95"),
+    }
+    if verdict == "confirmed":
+        evidence_obj["verified_true_steps"] = 1
+    elif verdict == "refuted":
+        evidence_obj["verified_false_steps"] = 1
+    if metric_value is not None and baseline_value is not None:
+        evidence_obj["delta"] = metric_value - float(baseline_value)
+    if output.get("label_shuffle_permutation_p") is not None:
+        lp = float(output["label_shuffle_permutation_p"])
+        lofo = metric_value
+        p95 = output.get("label_shuffle_null_p95")
+        if lofo is not None and p95 is not None and float(lofo) > float(p95) and lp < 0.05:
+            evidence_obj["ood_passed"] = True
+            evidence_obj["ood_reason"] = f"label-shuffle LOFO={float(lofo):.3f} p={lp:.3f}"
+        else:
+            evidence_obj["ood_passed"] = False
+            evidence_obj["ood_reason"] = f"LOFO OOD failed lofo={lofo} p95={p95} label_p={lp}"
+
+    from propab.scoped_claim import (
+        check_scope_executed_integrity,
+        extract_executed_ood_from_experiment,
+        parse_scope_from_methodology,
+    )
+    executed = extract_executed_ood_from_experiment(output, code=str(output.get("executed_code") or ""))
+    if executed:
+        evidence_obj["executed_ood"] = executed.to_dict()
+    return evidence_obj
+
+
+def attach_scope_integrity(
+    evidence_obj: dict[str, Any],
+    *,
+    hypothesis_text: str,
+    test_methodology: str,
+    experiment_output: dict[str, Any] | None,
+    question: str = "",
+    code: str = "",
+) -> dict[str, Any]:
+    """P0 — verify declared OOD ≈ executed OOD; attach to evidence."""
+    from propab.scoped_claim import (
+        check_scope_executed_integrity,
+        extract_executed_ood_from_experiment,
+        parse_scope_from_methodology,
+    )
+
+    scope = parse_scope_from_methodology(hypothesis_text, test_methodology)
+    executed = extract_executed_ood_from_experiment(experiment_output or {}, code=code)
+    integrity = check_scope_executed_integrity(scope, executed, question=question)
+    out = dict(evidence_obj)
+    out["scope_integrity"] = integrity.to_dict()
+    out["scope_gate_result"] = integrity.scope_gate_result
+    if integrity.scope_gate_result == "FAIL" and out.get("verdict_reason"):
+        out["verdict_reason"] = f"{out['verdict_reason']}; scope integrity: {integrity.reason}"
+    return out
 
 
 def _compute_confidence(evidence: HypothesisEvidence) -> float:
@@ -581,6 +680,217 @@ async def _insert_experiment_step_code(
         await session.commit()
 
 
+async def _hydrate_hypothesis_from_campaign(
+    hypothesis: dict,
+    *,
+    session_id: str,
+    campaign_node_id: str | None,
+    session_factory: async_sessionmaker,
+) -> dict:
+    """Load test_methodology / feature_subset from campaign tree node (fixes.md P2)."""
+    if not campaign_node_id:
+        return hypothesis
+    try:
+        from services.orchestrator.campaign_loop import db_load_campaign
+
+        campaign = await db_load_campaign(session_id, session_factory)
+        node = campaign.hypothesis_tree.nodes.get(campaign_node_id)
+        if not node:
+            return hypothesis
+        h = dict(hypothesis)
+        if node.test_methodology:
+            h["test_methodology"] = node.test_methodology
+        if node.feature_subset:
+            h["feature_subset"] = list(node.feature_subset)
+        if node.mechanism_id:
+            h["mechanism_id"] = node.mechanism_id
+        return h
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Campaign node hydration failed: %s", exc)
+        return hypothesis
+
+
+async def _mandrake_verification_path(
+    *,
+    payload: dict,
+    hypothesis: dict,
+    hypothesis_id: str,
+    campaign_node_id: str | None,
+    session_id: str,
+    question: str,
+    session_factory: async_sessionmaker,
+    emitter: EventEmitter,
+    registry: ToolRegistry,
+    trace_pointer: str,
+    started: float,
+    baseline: dict,
+) -> dict:
+    """Run real LOFO via mandrake_verification; skip generic stats (fixes.md P3/P4)."""
+    from propab.domain_adapters.mandrake_adapter import (
+        MandrakeExperimentSpec,
+        classify_mandrake_verdict,
+    )
+
+    spec = MandrakeExperimentSpec.from_hypothesis(hypothesis, question=question)
+    art_dir = f"/data/propab/sessions/{session_id}/mandrake/{hypothesis_id}"
+    tool_result = registry.call(
+        "mandrake_verification",
+        {**spec.to_tool_params(), "artifacts_dir": art_dir},
+    )
+
+    await emitter.emit(
+        session_id=session_id,
+        event_type=EventType.TOOL_CALLED,
+        step=f"experiment.{hypothesis_id}.mandrake",
+        payload={"tool": "mandrake_verification", "features": spec.feature_subset},
+        hypothesis_id=hypothesis_id,
+    )
+
+    if not tool_result.success or not isinstance(tool_result.output, dict):
+        err = tool_result.error.message if tool_result.error else "mandrake_verification failed"
+        await emitter.emit(
+            session_id=session_id,
+            event_type=EventType.TOOL_ERROR,
+            step=f"experiment.{hypothesis_id}.mandrake",
+            payload={"tool": "mandrake_verification", "error": err},
+            hypothesis_id=hypothesis_id,
+        )
+        verdict, reason, confidence = "inconclusive", f"LOFO experiment failed: {err}", 0.0
+        output: dict = {}
+        gate = None
+    else:
+        output = tool_result.output
+        await emitter.emit(
+            session_id=session_id,
+            event_type=EventType.TOOL_RESULT,
+            step=f"experiment.{hypothesis_id}.mandrake",
+            payload={"tool": "mandrake_verification", "output": output},
+            hypothesis_id=hypothesis_id,
+        )
+        verdict, reason, confidence = classify_mandrake_verdict(str(hypothesis.get("text") or ""), output)
+        from propab.artifact_verification import (
+            apply_artifact_gate_override,
+            evidence_context_from_hypothesis,
+            merge_artifact_into_evidence,
+        )
+        ctx = evidence_context_from_hypothesis(
+            str(hypothesis.get("text") or ""),
+            {
+                "metric_value": output.get("mean_r2"),
+                "lofo_r2": output.get("mean_r2"),
+                "lofo_gap": output.get("lofo_gap"),
+                "p_value": output.get("permutation_p"),
+                "n_samples": output.get("n_samples"),
+                "n_families": output.get("n_families"),
+                "methodology": "LOFO",
+                "feature_subset": output.get("feature_subset"),
+                "label_shuffle_permutation_p": output.get("label_shuffle_permutation_p"),
+                "label_shuffle_null_p95": output.get("label_shuffle_null_p95"),
+            },
+            methodology="LOFO",
+        )
+        verdict, reason, confidence, gate = apply_artifact_gate_override(
+            verdict, reason, confidence, ctx, output,
+        )
+
+    evidence_obj = _build_mandrake_evidence(
+        output=output,
+        verdict=verdict,
+        reason=reason,
+        baseline=baseline,
+    )
+    evidence_obj = attach_scope_integrity(
+        evidence_obj,
+        hypothesis_text=str(hypothesis.get("text") or ""),
+        test_methodology=str(hypothesis.get("test_methodology") or spec.methodology),
+        experiment_output=output,
+        question=question,
+        code=str(output.get("executed_code") or ""),
+    )
+    if gate is not None:
+        evidence_obj = merge_artifact_into_evidence(evidence_obj, gate)
+    from propab.scoped_claim import apply_ood_gate_to_verdict
+    verdict, reason = apply_ood_gate_to_verdict(
+        verdict, reason, evidence_obj,
+        hypothesis_text=str(hypothesis.get("text") or ""),
+        test_methodology=str(hypothesis.get("test_methodology") or spec.methodology),
+    )
+    if evidence_obj.get("scope_gate_result") == "FAIL" and verdict == "confirmed":
+        verdict = "inconclusive"
+        reason = f"scope integrity fail: {evidence_obj.get('scope_integrity', {}).get('reason', '?')}"
+    evidence_obj["verdict_reason"] = reason
+    evidence = (
+        f"evidence={json.dumps(evidence_obj, ensure_ascii=False)}; "
+        f"mandrake_verification; LOFO={output.get('mean_r2')}; "
+        f"gap={output.get('lofo_gap')}; p_perm={output.get('permutation_p')}; "
+        f"features={output.get('feature_subset', spec.feature_subset)}"
+    )
+    key_finding = None
+    if verdict == "confirmed":
+        key_finding = str(hypothesis.get("text") or "")[:300]
+
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    await _insert_experiment_step_tool(
+        session_factory,
+        step_id=str(uuid4()),
+        hypothesis_id=hypothesis_id,
+        step_index=0,
+        tool_name="mandrake_verification",
+        params={**spec.to_tool_params(), "artifacts_dir": art_dir},
+        result_output=output if output else None,
+        result_error=(
+            {"message": tool_result.error.message}
+            if not tool_result.success and tool_result.error
+            else None
+        ),
+        duration_ms=duration_ms,
+    )
+
+    await _update_hypothesis(
+        session_factory,
+        hypothesis_id,
+        status="completed",
+        verdict=verdict,
+        confidence=confidence,
+        evidence_summary=evidence,
+        key_finding=key_finding,
+        tool_trace_id=trace_pointer,
+    )
+    await emitter.emit(
+        session_id=session_id,
+        event_type=EventType.AGENT_COMPLETED,
+        step=f"experiment.{hypothesis_id}.complete",
+        payload={
+            "verdict": verdict,
+            "confidence": confidence,
+            "sig_gate_passed": verdict in {"confirmed", "refuted"},
+            "mandrake": True,
+            "mean_r2": output.get("mean_r2"),
+        },
+        hypothesis_id=hypothesis_id,
+    )
+
+    metric_key = str(baseline.get("metric_name") or "lofo_r2").strip()
+    result_dict: dict[str, Any] = {
+        "hypothesis_id": hypothesis_id,
+        "campaign_node_id": campaign_node_id,
+        "verdict": verdict,
+        "confidence": confidence,
+        "evidence_summary": evidence,
+        "key_finding": key_finding,
+        "tool_trace_id": trace_pointer,
+        "figures": [],
+        "duration_sec": round(time.perf_counter() - started, 3),
+        "failure_reason": None if verdict != "inconclusive" else reason,
+        "learned": reason,
+        "metric_value": output.get("mean_r2"),
+        "mandrake_artifacts_dir": art_dir,
+    }
+    if output.get("mean_r2") is not None:
+        result_dict[metric_key] = output.get("mean_r2")
+    return result_dict
+
+
 async def run_sub_agent_async(payload: dict) -> dict:
     """
     Execute sub-agent trace with think-act or heuristic execution.
@@ -634,6 +944,34 @@ async def run_sub_agent_async(payload: dict) -> dict:
             payload={"hypothesis_id": hypothesis_id, "text": hypothesis.get("text")},
             hypothesis_id=hypothesis_id,
         )
+
+        hypothesis = await _hydrate_hypothesis_from_campaign(
+            hypothesis,
+            session_id=session_id,
+            campaign_node_id=campaign_node_id,
+            session_factory=session_factory,
+        )
+
+        from propab.domain_adapters.mandrake_adapter import is_mandrake_campaign
+
+        if is_mandrake_campaign(question=question, payload=payload):
+            result = await _mandrake_verification_path(
+                payload=payload,
+                hypothesis=hypothesis,
+                hypothesis_id=hypothesis_id,
+                campaign_node_id=campaign_node_id,
+                session_id=session_id,
+                question=question,
+                session_factory=session_factory,
+                emitter=emitter,
+                registry=registry,
+                trace_pointer=trace_pointer,
+                started=started,
+                baseline=baseline,
+            )
+            await redis.close()
+            await engine.dispose()
+            return result
 
         logger.info(
             "[sub_agent] startup session_id=%s hypothesis_id=%s PROPAB_PROFILE=%s "
@@ -761,8 +1099,13 @@ async def run_sub_agent_async(payload: dict) -> dict:
             hypothesis_id=hypothesis_id,
         )
 
-        # Always include significance tools alongside domain cluster
-        specs = registry.get_cluster_with_significance(domain)
+        # Mandrake campaigns: mandrake_verification only (no generic stats merge)
+        from propab.domain_adapters.mandrake_adapter import is_mandrake_campaign as _is_mandrake
+
+        if _is_mandrake(question=question, payload=payload):
+            specs = registry.get_cluster("mandrake") or []
+        else:
+            specs = registry.get_cluster_with_significance(domain)
         if not specs:
             specs = registry.get_cluster_with_significance("general_computation")
         available_tools = [str(s["name"]) for s in specs]
@@ -1505,6 +1848,56 @@ async def run_sub_agent_async(payload: dict) -> dict:
             sig_result,
             min_metric_steps_for_confirm=min_metric_steps,
         )
+        from propab.artifact_verification import (
+            evidence_context_from_hypothesis,
+            merge_artifact_into_evidence,
+            run_artifact_gate,
+        )
+        _domain = str(payload.get("domain_bucket") or payload.get("domain") or "")
+        ctx = evidence_context_from_hypothesis(
+            str(hyp_text or ""),
+            evidence_obj,
+            tools_used=successful_tool_names,
+            domain_bucket=_domain or None,
+        )
+        gate = run_artifact_gate(
+            ctx,
+            None,
+            question=question,
+            payload=payload if isinstance(payload, dict) else None,
+        )
+        evidence_obj = merge_artifact_into_evidence(evidence_obj, gate)
+        if verdict == "confirmed" and gate.verdict != "confirmed":
+            verdict, verdict_reason = gate.verdict, gate.verdict_reason
+        elif verdict == "confirmed":
+            verdict_reason = gate.verdict_reason
+        from propab.scoped_claim import (
+            apply_ood_gate_to_verdict,
+            check_ood_evidence,
+            parse_scope_from_methodology,
+        )
+        _scope = parse_scope_from_methodology(
+            str(hyp_text or ""),
+            str(hypothesis.get("test_methodology") or ""),
+        )
+        _ood_ok, _ood_reason = check_ood_evidence(evidence_obj, _scope)
+        evidence_obj["ood_passed"] = _ood_ok
+        evidence_obj["ood_reason"] = _ood_reason
+        verdict, verdict_reason = apply_ood_gate_to_verdict(
+            verdict, verdict_reason, evidence_obj,
+            hypothesis_text=str(hyp_text or ""),
+            test_methodology=str(hypothesis.get("test_methodology") or ""),
+        )
+        evidence_obj = attach_scope_integrity(
+            evidence_obj,
+            hypothesis_text=str(hyp_text or ""),
+            test_methodology=str(hypothesis.get("test_methodology") or ""),
+            experiment_output=None,
+            question=question,
+        )
+        if evidence_obj.get("scope_gate_result") == "FAIL" and verdict == "confirmed":
+            verdict = "inconclusive"
+            verdict_reason = f"scope integrity fail: {evidence_obj.get('scope_integrity', {}).get('reason', '?')}"
         evidence_obj["verdict_reason"] = verdict_reason
         claim_type = classify_claim_type(evidence_obj, verdict, hypothesis_text=str(hyp_text or ""))
         if claim_type:
