@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+from propab.belief_state import CampaignBeliefState
 from propab.hypothesis_tree import HypothesisTree
 from propab.metric_normalize import normalize_accuracy_metric
 
@@ -153,6 +154,19 @@ STATUS_PAUSED = "paused"
 STATUS_BREAKTHROUGH = "breakthrough"
 STATUS_BUDGET_EXHAUSTED = "budget_exhausted"
 
+# Explicit terminal reasons (fixes.md P0 — ``status`` stays legacy-compatible).
+STOP_REASON_BREAKTHROUGH = "BREAKTHROUGH"
+STOP_REASON_TIME_BUDGET_EXHAUSTED = "TIME_BUDGET_EXHAUSTED"
+STOP_REASON_HYPOTHESIS_CAP_REACHED = "HYPOTHESIS_CAP_REACHED"
+STOP_REASON_FRONTIER_EXHAUSTED = "FRONTIER_EXHAUSTED"
+STOP_REASON_ALL_BRANCHES_EXHAUSTED = "ALL_BRANCHES_EXHAUSTED"
+STOP_REASON_NO_DISPATCHABLE_NODES = "NO_DISPATCHABLE_NODES"
+STOP_REASON_NO_BOOTSTRAP_SEEDS = "NO_BOOTSTRAP_SEEDS"
+STOP_REASON_SYNTHESIS_EMPTY = "SYNTHESIS_EMPTY"
+STOP_REASON_NO_SEEDS_GENERATED = "NO_SEEDS_GENERATED"
+STOP_REASON_FRONTIER_REFILL_FAILED = "FRONTIER_REFILL_FAILED"
+STOP_REASON_SALVAGED_AFTER_ERROR = "SALVAGED_AFTER_ERROR"
+
 
 # ── ResearchCampaign ─────────────────────────────────────────────────────────
 
@@ -193,6 +207,17 @@ class ResearchCampaign:
     # Lifetime policy: "accepted" (default) or "candidate" (calibration evaluation)
     policy_mode: str = "accepted"
 
+    # Anomaly engine seeding (fixes.md Phase 7)
+    seed_source: str = "default"  # "default" | "anomaly"
+    anomaly_artifacts_dir: str | None = None
+    max_hypotheses_cap: int | None = None
+
+    # Explicit terminal reason (fixes.md P0); persisted via DB meta blob.
+    stop_reason: str | None = None
+
+    # Campaign-level synthesis state (fixes.md redesign)
+    belief_state: CampaignBeliefState = field(default_factory=CampaignBeliefState)
+
     # Timestamps
     started_at: str = field(default_factory=lambda: datetime.now(tz=UTC).isoformat())
     last_checkpoint: str = ""
@@ -210,10 +235,23 @@ class ResearchCampaign:
     def should_stop(self) -> bool:
         if self.status in (STATUS_BREAKTHROUGH, STATUS_BUDGET_EXHAUSTED, STATUS_PAUSED):
             return True
-        elapsed = time.monotonic() - self._start_mono
-        if elapsed >= self.compute_budget_seconds:
+        if self.elapsed_seconds() >= self.compute_budget_seconds:
             return True
         return False
+
+    def hypothesis_cap_reached(self) -> bool:
+        return (
+            self.max_hypotheses_cap is not None
+            and self.total_hypotheses >= self.max_hypotheses_cap
+        )
+
+    def finalize_stop(self, stop_reason: str) -> None:
+        """Set terminal status + explicit stop reason for analysis."""
+        self.stop_reason = stop_reason
+        if stop_reason == STOP_REASON_BREAKTHROUGH:
+            self.status = STATUS_BREAKTHROUGH
+        elif self.status == STATUS_ACTIVE:
+            self.status = STATUS_BUDGET_EXHAUSTED
 
     def elapsed_seconds(self) -> float:
         # Prefer wall clock from persisted started_at so GET /campaigns and db_save
@@ -322,6 +360,11 @@ class ResearchCampaign:
             "last_checkpoint": self.last_checkpoint,
             "checkpoint_every": self.checkpoint_every,
             "policy_mode": self.policy_mode,
+            "seed_source": self.seed_source,
+            "anomaly_artifacts_dir": self.anomaly_artifacts_dir,
+            "max_hypotheses_cap": self.max_hypotheses_cap,
+            "stop_reason": self.stop_reason,
+            "belief_state": self.belief_state.to_dict(),
         }
 
     @classmethod
@@ -346,6 +389,11 @@ class ResearchCampaign:
             last_checkpoint=data.get("last_checkpoint", ""),
             checkpoint_every=data.get("checkpoint_every", 300),
             policy_mode=data.get("policy_mode", "accepted"),
+            seed_source=data.get("seed_source", "default"),
+            anomaly_artifacts_dir=data.get("anomaly_artifacts_dir"),
+            max_hypotheses_cap=data.get("max_hypotheses_cap"),
+            stop_reason=data.get("stop_reason"),
+            belief_state=CampaignBeliefState.from_dict(data.get("belief_state")),
         )
         # Preserve elapsed wall-clock budget accounting when loading from DB.
         used = float(data.get("compute_seconds_used", 0) or 0)
@@ -386,6 +434,7 @@ class ResearchCampaign:
             "id": self.id,
             "question": self.question[:120],
             "status": self.status,
+            "stop_reason": self.stop_reason,
             "total_hypotheses": self.total_hypotheses,
             "total_confirmed": self.total_confirmed,
             "baseline_metric": self._resolved_baseline_metric(),

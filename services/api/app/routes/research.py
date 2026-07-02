@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import httpx
@@ -8,12 +12,29 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from propab.campaign import ACC_METRIC_PLAUSIBILITY_MAX, BreakthroughCriteria, ResearchCampaign
+from propab.campaign import (
+    ACC_METRIC_PLAUSIBILITY_MAX,
+    BreakthroughCriteria,
+    ResearchCampaign,
+    STATUS_ACTIVE,
+    STATUS_BUDGET_EXHAUSTED,
+)
+from propab.campaign_resume import (
+    CONTRARIAN_QUESTION,
+    apply_contrarian_belief_reset,
+    backfill_belief_state_if_empty,
+    validate_resume_readiness,
+)
 from propab.config import settings
 from propab.events import EventEmitter
 from propab.types import EventType
 from services.api.app.deps import get_emitter, get_session_factory
-from services.orchestrator.campaign_loop import db_load_campaign, db_save_campaign, run_campaign_loop
+from services.orchestrator.campaign_loop import (
+    db_load_campaign,
+    db_load_session_events_tail,
+    db_save_campaign,
+    run_campaign_loop,
+)
 from services.orchestrator.research_loop import run_research_loop
 
 router = APIRouter(tags=["research"])
@@ -127,12 +148,29 @@ class CampaignRequest(BaseModel):
     )
     # "accepted" uses bucket-local accepted policy; "candidate" runs calibration evaluation
     policy_mode: str = Field(default="accepted", pattern="^(accepted|candidate)$")
+    # Anomaly engine integration (Phase 7–8)
+    seed_source: str = Field(default="default", pattern="^(default|anomaly)$")
+    anomaly_artifacts_dir: str | None = Field(default=None)
+    max_hypotheses: int | None = Field(default=None, ge=1, le=500)
 
 
 class CampaignResponse(BaseModel):
     campaign_id: str
     stream_url: str
     status: str
+
+
+class CampaignResumeRequest(BaseModel):
+    max_hypotheses_cap: int | None = Field(default=None, ge=1, le=500)
+    compute_budget_hours: float | None = Field(default=None, ge=0.1, le=168.0)
+    clear_hypothesis_cap: bool = False
+    question: str | None = Field(default=None, min_length=8)
+    belief_reset: str | None = Field(
+        default=None,
+        pattern="^(contrarian)$",
+        description="Replace active beliefs without discarding tree/evidence (fixes.md contrarian run)",
+    )
+    orchestrator_directive: str | None = None
 
 
 @router.post("/campaigns", response_model=CampaignResponse)
@@ -178,6 +216,9 @@ async def create_campaign(
         compute_budget_seconds=int(request.compute_budget_hours * 3600),
         checkpoint_every=settings.campaign_checkpoint_every,
         policy_mode=request.policy_mode,
+        seed_source=request.seed_source,
+        anomaly_artifacts_dir=request.anomaly_artifacts_dir,
+        max_hypotheses_cap=request.max_hypotheses,
     )
 
     # Persist initial state so it can be queried immediately
@@ -279,3 +320,135 @@ async def get_campaign_state(
         "research_session": dict(sess_row) if sess_row else None,
         "event_counts_by_type": event_counts,
     }
+
+
+@router.post("/campaigns/{campaign_id}/resume", response_model=CampaignResponse)
+async def resume_campaign(
+    campaign_id: str,
+    background_tasks: BackgroundTasks,
+    request: CampaignResumeRequest = CampaignResumeRequest(),
+    emitter: EventEmitter = Depends(get_emitter),
+    session_factory: async_sessionmaker = Depends(get_session_factory),
+) -> CampaignResponse:
+    """Resume a checkpointed campaign (warm start — tree + belief state preserved)."""
+    req = request
+
+    launch_meta: dict | None = None
+    launch_path = Path(__file__).resolve().parents[4] / "artifacts" / "mandrake_contrarian_campaign.json"
+    if not launch_path.exists():
+        launch_path = Path(__file__).resolve().parents[4] / "artifacts" / "mandrake_campaign_latest.json"
+    if launch_path.exists():
+        try:
+            blob = json.loads(launch_path.read_text(encoding="utf-8"))
+            if blob.get("campaign_id") == campaign_id:
+                launch_meta = blob
+        except Exception:
+            launch_meta = None
+
+    campaign = await db_load_campaign(campaign_id, session_factory)
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if campaign.status == STATUS_ACTIVE:
+        raise HTTPException(status_code=409, detail="Campaign is already active")
+
+    campaign.status = STATUS_ACTIVE
+    campaign.stop_reason = None
+
+    if req.clear_hypothesis_cap or (launch_meta and launch_meta.get("max_hypotheses") is None):
+        campaign.max_hypotheses_cap = None
+    elif req.max_hypotheses_cap is not None:
+        campaign.max_hypotheses_cap = req.max_hypotheses_cap
+    elif campaign.max_hypotheses_cap is None and launch_meta and launch_meta.get("max_hypotheses"):
+        campaign.max_hypotheses_cap = int(launch_meta["max_hypotheses"])
+
+    budget_hours = req.compute_budget_hours
+    if budget_hours is None and launch_meta and launch_meta.get("compute_budget_hours"):
+        budget_hours = float(launch_meta["compute_budget_hours"])
+    if budget_hours is not None:
+        campaign.compute_budget_seconds = int(budget_hours * 3600)
+        campaign.started_at = datetime.now(tz=UTC).isoformat()
+
+    new_question = req.question
+    if new_question is None and launch_meta and launch_meta.get("question"):
+        new_question = str(launch_meta["question"])
+    if new_question:
+        campaign.question = new_question
+
+    events = await db_load_session_events_tail(campaign_id, session_factory, limit=2000)
+    belief_reset_mode = req.belief_reset or (launch_meta or {}).get("belief_reset")
+    if belief_reset_mode == "contrarian":
+        directive = req.orchestrator_directive or (launch_meta or {}).get("orchestrator_directive")
+        campaign.belief_state = apply_contrarian_belief_reset(
+            campaign.belief_state,
+            orchestrator_directive=directive,
+        )
+        campaign.belief_state.last_synthesis_node_ids = [
+            nid
+            for nid, n in campaign.hypothesis_tree.nodes.items()
+            if n.verdict in ("confirmed", "refuted", "inconclusive")
+        ]
+    else:
+        restored, changed = backfill_belief_state_if_empty(
+            campaign.belief_state,
+            events=events,
+            tree_nodes={nid: n.to_dict() for nid, n in campaign.hypothesis_tree.nodes.items()},
+        )
+        if changed:
+            campaign.belief_state = restored
+
+    await db_save_campaign(campaign, session_factory)
+
+    async with session_factory() as db:
+        session_updates: dict[str, Any] = {"id": campaign_id}
+        set_clauses = ["status = 'running'", "stage = 'campaign'", "completed_at = NULL"]
+        if new_question:
+            set_clauses.append("question = :question")
+            session_updates["question"] = new_question
+        await db.execute(
+            text(f"""
+                UPDATE research_sessions
+                SET {", ".join(set_clauses)}
+                WHERE id = CAST(:id AS uuid)
+            """),
+            session_updates,
+        )
+        await db.commit()
+
+    background_tasks.add_task(
+        run_campaign_loop,
+        campaign,
+        session_factory=session_factory,
+        emitter=emitter,
+    )
+
+    return CampaignResponse(
+        campaign_id=campaign_id,
+        stream_url=f"/stream/{campaign_id}",
+        status="resumed",
+    )
+
+
+@router.get("/campaigns/{campaign_id}/resume-readiness")
+async def get_resume_readiness(
+    campaign_id: str,
+    session_factory: async_sessionmaker = Depends(get_session_factory),
+) -> dict:
+    """Pre-resume validation: beliefs, cap persistence, stale status detection."""
+    campaign = await db_load_campaign(campaign_id, session_factory)
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    events = await db_load_session_events_tail(campaign_id, session_factory, limit=2000)
+    launch_meta = None
+    launch_path = Path(__file__).resolve().parents[4] / "artifacts" / "mandrake_campaign_latest.json"
+    if launch_path.exists():
+        try:
+            launch_meta = json.loads(launch_path.read_text(encoding="utf-8"))
+            if launch_meta.get("campaign_id") != campaign_id:
+                launch_meta = None
+        except Exception:
+            launch_meta = None
+    return validate_resume_readiness(
+        campaign.to_dict(),
+        events=events,
+        launch_meta=launch_meta,
+    )

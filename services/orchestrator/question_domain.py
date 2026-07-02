@@ -65,6 +65,19 @@ _KEYWORDS: list[tuple[tuple[str, ...], str]] = [
     ),
     (("matrix", "eigen", "integral", "derivative", "theorem", "proof", "topology"), "mathematics"),
     (("dataset", "csv", "histogram", "eda", "outlier", "missing value", "aggregate"), "data_analysis"),
+    (
+        (
+            "rt activity",
+            "reverse transcriptase",
+            "evolutionary family",
+            "biophysical",
+            "lofo",
+            "leave-one-family",
+            "foldseek",
+            "retroviral",
+        ),
+        "mandrake",
+    ),
 ]
 
 

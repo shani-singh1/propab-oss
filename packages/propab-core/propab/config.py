@@ -108,7 +108,9 @@ class Settings(BaseSettings):
     campaign_min_replications: int = 3              # min confirmed replications
     campaign_expand_on_confirmed: bool = True       # expand tree on confirmed findings
     campaign_expand_on_refuted: bool = True         # generate alternatives on refuted
-    campaign_expand_on_inconclusive: bool = True    # refine/decompose inconclusive (fixes.md P1.2)
+    campaign_expand_on_inconclusive: bool = True    # legacy; synthesis replaces per-node expansion
+    campaign_synthesis_enabled: bool = True         # fixes.md redesign: sole generation-conditioning step
+    campaign_synthesis_trigger_multiplier: float = 1.0  # results threshold = max_concurrent * this
     campaign_expansion_merit_novelty_min: float = 0.25
     campaign_expansion_merit_info_gain_min: float = 0.30
     campaign_theme_saturation_penalty: float = 0.15

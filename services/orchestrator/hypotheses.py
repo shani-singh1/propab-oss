@@ -18,6 +18,17 @@ from services.orchestrator.intake import ParsedQuestion
 from services.orchestrator.schemas import Prior, RankedHypothesis
 
 
+def _scoped_contagion_text(claim: str, *, ood: str) -> str:
+    return (
+        f"{claim}\n"
+        "Population: N=300–5000 node graphs, ≥30 instances per topology family\n"
+        "Distribution: Barabási–Albert (m=3–5) and stochastic block model, avg degree 6–12\n"
+        f"Claimed generalization: Effect transfers to Watts–Strogatz with matched average degree\n"
+        "Expected failure modes: Vanishes on ER graphs or when modularity Q<0.2; breaks if seed set >5%\n"
+        f"OOD test: {ood}"
+    )
+
+
 def _domain_fallback_options(question: str) -> list[str]:
     """Domain-specific discovery fallbacks (no generic ML intervention phrasing)."""
     ql = (question or "").lower()
@@ -44,10 +55,26 @@ def _domain_fallback_options(question: str) -> list[str]:
         ]
     if any(k in ql for k in ("contagion", "epidemic", "diffusion", "spreading", "sir", "sis")):
         return [
-            "Epidemic peak time on scale-free networks is more sensitive to degree exponent γ than to average degree.",
-            "Competing SIS and IC diffusion models rank hub-removal impact differently on the same graph ensemble.",
-            "Assortative mixing raises outbreak final size under fixed R0 in configuration-model replicas.",
-            "Algebraic connectivity correlates with time-to-50% infected across Barabási–Albert and ER families.",
+            _scoped_contagion_text(
+                "Epidemic peak time on scale-free networks is more sensitive to degree exponent "
+                "γ than to average degree when avg degree is held at 8–12.",
+                ood="Hold out Watts–Strogatz; LOFO R² on peak-time vs γ must exceed 0 on WS.",
+            ),
+            _scoped_contagion_text(
+                "Competing SIS and IC diffusion models rank hub-removal impact differently on "
+                "Barabási–Albert ensembles with m=3–5.",
+                ood="Evaluate same ranking on SBM graphs; confirm or refute if ranking flips.",
+            ),
+            _scoped_contagion_text(
+                "Assortative mixing raises outbreak final size under fixed R0 in configuration-model "
+                "replicas with heavy-tailed degree sequences.",
+                ood="Transfer test on ER graphs with matched mean degree; effect should weaken.",
+            ),
+            _scoped_contagion_text(
+                "Algebraic connectivity correlates with time-to-50% infected across Barabási–Albert "
+                "and ER families separately.",
+                ood="Train on BA, evaluate correlation sign on held-out ER ensemble.",
+            ),
         ]
     if any(k in ql for k in ("resilience", "targeted removal", "robustness", "node removal", "percolation")):
         return [
@@ -204,10 +231,13 @@ def _null_hypothesis_text(question: str) -> str:
 def _fallback_hypothesis_text(question: str, rank: int) -> str:
     """Discovery or control fallback without generic ML template phrasing."""
     if rank >= 5:
-        return _null_hypothesis_text(question)
+        null = _null_hypothesis_text(question)
+        from propab.scoped_claim import enrich_entry_with_scope
+        return enrich_entry_with_scope({"text": null}, question)["text"]
     options = _domain_fallback_options(question)
     text = options[(rank - 1) % len(options)]
-    return f"{text} (Question: {question.strip()})"
+    from propab.scoped_claim import enrich_entry_with_scope
+    return enrich_entry_with_scope({"text": text}, question)["text"]
 
 
 def _ensure_null_hypothesis(hypotheses: list[RankedHypothesis], question: str) -> list[RankedHypothesis]:
@@ -293,9 +323,20 @@ Requirements:
 - Do NOT repeat confirmed findings, refuted hypotheses, or dead ends from prior rounds.
 - Do NOT use generic phrasing like "Hypothesis 1: ..." or "The intervention has an effect."
 - One hypothesis should be a null hypothesis (no significant effect).
+- EVERY hypothesis MUST include explicit scope boundaries (fixes.md Step 2):
+  * population — who/what instances (size, family, regime)
+  * distribution — training/generating distribution (graph family, dataset, simulator)
+  * claimed_generalization — where you expect this to transfer (must differ from distribution)
+  * expected_failure_modes — at least one regime where the claim should break
+  * ood_test — concrete hold-out / LOFO / transfer test run BEFORE confirmation
+- BAD: "k-shell predicts spreading."
+- GOOD: "In BA and SBM graphs with avg degree 6–12, k-shell predicts spreading velocity;
+  should transfer to WS graphs; OOD: train BA+SBM, evaluate WS LOFO R²."
 {f'- For non-round-1: hypotheses should be MORE targeted based on prior round results.' if prior_round_findings else ''}
 
-Return JSON array only. Each item: {{id, text, test_methodology, gap_reference, expected_result}}
+Return JSON array only. Each item:
+{{id, text, test_methodology, gap_reference, expected_result,
+  population, distribution, claimed_generalization, expected_failure_modes, ood_test}}
 """
 
 
@@ -414,14 +455,31 @@ async def generate_ranked_hypotheses(
         rank = idx + 1
         composite = round(max(0.15, 1.0 - idx * 0.12), 3)
         gen_list = generated if isinstance(generated, list) else []
-        entry = gen_list[idx] if idx < len(gen_list) and isinstance(gen_list[idx], dict) else {}
-        raw_text = str(entry.get("text", ""))
+        raw_entry = gen_list[idx] if idx < len(gen_list) and isinstance(gen_list[idx], dict) else {}
 
-        # Reject generic fallback phrasing; use domain-specific fallback instead
+        from propab.scoped_claim import enrich_entry_with_scope, parse_scope_from_entry, validate_scoped_claim
+
+        scope = parse_scope_from_entry(raw_entry) if raw_entry else None
+        used_fallback = False
+        if scope is None or not validate_scoped_claim(scope)[0]:
+            used_fallback = True
+            entry = enrich_entry_with_scope(
+                {"text": _fallback_hypothesis_text(parsed.text, rank), "id": raw_entry.get("id", f"h{rank}")},
+                parsed.text,
+                allow_template_fill=False,
+            )
+        else:
+            entry = enrich_entry_with_scope(dict(raw_entry), parsed.text, allow_template_fill=False)
+
+        raw_text = str(entry.get("text", ""))
         if not raw_text or _is_ml_template_hypothesis(raw_text):
-            raw_text = _fallback_hypothesis_text(parsed.text, rank)
-        if _is_ml_template_hypothesis(raw_text):
-            raw_text = _fallback_hypothesis_text(parsed.text, rank)
+            used_fallback = True
+            entry = enrich_entry_with_scope(
+                {"text": _fallback_hypothesis_text(parsed.text, rank), "id": f"h{rank}"},
+                parsed.text,
+                allow_template_fill=False,
+            )
+            raw_text = str(entry.get("text", ""))
 
         methodology = str(entry.get("test_methodology", ""))
         if not methodology.strip():
@@ -429,6 +487,11 @@ async def generate_ranked_hypotheses(
                 "Test with statistical_significance or bootstrap_confidence, "
                 "comparing treatment vs baseline metric vectors."
             )
+
+        scores_extra: dict[str, float] = {
+            "scope_valid": 1.0 if entry.get("_scope_valid") else 0.0,
+            "scope_fallback": 1.0 if used_fallback else 0.0,
+        }
 
         hypotheses.append(
             RankedHypothesis(
@@ -441,6 +504,7 @@ async def generate_ranked_hypotheses(
                     "impact": round(max(0.25, composite - 0.05), 3),
                     "scope_fit": round(max(0.2, composite - 0.08), 3),
                     "composite": composite,
+                    **scores_extra,
                 },
                 rank=rank,
             )
@@ -467,6 +531,27 @@ async def generate_ranked_hypotheses(
     for h, rel, core_text in zip(hypotheses, relevance_scores, texts, strict=False):
         if _is_ml_template_hypothesis(h.text):
             rejected.append({"id": h.id, "text": core_text[:200], "question_relevance_score": rel, "reason": "ml_template"})
+            continue
+        from propab.scoped_claim import is_boilerplate_scope, parse_scope_from_methodology, validate_scoped_claim
+
+        scope = parse_scope_from_methodology(h.text, h.test_methodology)
+        scope_ok, scope_missing = validate_scoped_claim(scope)
+        if not scope_ok:
+            rejected.append({
+                "id": h.id,
+                "text": core_text[:200],
+                "question_relevance_score": rel,
+                "reason": "missing_scope",
+                "missing": scope_missing,
+            })
+            continue
+        if scope and is_boilerplate_scope(scope, parsed.text) and (h.scores or {}).get("scope_fallback") != 1.0:
+            rejected.append({
+                "id": h.id,
+                "text": core_text[:200],
+                "question_relevance_score": rel,
+                "reason": "boilerplate_scope",
+            })
             continue
         h.scores = dict(h.scores or {})
         h.scores["question_relevance"] = rel
@@ -516,5 +601,27 @@ async def generate_ranked_hypotheses(
             max_hypotheses=max_hypotheses,
             min_discovery=min(3, max(1, max_hypotheses - 1)),
         )
+
+    n_generated = max_hypotheses
+    scope_rejected = sum(1 for r in rejected if r.get("reason") in ("missing_scope", "boilerplate_scope"))
+    from collections import Counter
+
+    reason_counts = dict(Counter(r.get("reason", "?") for r in rejected))
+    scope_metrics = {
+        "session_id": session_id,
+        "n_generated": n_generated,
+        "n_scope_rejected": scope_rejected,
+        "n_scope_passed": len(kept),
+        "scope_rejection_rate": round(scope_rejected / max(1, n_generated), 4),
+        "rejection_reasons": reason_counts,
+    }
+    if meta is not None:
+        meta["scope_metrics"] = scope_metrics
+    await emitter.emit(
+        session_id=session_id,
+        event_type=EventType.HYPO_REJECTED,
+        step="hypothesis.scope_gate",
+        payload=scope_metrics,
+    )
 
     return hypotheses
