@@ -1,0 +1,17 @@
+# Optional overlay for AstaBench eval: mount staged DiscoveryBench datasets into Propab workers.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.mount-dev.yml \
+#     -f docker-compose.astabench.yml up -d
+#
+services:
+  api:
+    volumes:
+      - ./data/astabench:/app/astabench-data
+
+  orchestrator:
+    volumes:
+      - ./data/astabench:/app/astabench-data
+
+  worker:
+    volumes:
+      - ./data/astabench:/app/astabench-data
