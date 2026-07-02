@@ -99,6 +99,12 @@ _THEME_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("auction", ("auction", "second-price", "bidder", "revenue equivalence")),
     ("collatz", ("collatz", "3n+1", "stopping time")),
     ("prime_gaps", ("prime gap", "cramér", "twin prime")),
+    ("thermal_stability", ("t55_raw", "t70_raw", "t75_raw", "t80_raw", "thermal", "thermophilicity", "denaturation", "melting")),
+    ("catalytic_geometry", ("triad_best_rmsd", "d1_d2_dist", "d2_d3_dist", "ramachandran", "catalytic triad", "geometry", "yxdd")),
+    ("electrostatics", ("mean_pot", "net_charge", "isoelectric", "salt_bridge", "electrostatic", "pocket_hbond")),
+    ("fold_similarity", ("foldseek", "tm_score", "lddt", "structural similarity")),
+    ("surface_properties", ("camsol", "sasa", "hydrophobic", "surface area")),
+    ("motif_structure", ("dgr_motif", "qg_motif", "sp_motif", "motif", "yxdd")),
 ]
 
 _STRUCTURAL_FALLBACKS: list[tuple[str, tuple[str, ...], float]] = [

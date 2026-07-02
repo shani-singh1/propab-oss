@@ -60,7 +60,9 @@ Parallel, no architecture modifications during runs.
 ```bash
 python scripts/run_demo_main.py --count 2 --hours 3
 python scripts/monitor_campaign.py --state-file artifacts/demo/main_latest.json
-python scripts/build_demo_assets.py
+# After campaigns complete (breakthrough or budget_exhausted):
+python scripts/build_demo_main_assets.py
+python scripts/build_demo_assets.py   # gold-corpus comparison report
 ```
 
 ## P6 — Demo Assets
@@ -72,6 +74,23 @@ python scripts/build_demo_assets.py
 Outputs: `artifacts/demo/demo_report.md` + `demo_report.json`
 
 Shows: **Question → Hypothesis tree → Verification → Finding → Improvement over baseline**
+
+### Main run artifacts (`artifacts/demo/main/`)
+
+After a P5 main run completes:
+
+```bash
+python scripts/build_demo_main_assets.py
+```
+
+| File | P5 collect |
+|------|------------|
+| `demo_report.md` / `.json` | P6 narrative report |
+| `main_assessment.json` | Pass/fail + event summary |
+| `metrics.json` | Objective campaign metrics |
+| `hypothesis_tree.json` | Full tree |
+| `traces.json` | DB-backed operator traces |
+| `lineage.json` | Confirmed finding parent chains |
 
 ## Success Criterion
 

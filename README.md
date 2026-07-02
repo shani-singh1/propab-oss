@@ -69,6 +69,7 @@ See [docs/campaign_era_partitioning.md](./docs/campaign_era_partitioning.md).
 python scripts/build_demo_assets.py          # P6 assets from gold corpus
 python scripts/run_demo_pilot.py --minutes 15  # P4 pilot
 python scripts/run_demo_main.py --hours 3    # P5 main run
+python scripts/build_demo_main_assets.py   # P5/P6 after main run completes
 ```
 
 See [docs/demo_execution.md](./docs/demo_execution.md).

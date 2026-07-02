@@ -24,6 +24,9 @@ dependencies = [
   "minio>=7.2.0",
   "docker>=7.1.0",
   "numpy>=1.26.0",
+  "pandas>=2.2.0",
+  "scikit-learn>=1.4.0",
+  "pyarrow>=15.0.0",
   "jinja2>=3.1.0",
   "scipy>=1.11.0",
   "matplotlib>=3.5.0",
@@ -50,7 +53,10 @@ dl = [
 [tool.setuptools]
 packages = [
   "propab",
+  "propab.anomaly_engine",
+  "propab.domain_adapters",
   "propab.tools",
+  "propab.tools.mandrake",
   "propab.tools.general_computation",
   "propab.tools.mathematics",
   "propab.tools.statistics",
@@ -68,7 +74,10 @@ packages = [
 
 [tool.setuptools.package-dir]
 propab = "packages/propab-core/propab"
+"propab.anomaly_engine" = "packages/propab-core/propab/anomaly_engine"
+"propab.domain_adapters" = "packages/propab-core/propab/domain_adapters"
 "propab.tools" = "packages/propab-core/propab/tools"
+"propab.tools.mandrake" = "packages/propab-core/propab/tools/mandrake"
 "propab.tools.general_computation" = "packages/propab-core/propab/tools/general_computation"
 "propab.tools.mathematics" = "packages/propab-core/propab/tools/mathematics"
 "propab.tools.statistics" = "packages/propab-core/propab/tools/statistics"

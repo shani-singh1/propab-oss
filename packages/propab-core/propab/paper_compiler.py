@@ -302,6 +302,10 @@ def _enrich_finding_row(row: dict[str, Any], ev: dict[str, Any], verdict: str) -
         "primary_theme": primary,
         "secondary_themes": secondary,
         "node_role": "DISCOVERY",
+        "top_artifact": ev.get("top_artifact"),
+        "top_artifact_survived": ev.get("top_artifact_survived"),
+        "second_artifact_check": ev.get("second_artifact_check"),
+        "artifact_gate": ev.get("artifact_gate"),
     }
     if not paper_eligible_finding(entry):
         return None
@@ -511,6 +515,17 @@ def _finding_sentence(f: dict[str, Any]) -> str:
         sent += f" [{', '.join(meta)}]"
     if stats and stats != "no inferential statistic recorded":
         sent += f" ({stats})"
+    ag = f.get("artifact_gate")
+    if isinstance(ag, dict) and ag.get("ranked_artifacts"):
+        top = ag["ranked_artifacts"][0]
+        ver = (ag.get("verifications") or [{}])[0]
+        survived = "yes" if ver.get("survived") else "no"
+        second = ag.get("second_artifact_trivial")
+        second_s = "trivially explains" if second else "does not trivially explain"
+        sent += (
+            f" [Artifact check: top={top.get('artifact_id')}, test={ver.get('test_used')}, "
+            f"survived={survived}; second artifact {second_s}]"
+        )
     return sent + "."
 
 

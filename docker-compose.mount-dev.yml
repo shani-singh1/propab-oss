@@ -9,7 +9,8 @@
 services:
   api:
     environment:
-      - PROPAB_PROFILE=${PROPAB_PROFILE:-dev}
+      - PROPAB_PROFILE=${PROPAB_PROFILE:-campaign}
+      - SANDBOX_TIMEOUT_SEC=${SANDBOX_TIMEOUT_SEC:-120}
     command: >
       uvicorn services.api.app.main:app --host 0.0.0.0 --port 8000
       --reload --reload-dir /app/services --reload-dir /app/packages
@@ -17,10 +18,15 @@ services:
       - ./packages:/app/packages
       - ./services:/app/services
       - ./migrations:/app/migrations
+      - ./artifacts:/app/artifacts
+      - ./demo:/app/demo
+      - ./mandrake-data:/app/mandrake-data
+      - ./prompts:/app/prompts
 
   orchestrator:
     environment:
-      - PROPAB_PROFILE=${PROPAB_PROFILE:-dev}
+      - PROPAB_PROFILE=${PROPAB_PROFILE:-campaign}
+      - SANDBOX_TIMEOUT_SEC=${SANDBOX_TIMEOUT_SEC:-120}
     command: >
       uvicorn services.orchestrator.main:app --host 0.0.0.0 --port 8010
       --reload --reload-dir /app/services --reload-dir /app/packages
@@ -28,12 +34,21 @@ services:
       - ./packages:/app/packages
       - ./services:/app/services
       - ./migrations:/app/migrations
+      - ./artifacts:/app/artifacts
+      - ./demo:/app/demo
+      - ./mandrake-data:/app/mandrake-data
+      - ./prompts:/app/prompts
 
   worker:
     environment:
-      - PROPAB_PROFILE=${PROPAB_PROFILE:-dev}
+      - PROPAB_PROFILE=${PROPAB_PROFILE:-campaign}
+      - SANDBOX_TIMEOUT_SEC=${SANDBOX_TIMEOUT_SEC:-120}
       - SANDBOX_IMAGE=${SANDBOX_IMAGE:-propab-oss-worker:latest}
     volumes:
       - ./packages:/app/packages
       - ./services:/app/services
       - ./migrations:/app/migrations
+      - ./artifacts:/app/artifacts
+      - ./demo:/app/demo
+      - ./mandrake-data:/app/mandrake-data
+      - ./prompts:/app/prompts

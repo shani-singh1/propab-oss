@@ -86,6 +86,14 @@ class DemoReport:
         return "\n".join(lines)
 
 
+def _paper_label(paper_url: str | None, has_paper: bool | None) -> str:
+    if paper_url:
+        return paper_url
+    if has_paper:
+        return "yes"
+    return "no"
+
+
 def _asset_markdown(asset: DemoCampaignAsset) -> list[str]:
     m = asset.metrics
     bc = asset.baseline_comparison
@@ -99,7 +107,7 @@ def _asset_markdown(asset: DemoCampaignAsset) -> list[str]:
         f"- **Improvement over baseline:** {bc.get('improvement_pct')}% (Δ={bc.get('delta')})",
         f"- **Tree:** {asset.tree_summary.get('total_nodes')} nodes, "
         f"depth {asset.tree_summary.get('max_depth')}",
-        f"- **Paper:** {'yes' if asset.paper_url else 'no'}",
+        f"- **Paper:** {_paper_label(asset.paper_url, m.get('has_paper'))}",
         "",
     ]
     if asset.top_findings:
