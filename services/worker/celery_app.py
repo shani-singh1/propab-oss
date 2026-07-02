@@ -24,4 +24,11 @@ app.conf.update(
     task_track_started=True,
     task_soft_time_limit=_soft,
     task_time_limit=_hard,
+    # Worker-loss resilience: a hypothesis task is only acked after it completes,
+    # so if a worker is killed mid-hypothesis the broker redelivers it to another
+    # worker instead of silently dropping it. Requires broker visibility_timeout
+    # >= task_time_limit (Redis) so an in-flight task is not double-dispatched.
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    broker_transport_options={"visibility_timeout": _hard + 60},
 )

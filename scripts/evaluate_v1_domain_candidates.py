@@ -215,48 +215,27 @@ def _evaluate_graph_snap() -> dict[str, Any]:
 
 
 def _evaluate_materials_matbench() -> dict[str, Any]:
-    """Candidate B — matbench dielectric (public, thousands of crystals)."""
-    url = "https://ml.materialsproject.org/projects/matbench_dielectric.json.gz"
-    cache = ROOT / "data" / "v1_candidates" / "matbench_dielectric.json.gz"
-    if not _download(url, cache):
-        return {"candidate": "materials", "error": f"download_failed: {url}"}
-    raw = json.loads(gzip.decompress(cache.read_bytes()).decode("utf-8"))
-    rows: list[dict[str, Any]] = []
-    for entry in raw.get("data", [])[:8000]:
-        if not isinstance(entry, list) or len(entry) < 2:
-            continue
-        struct, target = entry[0], entry[1]
-        if not isinstance(struct, dict):
-            continue
-        sites = struct.get("sites") or []
-        z_vals: list[float] = []
-        for site in sites:
-            if not isinstance(site, dict):
-                continue
-            species = site.get("species") or []
-            for sp in species:
-                if isinstance(sp, dict) and sp.get("element"):
-                    # Atomic number proxy via element symbol length bucket (cheap); n_sites is main feature.
-                    z_vals.append(float(len(str(sp["element"]))))
-        rows.append({
-            "n_sites": len(sites),
-            "n_elements": len({s.get("species", [{}])[0].get("element") for s in sites if s.get("species")}),
-            "mean_Z": float(np.mean(z_vals)) if z_vals else 0.0,
-            "dielectric": float(target),
-        })
-    df = pd.DataFrame(rows).dropna()
-    if len(df) < 200:
+    """Candidate B — matbench dielectric with real crystal-system LOFO families."""
+    sys.path.insert(0, str(ROOT / "packages" / "propab-core"))
+    from propab.domain_adapters.materials_adapter import MaterialsAdapter
+
+    try:
+        df = MaterialsAdapter().load_frame()
+    except Exception as exc:
+        return {"candidate": "materials", "error": str(exc)}
+
+    features = [c for c in ("n_sites", "n_elements", "mean_Z", "mean_ionicity") if c in df.columns]
+    sub = df.dropna(subset=features + ["dielectric", "crystal_system"])
+    if len(sub) < 200:
         return {"candidate": "materials", "error": "insufficient_matbench_rows"}
 
-    df["crystal_system"] = pd.qcut(df["n_sites"], q=5, labels=False, duplicates="drop")
-    features = ["n_sites", "n_elements", "mean_Z"]
-    X = df[features].to_numpy(float)
-    y = df["dielectric"].to_numpy(float)
-    groups = df["crystal_system"].astype(str).to_numpy()
+    X = sub[features].to_numpy(float)
+    y = sub["dielectric"].to_numpy(float)
+    groups = sub["crystal_system"].astype(str).to_numpy()
 
     lofo = _lofo_power_block(X, y, groups, n_perm=40)
     lofo["has_adequate_power"] = (
-        lofo["smallest_group_n"] >= 25
+        lofo["smallest_group_n"] >= 50
         and lofo["n_groups"] >= 5
         and lofo["classical_mde_smallest_group"]["effects"].get("r2_25", {}).get("detectable_at_n", False)
     )
@@ -264,14 +243,15 @@ def _evaluate_materials_matbench() -> dict[str, Any]:
         "candidate": "materials",
         "display_name": "Materials (matbench dielectric)",
         "dataset": {
-            "source": url,
-            "n_samples": int(len(df)),
-            "n_groups": int(df["crystal_system"].nunique()),
-            "group_counts": df["crystal_system"].value_counts().to_dict(),
+            "source": "matbench_dielectric.json.gz",
+            "n_samples": int(len(sub)),
+            "n_groups": int(sub["crystal_system"].nunique()),
+            "group_counts": sub["crystal_system"].value_counts().to_dict(),
+            "family_column": "crystal_system (pymatgen space group)",
         },
         "open_question_example": (
-            "Which composition descriptors predict dielectric constant across "
-            "composition-size strata (proxy crystal-system families)?"
+            "Does MP DFT bandgap predict dielectric constant across real crystal systems "
+            "under leave-one-crystal-system-out LOFO?"
         ),
         "lofo_power": lofo,
         "cheap_experiments": True,

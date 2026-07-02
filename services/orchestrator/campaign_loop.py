@@ -23,7 +23,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator
 from typing import Any
 import json
 import logging
@@ -44,6 +44,8 @@ from propab.campaign import (
     STATUS_BUDGET_EXHAUSTED,
     STOP_REASON_ALL_BRANCHES_EXHAUSTED,
     STOP_REASON_BREAKTHROUGH,
+    STOP_REASON_DOMAIN_PREFLIGHT_FAILED,
+    STOP_REASON_FATAL_ERROR,
     STOP_REASON_FRONTIER_REFILL_FAILED,
     STOP_REASON_HYPOTHESIS_CAP_REACHED,
     STOP_REASON_NO_BOOTSTRAP_SEEDS,
@@ -53,7 +55,12 @@ from propab.campaign import (
     STOP_REASON_SYNTHESIS_EMPTY,
     STOP_REASON_TIME_BUDGET_EXHAUSTED,
 )
-from propab.campaign_resume import backfill_belief_state_if_empty, validate_resume_readiness
+from propab.campaign_db import (  # persistence lives in core so API/worker/orchestrator share it
+    db_load_campaign,
+    db_load_session_events_tail,
+    db_save_campaign,
+)
+from propab.campaign_resume import backfill_belief_state_if_empty
 from propab.campaign_snapshot import write_campaign_snapshot
 from propab.campaign_synthesis import (
     _is_duplicate_frontier_candidate,
@@ -323,17 +330,6 @@ def build_campaign_synthesis_payload(campaign: ResearchCampaign) -> dict[str, An
     }
 
 
-def _db_float(row: Mapping[str, Any], key: str, default: float = 0.0) -> float:
-    """Read a float from a DB row without treating 0.0 as missing (unlike ``x or 0.0``)."""
-    v = row.get(key)
-    if v is None:
-        return default
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return default
-
-
 def _coerce_scalar_float(val: Any) -> float | None:
     """Accept int/float, numeric strings, and numpy scalars (item())."""
     if val is None or isinstance(val, bool):
@@ -523,112 +519,10 @@ def _node_row_id(campaign_id: str, node_id: str) -> str:
     return str(uuid5(_NODE_ID_NAMESPACE, f"{campaign_id}:{node_id}"))
 
 
-def _parse_started_at(iso_s: str) -> datetime:
-    """asyncpg expects datetime for TIMESTAMPTZ, not an ISO string."""
-    if not iso_s:
-        return datetime.now(tz=UTC)
-    s = iso_s.strip()
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    return datetime.fromisoformat(s)
-
-
-def _campaign_meta_blob(campaign: ResearchCampaign) -> dict[str, Any]:
-    """Extra campaign fields stored inside breakthrough_criteria_json._campaign_meta."""
-    return {
-        "belief_state": campaign.belief_state.to_dict(),
-        "max_hypotheses_cap": campaign.max_hypotheses_cap,
-        "stop_reason": campaign.stop_reason,
-        "seed_source": campaign.seed_source,
-        "anomaly_artifacts_dir": campaign.anomaly_artifacts_dir,
-        "policy_mode": campaign.policy_mode,
-        "checkpoint_every": campaign.checkpoint_every,
-    }
-
-
-def _breakthrough_criteria_for_db(campaign: ResearchCampaign) -> dict[str, Any]:
-    blob = campaign.breakthrough_criteria.to_dict()
-    blob["_campaign_meta"] = _campaign_meta_blob(campaign)
-    return blob
-
-
-def _apply_campaign_meta_from_db(data: dict[str, Any], bc: dict[str, Any]) -> None:
-    meta = bc.pop("_campaign_meta", None) if isinstance(bc, dict) else None
-    if not isinstance(meta, dict):
-        return
-    if meta.get("belief_state") is not None:
-        data["belief_state"] = meta["belief_state"]
-    for key in (
-        "max_hypotheses_cap",
-        "stop_reason",
-        "seed_source",
-        "anomaly_artifacts_dir",
-        "policy_mode",
-        "checkpoint_every",
-    ):
-        if key in meta:
-            data[key] = meta[key]
-
-
 # ── DB helpers ───────────────────────────────────────────────────────────────
-
-async def db_save_campaign(campaign: ResearchCampaign, session_factory: async_sessionmaker) -> None:
-    """Upsert the full campaign state to research_campaigns."""
-    now = datetime.now(tz=UTC).isoformat()
-    campaign.last_checkpoint = now
-    async with session_factory() as db:
-        await db.execute(
-            text("""
-                INSERT INTO research_campaigns (
-                    id, question, status, breakthrough_criteria_json,
-                    hypothesis_tree_json, baseline_metric, best_metric,
-                    improvement_pct, best_finding_json, total_hypotheses,
-                    total_confirmed, compute_seconds_used, compute_budget_seconds,
-                    started_at, last_checkpoint_at
-                ) VALUES (
-                    :id, :question, :status,
-                    CAST(:breakthrough_criteria_json AS jsonb),
-                    CAST(:hypothesis_tree_json AS jsonb),
-                    :baseline_metric, :best_metric, :improvement_pct,
-                    CAST(:best_finding_json AS jsonb),
-                    :total_hypotheses, :total_confirmed,
-                    :compute_seconds_used, :compute_budget_seconds,
-                    :started_at, NOW()
-                )
-                ON CONFLICT (id) DO UPDATE SET
-                    question = EXCLUDED.question,
-                    status = EXCLUDED.status,
-                    breakthrough_criteria_json = EXCLUDED.breakthrough_criteria_json,
-                    hypothesis_tree_json = EXCLUDED.hypothesis_tree_json,
-                    baseline_metric = EXCLUDED.baseline_metric,
-                    best_metric = EXCLUDED.best_metric,
-                    improvement_pct = EXCLUDED.improvement_pct,
-                    best_finding_json = EXCLUDED.best_finding_json,
-                    total_hypotheses = EXCLUDED.total_hypotheses,
-                    total_confirmed = EXCLUDED.total_confirmed,
-                    compute_seconds_used = EXCLUDED.compute_seconds_used,
-                    compute_budget_seconds = EXCLUDED.compute_budget_seconds,
-                    started_at = EXCLUDED.started_at,
-                    last_checkpoint_at = NOW()
-            """),
-            {
-                "id": campaign.id,
-                "question": campaign.question,
-                "status": campaign.status,
-                "breakthrough_criteria_json": json.dumps(_breakthrough_criteria_for_db(campaign)),
-                "hypothesis_tree_json": json.dumps(campaign.hypothesis_tree.to_dict()),
-                "baseline_metric": campaign.baseline_metric,
-                "best_metric": campaign.best_metric,
-                "improvement_pct": campaign.improvement_pct,
-                "best_finding_json": json.dumps(campaign.best_finding or {}),
-                "total_hypotheses": campaign.total_hypotheses,
-                "total_confirmed": campaign.total_confirmed,
-                "compute_seconds_used": int(campaign.elapsed_seconds()),
-                "compute_budget_seconds": campaign.compute_budget_seconds,
-                "started_at": _parse_started_at(campaign.started_at),
-            },
-        )
-        await db.commit()
+# db_save_campaign / db_load_campaign / db_load_session_events_tail and their
+# meta helpers now live in propab.campaign_db (imported above) so that the API,
+# worker, and orchestrator share one persistence path with no cross-service imports.
 
 
 async def db_set_research_session_prior(
@@ -703,28 +597,6 @@ async def db_mark_research_session_failed(
         await db.commit()
 
 
-async def db_load_session_events_tail(
-    session_id: str,
-    session_factory: async_sessionmaker,
-    *,
-    limit: int = 2000,
-) -> list[dict[str, Any]]:
-    async with session_factory() as db:
-        rows = (
-            await db.execute(
-                text("""
-                    SELECT step, event_type, payload_json, created_at
-                    FROM events
-                    WHERE session_id = CAST(:id AS uuid)
-                    ORDER BY created_at ASC
-                    LIMIT :lim
-                """),
-                {"id": session_id, "lim": limit},
-            )
-        ).mappings().all()
-    return [dict(r) for r in rows]
-
-
 async def db_load_session_prior_json(
     session_id: str,
     session_factory: async_sessionmaker,
@@ -746,38 +618,6 @@ async def db_load_session_prior_json(
         except json.JSONDecodeError:
             return None
     return None
-
-
-async def db_load_campaign(campaign_id: str, session_factory: async_sessionmaker) -> ResearchCampaign | None:
-    """Load a campaign from the DB. Returns None if not found."""
-    async with session_factory() as db:
-        row = (await db.execute(
-            text("SELECT * FROM research_campaigns WHERE id = CAST(:id AS uuid)"),
-            {"id": campaign_id},
-        )).mappings().one_or_none()
-    if row is None:
-        return None
-    bc_raw = row["breakthrough_criteria_json"] or {}
-    bc = dict(bc_raw) if isinstance(bc_raw, dict) else {}
-    data = {
-        "id": str(row["id"]),
-        "question": row["question"],
-        "status": row["status"],
-        "breakthrough_criteria": {k: v for k, v in bc.items() if k != "_campaign_meta"},
-        "hypothesis_tree": row["hypothesis_tree_json"] or {},
-        "baseline_metric": _db_float(row, "baseline_metric", 0.0),
-        "best_metric": _db_float(row, "best_metric", 0.0),
-        "improvement_pct": _db_float(row, "improvement_pct", 0.0),
-        "best_finding": row.get("best_finding_json") or None,
-        "total_hypotheses": row.get("total_hypotheses") or 0,
-        "total_confirmed": row.get("total_confirmed") or 0,
-        "compute_budget_seconds": row.get("compute_budget_seconds") or 14400,
-        "compute_seconds_used": row.get("compute_seconds_used") or 0,
-        "started_at": str(row.get("started_at") or ""),
-        "last_checkpoint": str(row.get("last_checkpoint_at") or ""),
-    }
-    _apply_campaign_meta_from_db(data, bc)
-    return ResearchCampaign.from_dict(data)
 
 
 # ── Baseline measurement ─────────────────────────────────────────────────────
@@ -999,6 +839,7 @@ async def _maybe_run_campaign_synthesis(
     max_concurrent: int,
     inflight_ids: set[str],
     prior_snippets: list[str] | None,
+    session_factory: async_sessionmaker | None = None,
 ) -> bool:
     """Tier-2 synthesis if triggered. Returns True if candidates were added."""
     if not bool(getattr(settings, "campaign_synthesis_enabled", True)):
@@ -1023,143 +864,9 @@ async def _maybe_run_campaign_synthesis(
         generation=generation,
         prior_snippets=prior_snippets,
         emitter=emitter,
+        session_factory=session_factory,
     )
     return len(added) > 0
-
-
-# ── Hypothesis expansion via LLM (legacy — superseded by campaign synthesis) ──
-
-async def expand_tree_node(
-    node_id: str,
-    tree: HypothesisTree,
-    llm: LLMClient,
-    campaign_id: str,
-    generation: int,
-    *,
-    question: str = "",
-    prior_snippets: list[str] | None = None,
-    emitter: EventEmitter | None = None,
-) -> list[HypothesisNode]:
-    """
-    Legacy per-node tree expansion (pre-redesign). Campaign loop uses synthesis instead.
-    """
-    prompt = tree.build_expand_prompt(node_id, question=question)
-    if prompt is None:
-        return []
-    try:
-        raw = await llm.call(
-            prompt=prompt,
-            purpose="campaign.tree_expand",
-            session_id=campaign_id,
-        )
-        children, scope_metrics = tree.parse_expanded_nodes(
-            node_id, raw, generation, question=question,
-        )
-        if emitter is not None and scope_metrics.get("n_children_generated", 0) > 0:
-            from propab.types import EventType
-
-            await emitter.emit(
-                session_id=campaign_id,
-                event_type=EventType.HYPO_REJECTED,
-                step="hypothesis.scope_gate",
-                payload={
-                    "phase": "tree_expansion",
-                    "n_generated": scope_metrics["n_children_generated"],
-                    "n_scope_rejected": scope_metrics["n_children_rejected"],
-                    "n_scope_passed": scope_metrics["n_children_passed"],
-                    "scope_rejection_rate": scope_metrics["scope_rejection_rate"],
-                    "rejection_reasons": scope_metrics["rejection_reasons"],
-                    "parent_id": node_id,
-                },
-            )
-        threshold = float(getattr(settings, "hypothesis_relevance_threshold", 0.35))
-        snippets = list(prior_snippets or [])
-        filtered: list[HypothesisNode] = []
-        for child in children:
-            primary, secondary, theme_conf = extract_theme_vector(child.text)
-            child.primary_theme = primary
-            child.secondary_themes = secondary
-            child.theme_id = primary
-            child.theme_confidence = theme_conf
-            child.node_role = infer_node_role(child.text)
-            core = strip_question_suffix(child.text)
-            if _is_ml_template_hypothesis(child.text):
-                continue
-            child.question_relevance_score = compute_question_relevance_score_lexical(
-                question, snippets, core,
-            )
-            if child.question_relevance_score >= threshold:
-                filtered.append(child)
-        tree.add_to_frontier(filtered)
-        return filtered
-    except Exception as exc:
-        logger.warning("Tree expansion failed for node %s: %s", node_id, exc)
-        return []
-
-
-async def _expand_node_async(
-    *,
-    campaign: ResearchCampaign,
-    node_id: str,
-    llm: LLMClient,
-    emitter: EventEmitter,
-    generation: int,
-    step: str,
-    reason: str | None = None,
-    prior_snippets: list[str] | None = None,
-    check_merit_gate: bool = True,
-) -> None:
-    """Expand a node and emit its event off the dispatch critical path."""
-    node = campaign.hypothesis_tree.nodes.get(node_id)
-    if node is not None and not is_discovery_node(node):
-        return
-    if node and check_merit_gate:
-        ok, merit_reason = campaign.hypothesis_tree.expansion_passes_merit_gate(
-            node_id,
-            novelty_min=float(getattr(settings, "campaign_expansion_merit_novelty_min", 0.25)),
-            info_gain_min=float(getattr(settings, "campaign_expansion_merit_info_gain_min", 0.30)),
-        )
-        node.expansion_reason = merit_reason if reason is None else f"{reason};{merit_reason}"
-        if not ok:
-            await emitter.emit(
-                session_id=campaign.id,
-                event_type=EventType.HYPO_TREE_PRUNED,
-                step="campaign.expansion_merit_gate",
-                payload={"node_id": node_id, "expansion_reason": node.expansion_reason},
-                hypothesis_id=_node_row_id(campaign.id, node_id),
-            )
-            return
-    elif node and reason:
-        node.expansion_reason = reason
-
-    try:
-        children = await expand_tree_node(
-            node_id,
-            campaign.hypothesis_tree,
-            llm,
-            campaign.id,
-            generation,
-            question=campaign.question,
-            prior_snippets=prior_snippets,
-            emitter=emitter,
-        )
-        if children:
-            payload: dict[str, Any] = {
-                "parent_id": node_id,
-                "children_count": len(children),
-                "tree_size": len(campaign.hypothesis_tree.nodes),
-            }
-            if node and node.expansion_reason:
-                payload["expansion_reason"] = node.expansion_reason
-            await emitter.emit(
-                session_id=campaign.id,
-                event_type=EventType.HYPO_TREE_EXPANDED,
-                step=step,
-                payload=payload,
-                hypothesis_id=_node_row_id(campaign.id, node_id),
-            )
-    except Exception as exc:  # noqa: BLE001 — background task must not crash the loop
-        logger.warning("[campaign %s] async expansion of %s failed: %s", campaign.id, node_id, exc)
 
 
 async def generate_seed_hypotheses(
@@ -1416,6 +1123,7 @@ async def _iter_campaign_pipelined_results(
                     max_concurrent=max_concurrent,
                     inflight_ids=inflight,
                     prior_snippets=prior_snippets,
+                    session_factory=session_factory,
                 )
             node = campaign.hypothesis_tree.next_dispatch_candidate(inflight)
             if node is None:
@@ -1656,6 +1364,70 @@ async def _try_salvage_paper(
 
 # ── Main campaign loop ───────────────────────────────────────────────────────
 
+async def _enforce_domain_preflight(
+    campaign: ResearchCampaign,
+    session_factory: async_sessionmaker,
+    emitter: EventEmitter,
+) -> bool:
+    """Run the owning domain's preflight before a fresh campaign starts.
+
+    Returns True if the campaign may proceed, False if it was blocked (in which
+    case this function has already finalized the campaign with a
+    ``DOMAIN_PREFLIGHT_FAILED`` stop reason and marked the session).
+
+    Fail-open on plugin errors (a buggy preflight must not block a campaign) but
+    fail-closed on an explicit ``passed=False`` — that is the whole point of the gate.
+    """
+    from propab.domain_modules.registry import resolve_domain_plugin
+
+    plugin = resolve_domain_plugin(question=campaign.question)
+    if plugin is None:
+        return True  # no scientific-domain owner → no domain-specific power gate
+
+    try:
+        result = plugin.preflight()
+    except Exception as exc:  # noqa: BLE001 — a broken preflight must not block launch
+        logger.warning("[campaign %s] preflight raised for domain %s (fail-open): %s",
+                       campaign.id, plugin.domain_id, exc)
+        return True
+
+    if result.passed:
+        await emitter.emit(
+            session_id=campaign.id,
+            event_type=EventType.CAMPAIGN_PROGRESS,
+            step="campaign.preflight_ok",
+            payload={"domain": plugin.domain_id, "reason": result.reason, "details": result.details},
+        )
+        return True
+
+    logger.warning(
+        "[campaign %s] domain preflight FAILED (%s): %s — refusing to launch",
+        campaign.id, plugin.domain_id, result.reason,
+    )
+    campaign.finalize_stop(STOP_REASON_DOMAIN_PREFLIGHT_FAILED)
+    try:
+        await db_save_campaign(campaign, session_factory)
+    except Exception:
+        logger.exception("[campaign %s] db_save after preflight-fail failed", campaign.id)
+    try:
+        await db_mark_research_session_failed(campaign.id, session_factory)
+    except Exception:
+        pass
+    await emitter.emit(
+        session_id=campaign.id,
+        event_type=EventType.CAMPAIGN_BUDGET_EXHAUSTED,
+        step="campaign.preflight_failed",
+        payload={
+            "domain": plugin.domain_id,
+            "stop_reason": STOP_REASON_DOMAIN_PREFLIGHT_FAILED,
+            "reason": result.reason,
+            "details": result.details,
+            **campaign.summary(),
+        },
+    )
+    return False
+
+
 async def run_campaign_loop(
     campaign: ResearchCampaign,
     *,
@@ -1678,6 +1450,9 @@ async def run_campaign_loop(
     # Defined inside the try below, but referenced by the fatal-error salvage path —
     # initialize so an early crash can still attempt paper salvage without NameError.
     prior_dict: dict[str, Any] | None = None
+    # Health-metric accumulators (worker utilization at campaign end).
+    total_agent_seconds: float = 0.0
+    max_concurrency_seen: int = 1
 
     try:
         resume_warm = bool(campaign.hypothesis_tree.nodes)
@@ -1724,6 +1499,15 @@ async def run_campaign_loop(
             step="campaign.start",
             payload=campaign.summary(),
         )
+
+        # Domain preflight gate: for a fresh campaign, refuse to launch if the
+        # owning domain reports its data/features are underpowered. This fails
+        # fast (seconds) instead of burning the whole compute budget on a domain
+        # that could never confirm anything. Resumed campaigns skip the gate —
+        # they already passed it at first launch.
+        if not resume_warm and not await _enforce_domain_preflight(campaign, session_factory, emitter):
+            return
+
         await db_set_research_session_stage(campaign.id, session_factory, stage="campaign.prior")
 
         parsed = await parse_question(campaign.question)
@@ -1753,6 +1537,20 @@ async def run_campaign_loop(
                     evidence_status="INSUFFICIENT_EVIDENCE",
                 )
                 prior_dict = prior.to_dict()
+
+        if prior_dict is None:
+            injected = await db_load_session_prior_json(campaign.id, session_factory)
+            if injected:
+                prior_dict = injected
+                await emitter.emit(
+                    session_id=campaign.id,
+                    event_type=EventType.CAMPAIGN_PROGRESS,
+                    step="campaign.phase",
+                    payload={
+                        "phase": "prior_injected",
+                        "detail": "Using pre-injected prior_json from research_sessions.",
+                    },
+                )
 
         if prior_dict is None:
             await emitter.emit(
@@ -1811,6 +1609,20 @@ async def run_campaign_loop(
                     evidence_status="INSUFFICIENT_EVIDENCE",
                 )
             prior_dict = prior.to_dict()
+
+        # Ownership-contracts: literature citation verification rate per prior build.
+        try:
+            from propab.health_metrics import count_established_verified, log_literature_prior_health
+
+            _facts_n, _verified_n = count_established_verified(getattr(prior, "established_facts", None))
+            await log_literature_prior_health(
+                session_factory,
+                campaign_id=campaign.id,
+                established_facts_count=_facts_n,
+                verified_citation_count=_verified_n,
+            )
+        except Exception:  # noqa: BLE001 — metric logging must never break a campaign
+            logger.exception("[campaign %s] literature prior health logging failed", campaign.id)
 
         # ── Stage 1: Intake + Literature (lightweight, reuse session infra) ──
         # parsed already loaded above
@@ -1973,6 +1785,7 @@ async def run_campaign_loop(
                             generation=generation,
                             prior_snippets=prior_snippets,
                             emitter=emitter,
+                            session_factory=session_factory,
                         )
                         if (
                             not added
@@ -2017,6 +1830,7 @@ async def run_campaign_loop(
                     int(settings.campaign_batch_size)
                     * max(1, int(getattr(settings, "campaign_inflight_multiplier", 1) or 1)),
                 )
+            max_concurrency_seen = max(max_concurrency_seen, max_c)
 
             breakthrough_found = False
             cap_hit_in_batch = False
@@ -2049,6 +1863,7 @@ async def run_campaign_loop(
                 verdict = result.get("verdict", "inconclusive")
                 confidence = float(result.get("confidence") or 0.0)
                 evidence = result.get("evidence_summary") or ""
+                total_agent_seconds += float(result.get("duration_sec") or 0.0)
 
                 if not campaign.hypothesis_tree.update_node(
                     node_id, verdict, confidence, evidence,
@@ -2215,6 +2030,33 @@ async def run_campaign_loop(
         if loaded is not None:
             campaign = loaded
 
+        # Ownership-contracts per-campaign health metrics: worker experiment
+        # success rate + worker utilization onto research_campaigns, and the
+        # artifact-gate precision (confirmed findings backed by a null test).
+        try:
+            from propab.health_metrics import (
+                compute_confirmed_audit_counts,
+                log_campaign_audit,
+                log_campaign_end_health,
+            )
+
+            await log_campaign_end_health(
+                session_factory,
+                campaign=campaign,
+                total_agent_seconds=total_agent_seconds,
+                max_concurrency=max_concurrency_seen,
+            )
+            _confirmed, _survived = compute_confirmed_audit_counts(campaign.hypothesis_tree)
+            if _confirmed > 0:
+                await log_campaign_audit(
+                    session_factory,
+                    campaign_id=campaign.id,
+                    confirmed_findings_count=_confirmed,
+                    survived_audit_count=_survived,
+                )
+        except Exception:  # noqa: BLE001 — metric logging must never break a campaign
+            logger.exception("[campaign %s] campaign-end health logging failed", campaign.id)
+
         await asyncio.to_thread(write_campaign_snapshot, "pre_paper", campaign, prior_dict)
 
         tree_sum = campaign.hypothesis_tree.summary()
@@ -2337,6 +2179,9 @@ async def run_campaign_loop(
             await db_mark_research_session_failed(campaign.id, session_factory)
         except Exception:
             pass
+        # Record an explicit terminal reason so the campaign never stays "active"
+        # with a null stop_reason after a fatal, unsalvageable error.
+        campaign.finalize_stop(STOP_REASON_FATAL_ERROR)
         try:
             await db_save_campaign(campaign, session_factory)
         except Exception:

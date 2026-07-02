@@ -162,26 +162,21 @@ def _scope_from_mapping(text: str, mapping: dict[str, Any]) -> ScopedClaim | Non
 
 
 def infer_domain_scope_template(question: str) -> ScopedClaim:
-    """Default scope template when LLM omits fields (contagion / mandrake aware)."""
+    """
+    Default scope template when the LLM omits fields.
+
+    The domain-specific templates live in the domain modules (each
+    ``DomainPlugin.scope_template``); core holds only the generic fallback.
+    """
     ql = (question or "").lower()
-    if any(k in ql for k in ("contagion", "diffusion", "spreading", "sis", "sir", "network")):
-        return ScopedClaim(
-            text="",
-            population="N=300–5000 node graphs, 30+ instances per topology family",
-            distribution="Barabási–Albert and stochastic block model ensembles; avg degree 6–12",
-            claimed_generalization="Effect should transfer to Watts–Strogatz graphs with matched average degree",
-            expected_failure_modes="Fails on ER graphs or when modularity Q<0.2; breaks if seed set >5% of nodes",
-            ood_test="Train/evaluate on BA+SBM; hold out WS family; require LOFO R²>0 on WS or refute",
-        )
-    if any(k in ql for k in ("rt activity", "retroviral", "biophysical", "evolutionary family", "mandrake")):
-        return ScopedClaim(
-            text="",
-            population="56 retroviral RT sequences with handcrafted biophysical features",
-            distribution="7 rt_family groups with ≥4 sequences each",
-            claimed_generalization="Signal must survive leave-one-family-out across held-out families",
-            expected_failure_modes="Collapses when geometry/fold features proxy family ID; thermal-only axis",
-            ood_test="LOFO on held-out family; label-shuffle permutation p<0.05 required before confirm",
-        )
+    # Lazy import avoids a module-load import cycle (domain plugins import core).
+    from propab.domain_modules.registry import all_plugins
+
+    for plugin in all_plugins():
+        tmpl = plugin.scope_template()
+        if tmpl and plugin.matches_scope(ql):
+            return ScopedClaim(text="", **tmpl)
+
     return ScopedClaim(
         text="",
         population="Finite sample explicitly sized in experiment plan",
@@ -231,8 +226,9 @@ def _tokenize_ood(text: str) -> set[str]:
     tokens = set(re.findall(r"[a-z0-9]+", low))
     keywords = {
         "lofo", "hold", "out", "held", "train", "evaluate", "transfer", "ws", "ba", "sbm", "er",
-        "watts", "strogatz", "barabasi", "family", "topology", "label", "shuffle", "permutation",
+        "watts", "strogatz", "barabasi",         "family", "topology", "label", "shuffle", "permutation",
         "mandrake", "rt", "cross", "generalization", "ood",
+        "crystal", "matbench", "dielectric", "lofo", "system",
     }
     return {t for t in tokens if t in keywords or len(t) >= 4}
 
@@ -325,6 +321,17 @@ def check_scope_executed_integrity(
             audit_class=AUDIT_MISMATCHED_SCOPE,
         )
     if is_boilerplate_scope(scope, question):
+        if executed is not None:
+            sim_bp = ood_similarity(scope.ood_test, executed.summary)
+            if sim_bp >= min_similarity:
+                return ScopeIntegrityResult(
+                    scope_gate_result=SCOPE_INTEGRITY_PASS,
+                    reason="template scope but executed LOFO matches declared OOD",
+                    declared_ood=scope.ood_test,
+                    executed_summary=executed.summary,
+                    similarity=round(sim_bp, 4),
+                    audit_class=AUDIT_VALID_SCOPE,
+                )
         return ScopeIntegrityResult(
             scope_gate_result=SCOPE_INTEGRITY_FAIL,
             reason="boilerplate scope matches domain template",

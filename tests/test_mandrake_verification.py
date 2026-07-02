@@ -44,7 +44,8 @@ def test_classify_null():
 
 
 def test_is_mandrake():
-    assert is_mandrake_campaign(payload={"seed_source": "anomaly"})
+    assert not is_mandrake_campaign(payload={"seed_source": "anomaly"})
+    assert is_mandrake_campaign(payload={"domain": "mandrake"})
 
 
 def test_mandrake_evidence_parses_for_tree_diagnostics():

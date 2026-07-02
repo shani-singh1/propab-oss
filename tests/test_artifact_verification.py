@@ -124,3 +124,25 @@ def test_batch_audit_contagion_shape():
     assert report["n_audited"] == 1
     assert "artifact_failure_distribution" in report
     assert report["n_confirmed_under_artifact_gate"] == 0
+
+
+def test_network_artifact_vocabulary_owned_by_plugin():
+    """Core must not hardcode network keywords — they live on the domain plugin."""
+    from propab.domain_modules.registry import get_domain_plugin
+
+    plugin = get_domain_plugin("network_diffusion")
+    assert plugin is not None
+    markers = set(plugin.artifact_question_markers)
+    assert {"contagion", "topology", "modular", "k-shell"} <= markers
+
+
+def test_topology_artifact_detected_via_plugin_markers_without_domain_bucket():
+    """Marker-based network detection (no domain_bucket) still yields the topology artifact."""
+    ctx = EvidenceContext(
+        hypothesis_text="k-shell index drives SIS contagion extent on scale-free networks",
+        evidence_generation_method="statistical_significance",
+        n_samples=40,
+        p_value=0.001,
+    )
+    ids = {m.artifact_id for m in generate_artifact_models(ctx)}
+    assert ARTIFACT_TOPOLOGY_DEPENDENCE in ids

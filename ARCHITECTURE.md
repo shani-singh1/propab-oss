@@ -1,2238 +1,409 @@
-# PROPAB — Open Source AI Research System
-## System Architecture & Engineering Design
+# Propab — Architecture
 
-> **Transparency is a first-class constraint.** Every agent decision, every tool call, every LLM prompt, every result, every failure emits a named structured event. Nothing happens silently. Researchers can inspect exactly what Propab did and why at every step.
+> **Current-state architecture.** This document describes the system as it is
+> actually wired today, using `docs/component_map.md` as the source of truth. It
+> is deliberately not aspirational: every component listed here has a live call
+> site on the campaign path, or is explicitly marked as partially-wired /
+> opt-in. When code and this document disagree, the code (and the component map)
+> win — update this document, not the other way around.
 
-> **Long-running agent vision.** Propab is designed to work for hours or a full day on a hard research question. Given sufficient compute and time, it should make progressive, verifiable progress — forming and testing thousands of hypotheses, accumulating evidence across rounds, and producing a paper with real findings. This document specifies all architecture needed to reach that goal.
-
----
-
-## Table of Contents
-
-1. [System Overview](#1-system-overview)
-2. [Design Principles](#2-design-principles)
-3. [High-Level Architecture](#3-high-level-architecture)
-4. [Event System — The Transparency Backbone](#4-event-system--the-transparency-backbone)
-5. [Literature Layer](#5-literature-layer)
-6. [Hypothesis Layer](#6-hypothesis-layer)
-7. [Experiment Layer — Think-Act Sub-Agent Architecture](#7-experiment-layer--think-act-sub-agent-architecture)
-8. [Tool System](#8-tool-system)
-9. [Orchestrator — Multi-Round Research Loop](#9-orchestrator--multi-round-research-loop)
-10. [Research Memory System](#10-research-memory-system)
-11. [Budget & Progress Management](#11-budget--progress-management)
-12. [Evidence Accumulation & Significance Gate](#12-evidence-accumulation--significance-gate)
-13. [Paper Writing Layer](#13-paper-writing-layer)
-14. [Data Layer](#14-data-layer)
-15. [API & Streaming Layer](#15-api--streaming-layer)
-16. [Infrastructure & Setup](#16-infrastructure--setup)
-17. [Failure Handling](#17-failure-handling)
-18. [Build Roadmap](#18-build-roadmap)
-19. [Repository Structure](#19-repository-structure)
-20. [Campaign Model](#20-campaign-model)
-21. [Hypothesis Tree](#21-hypothesis-tree)
-22. [Breakthrough Detection](#22-breakthrough-detection)
+Companion documents:
+- `propab_ownership_contracts.md` — what each component owns, never owns, its
+  input/output contract, and its **health metric** (the number that tells you
+  whether it is doing its job).
+- `docs/component_map.md` — per-symbol map with file:line, callers, callees,
+  covering test, and wiring status.
+- `TOOLS.md` — the sub-agent tool surface.
 
 ---
 
-## 1. System Overview
+## 1. What Propab is
 
-Propab is an autonomous long-running research system. A researcher submits a question. The system:
+Propab is an autonomous, **literature-grounded research campaign engine**. You
+give it a scientific question and a domain; it runs a long-lived campaign that:
 
-1. Determines whether the answer already exists clearly in literature
-2. If not — generates N ranked hypotheses
-3. Runs a **multi-round experiment loop**: spawns sub-agents, collects evidence, synthesizes findings, generates refined hypotheses, repeats
-4. Each sub-agent uses a **think-act loop**: it reasons after every tool call and decides what to do next based on what it just learned
-5. All agents share a **live result ledger**: partial findings from one agent are visible to others
-6. The system continues until a **stopping criterion** is reached: time budget exhausted, sufficient confirmed findings, or diminishing returns detected
-7. Writes an arxiv-formatted paper grounded in the accumulated multi-round experiment trace
+1. Builds a **structured literature prior** (established facts, open gaps,
+   contradictions, dead ends) to seed the search.
+2. Generates candidate **hypotheses** with explicit scope (population, claimed
+   generalization, out-of-distribution test, expected failure mode).
+3. Dispatches each hypothesis to a **worker** that runs a domain-appropriate
+   experiment and returns raw evidence.
+4. Runs a **verification pipeline** that decides confirmed / refuted /
+   inconclusive, with an **artifact gate** (label-shuffle / permutation nulls)
+   and an **out-of-distribution / scope-integrity gate** so a "confirmed"
+   result actually generalizes.
+5. **Synthesizes** completed results into a small set of rival beliefs, binds
+   evidence to those beliefs at write time (no fabricated citations), and
+   refills the frontier with the next most discriminating experiments.
+6. Persists resumable state to Postgres after every round, records a non-null
+   **stop reason** when it ends, and compiles a paper from the actual trace.
 
-**Target user:** Any researcher — PhD student, independent researcher, lab team — who can run `docker compose up`.
-
-**Long-running mode:** A session may run for hours or a full day. It checkpoints progress to Postgres at every round. If interrupted, it can resume from the last checkpoint. Given compute and time, it makes progressive research progress.
-
-**Setup requirement:** One command. No manual configuration beyond providing an LLM API key.
-
----
-
-## 2. Design Principles
-
-### 2.1 Transparency First
-Every step emits a structured event. The event stream is the system's real-time log, the frontend's data source, and the paper writer's audit trail. If something is not in the event stream, it did not happen.
-
-### 2.2 No Black Boxes
-- Orchestrator is a custom async Python loop — every state transition is explicit code
-- Tools are plain functions with a JSON schema declaration — no magic base classes
-- LLM prompts are stored verbatim alongside responses in `llm_calls` table
-- The methods section of the paper is compiled deterministically from experiment steps, not written by an LLM
-- Every round of the research loop is a named, queryable entity in the database
-
-### 2.3 Fail Loudly
-No silent failures. Every error is a structured object with: error type, message, step context, input that caused it, and recovery action taken. Errors are surfaced to the frontend in real time. Sessions never abort silently — they checkpoint, emit a structured failure event, and the researcher can inspect exactly where and why.
-
-### 2.4 Lazy-First Data
-No bulk pre-ingestion of arxiv. Papers are fetched on demand, processed, and cached with a TTL. First queries fetch fresh. Repeat queries hit cache. This makes local setup feasible.
-
-### 2.5 Tool Discipline
-Ship high-quality, well-tested STEM tools across domains. Expose a plugin interface for community additions. Tools are loaded by cluster (15–25 tools per domain) — never the full list — so context never explodes. Tool selection accounts for both hypothesis text and the original research question to prevent drift.
-
-### 2.6 One Command Setup
-`docker compose up` starts everything. No manual config of vector DBs, queues, or model endpoints. All configuration is via environment variables with documented defaults.
-
-### 2.7 Evidence Before Claims
-No hypothesis can be confirmed or refuted without passing the **significance gate**: at least one tool call that produces a p-value, effect size, or confidence interval. Raw metric values alone are insufficient for confirmation. This is enforced in code, not just convention.
-
-### 2.8 Progressive Research
-The system does not stop after one pass. It accumulates evidence across rounds, learns from dead ends, refines hypotheses, and continues making progress. Diminishing-returns detection prevents infinite loops. Budget controls prevent runaway cost.
+The design constraint that shapes everything: **nothing happens silently, and
+every component has one measurable health metric.** Debugging starts with "which
+component's number is out of range," not "Propab failed."
 
 ---
 
-## 3. High-Level Architecture
+## 2. Service topology
+
+Propab runs as four application services plus infrastructure, wired by
+`docker-compose.yml`:
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              PROPAB SYSTEM                                  │
-│                                                                             │
-│  ┌──────────────┐      ┌────────────────────────────────────────────────┐   │
-│  │   Frontend   │─────▶│         API Gateway  (FastAPI)                  │   │
-│  │  React + SSE │◀─────│  POST /research  GET /stream/{session_id}       │   │
-│  └──────────────┘      └──────────────────┬─────────────────────────────┘   │
-│                                           │                                 │
-│                    ┌──────────────────────▼────────────────────────────┐    │
-│                    │           ORCHESTRATOR SERVICE                     │    │
-│                    │                                                    │    │
-│                    │  research_loop()  — MULTI-ROUND                    │    │
-│                    │  ├── intake()              parse + classify         │    │
-│                    │  ├── literature()           build prior             │    │
-│                    │  ├── [ROUND LOOP]                                   │    │
-│                    │  │   ├── hypothesize()      generate + rank         │    │
-│                    │  │   ├── experiment()        dispatch think-act     │    │
-│                    │  │   │   agents (parallel)                          │    │
-│                    │  │   ├── synthesize()        collect + evaluate     │    │
-│                    │  │   ├── check_budget()      continue or stop?      │    │
-│                    │  │   └── refine()            learn → new hypotheses │    │
-│                    │  └── write_paper()           compile + render       │    │
-│                    │                                                    │    │
-│                    │  emit(event) ──────────────────────────────────▶   │    │
-│                    └──────────┬─────────────────────────────────────────┘    │
-│                               │                                             │
-│         ┌─────────────────────┼──────────────────────┐                      │
-│         │                     │                      │                      │
-│  ┌──────▼──────────┐  ┌───────▼──────────┐  ┌────────▼───────────────────┐  │
-│  │  LITERATURE     │  │  HYPOTHESIS      │  │  EXPERIMENT RUNNER         │  │
-│  │  SERVICE        │  │  SERVICE         │  │  (N Celery workers)        │  │
-│  │                 │  │                  │  │  think_act_loop()          │  │
-│  │  hybrid_search()│  │  generate()      │  │  ├── decide_next_step()    │  │
-│  │  build_prior()  │  │  rank()          │  │  ├── tool_dispatch()       │  │
-│  │  detect_gaps()  │  │  refine()        │  │  ├── observe_result()      │  │
-│  └──────┬──────────┘  │  deduplicate()   │  │  ├── significance_check()  │  │
-│         │             └───────────────── ┘  │  └── emit(event)           │  │
-│         │                                   └───────────────────────────┘  │
-│         │                                                                   │
-│  ┌──────▼──────────────────────────────────────────────────────────────┐    │
-│  │                     RESEARCH MEMORY SYSTEM                           │    │
-│  │                                                                      │    │
-│  │  Session Memory     Cross-Session KB     Agent Working Memory        │    │
-│  │  (this run)         (persists forever)   (per sub-agent context)     │    │
-│  └──────────────────────────────────────────────────────────────────────┘    │
-│                                                                             │
-│  ┌──────────────────────────────────────────────────────────────────────┐    │
-│  │                     SHARED INFRASTRUCTURE                             │    │
-│  │                                                                       │    │
-│  │  Postgres · Redis · Qdrant · MinIO · Docker sandbox                  │    │
-│  │  EVENT BUS (Redis pub/sub) ◀── all services emit here               │    │
-│  └───────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
+                    ┌─────────────┐      HTTP POST /internal/campaign
+  browser ────────► │   api       │ ───────────────────────────────┐
+   (SSE)            │  (FastAPI)  │                                 │
+        ▲           └─────┬───────┘                                 ▼
+        │                 │ db_save_campaign             ┌──────────────────┐
+        │                 ▼                              │  orchestrator    │
+        │           ┌───────────┐                        │  (FastAPI)       │
+        └───────────│  redis    │◄───── events ──────────│  run_campaign_   │
+        events/SSE  │ pub/sub   │                        │  loop            │
+                    └───────────┘                        └───────┬──────────┘
+                          ▲                                      │ Celery .delay()
+                          │ events                               ▼
+                    ┌───────────┐                        ┌──────────────────┐
+                    │ postgres  │◄──── state / trace ─────│  worker (Celery) │
+                    │           │                         │  run_sub_agent   │
+                    └───────────┘                         └──────────────────┘
+
+  infra: qdrant (vector search) · minio (paper/figure objects) · migrate (alembic)
 ```
 
-### Service Map
+- **`api`** — HTTP entrypoint. Creates/loads campaigns, persists the initial
+  row, and **delegates execution** to the orchestrator via
+  `POST /internal/campaign` (authenticated with `ORCHESTRATOR_INTERNAL_TOKEN`).
+  If `ORCHESTRATOR_URL` is unset, it falls back to running the loop as an
+  in-process `BackgroundTask` (single-node dev mode).
+- **`orchestrator`** — owns the campaign lifecycle. `run_campaign_loop` drives
+  intake → literature prior → baseline → experiment waves → synthesis →
+  finalize → paper. This is where a campaign lives; **restarting the API does
+  not kill an in-flight campaign** (the reason for the API↔orchestrator split).
+- **`worker`** — a Celery worker pool. Each `run_sub_agent_task` executes **one
+  hypothesis**: a think-act tool loop that produces raw evidence and a verdict.
+  Configured for worker-loss resilience (`task_acks_late`,
+  `task_reject_on_worker_lost`, broker `visibility_timeout`) so a crashed worker
+  requeues its hypothesis rather than losing it.
+- **`frontend`** — Vite/React campaign dashboard (event stream, hypothesis tree,
+  findings, health overview).
+- **Infrastructure** — Postgres (state + append-only event log), Redis (pub/sub
+  for SSE + peer-finding lists + Celery broker), Qdrant (literature chunk
+  vectors), MinIO (paper/figure objects), and a one-shot `migrate` service that
+  runs `alembic upgrade head` before app services start.
 
-| Service | Responsibility | Stack |
+---
+
+## 3. The campaign path (the spine)
+
+```
+POST /campaigns                     (services/api/app/routes/research.py)
+  → ResearchCampaign built in memory
+  → db_save_campaign                (propab.campaign_db → Postgres research_campaigns)
+  → _dispatch_campaign
+       → POST orchestrator /internal/campaign   (or in-process BackgroundTask fallback)
+
+run_campaign_loop                   (services/orchestrator/campaign_loop.py)
+  → emit CAMPAIGN_STARTED
+  → _enforce_domain_preflight       ← NEW gate: refuse launch if domain is underpowered
+  → build_prior / measure_baseline
+  → while not campaign.should_stop():
+       frontier empty? → generate_seed_hypotheses OR run_campaign_synthesis_pass (Tier-2)
+       _iter_campaign_pipelined_results:
+         _maybe_run_campaign_synthesis           (Tier-2 mid-wave refill + health logging)
+         run_sub_agent_task.delay(...)           → Celery worker
+            → run_sub_agent_async → verdict (domain fast path OR run_verdict_pipeline)
+         hypothesis_tree.update_node + belief_state bookkeeping
+       breakthrough? / hypothesis cap? / time budget?
+  → finalize_stop(<enum stop reason>)            ← always non-null
+  → log_campaign_end_health / log_campaign_audit ← NEW per-campaign metrics
+  → ingest_campaign (lifetime learning write)
+  → write_paper_minimal
+  → CAMPAIGN_COMPLETED / CAMPAIGN_BUDGET_EXHAUSTED → SSE /stream/{id}
+```
+
+Campaign persistence (`db_save_campaign` / `db_load_campaign` /
+`db_load_session_events_tail`) lives in **`propab.campaign_db`** (core), so the
+API, orchestrator, worker, and scripts all import it from one place instead of
+reaching across service boundaries.
+
+---
+
+## 4. Component contracts and health metrics
+
+Every major component has a one-line contract and exactly one health metric
+(full text in `propab_ownership_contracts.md`). Propab logs these to Postgres so
+they are queryable per campaign:
+
+| Component | Health metric | Table |
 |---|---|---|
-| API Gateway | HTTP + SSE endpoints, session management, event fan-out | FastAPI, uvicorn |
-| Orchestrator | Multi-round research loop, state machine, synthesis, budget control | Python asyncio |
-| Literature Service | Arxiv fetch, PDF parse, hybrid index, prior builder | Python, Qdrant, BM25 |
-| Hypothesis Service | Generate + rank + refine + deduplicate hypotheses across rounds | LLM API |
-| Experiment Runner | Think-act sub-agents, significance gate, tool dispatch, sandboxed code | Celery, Docker |
-| Tool Registry | Load tool clusters by domain + question context, plugin discovery | Python package |
-| Research Memory | Session memory, cross-session KB, agent working memory | Postgres, Qdrant |
-| Budget Manager | Time/compute/quality budgets, stopping criteria, progress tracking | Python |
-| Paper Writer | Multi-round trace compiler + section generator + LaTeX render | Jinja2, pdflatex |
-| Frontend | Submit jobs, live event stream, round progress, result explorer | React, TailwindCSS |
-| Event Bus | Real-time event pub/sub across all services | Redis pub/sub |
+| Literature Layer | citation verification rate | `campaign_literature_priors` |
+| Hypothesis Generator | duplicate rate per round | `campaign_synthesis_events` |
+| Campaign Synthesis | belief citation integrity, belief stability | `campaign_synthesis_events` |
+| Worker / Executor | experiment success rate | `research_campaigns` |
+| Verification Pipeline | artifact-gate precision | `campaign_audit_results` |
+| Campaign Manager | worker utilization, stop-reason accuracy | `research_campaigns` |
+| Evidence Binding | binding rejection rate | `campaign_synthesis_events` |
+
+See §11 for how and when each is computed and logged.
 
 ---
 
-## 4. Event System — The Transparency Backbone
+## 5. Orchestration
 
-The event system is the most important architectural component. Every service emits events. The frontend subscribes. The database persists. The paper writer reads. Nothing is inferred — everything is recorded.
+### `run_campaign_loop` — `services/orchestrator/campaign_loop.py`
+Drives a campaign end to end. Reachable only from the API routes (create /
+resume) and the orchestrator's `/internal/campaign` endpoint. Checkpoints to
+Postgres after every synthesis round; resumable after any restart.
 
-### 4.1 Event Schema
+### `ResearchCampaign` — `packages/propab-core/propab/campaign.py`
+In-memory campaign state: hypothesis tree, belief state, budget, metrics, and a
+non-null `stop_reason`. `belief_state` is persisted inside
+`breakthrough_criteria_json._campaign_meta` and restored on load.
+`finalize_stop(reason)` records the terminal stop reason (enum). Stop reasons
+include `BREAKTHROUGH`, `HYPOTHESIS_CAP_REACHED`, `TIME_BUDGET_EXHAUSTED`,
+`ALL_BRANCHES_EXHAUSTED`, `NO_DISPATCHABLE_NODES`, `FRONTIER_REFILL_FAILED`,
+`SALVAGED_AFTER_ERROR`, `FATAL_ERROR`, and **`DOMAIN_PREFLIGHT_FAILED`**.
 
-Every event is a JSON object with this exact shape:
+### `HypothesisTree` — `packages/propab-core/propab/hypothesis_tree.py`
+Directed tree of hypotheses with a frontier of dispatchable nodes. Grows from
+seeds (Tier-1) and synthesis candidates (Tier-2). `update_node` records verdicts
+and maintains the confirmed list.
 
-```python
-@dataclass
-class PropabEvent:
-    event_id: str          # uuid4
-    session_id: str        # research session this belongs to
-    timestamp: str         # ISO 8601
-    source: str            # which service emitted this
-    event_type: EventType  # enum — see below
-    step: str              # human-readable step name e.g. "literature.fetch"
-    payload: dict          # event-specific data — typed per event_type
-    parent_event_id: str | None  # links sub-agent events to orchestrator events
-    hypothesis_id: str | None    # null for orchestrator-level events
-    round_id: str | None         # which research round this belongs to
-```
+### `campaign_synthesis.py` — `packages/propab-core/propab/campaign_synthesis.py`
+Tier-2 frontier refill. `run_campaign_synthesis_pass` composes a synthesis
+prompt, updates beliefs (evidence-binding + falsifiability + rival-cap filtered
+at write time), and adds deduplicated candidates. It also **logs per-round
+health metrics** (`log_synthesis_health`) when a `session_factory` is provided.
 
-### 4.2 Event Type Registry
-
-```python
-class EventType(str, Enum):
-
-    # ── Session lifecycle ──────────────────────────────────────────────
-    SESSION_STARTED          = "session.started"
-    SESSION_COMPLETED        = "session.completed"
-    SESSION_FAILED           = "session.failed"
-    SESSION_RESUMED          = "session.resumed"       # long-running resume from checkpoint
-
-    # ── Intake ────────────────────────────────────────────────────────
-    INTAKE_PARSED            = "intake.parsed"
-    INTAKE_DECOMPOSED        = "intake.decomposed"
-
-    # ── Literature ────────────────────────────────────────────────────
-    LIT_FETCH_STARTED        = "literature.fetch_started"
-    LIT_PAPER_FOUND          = "literature.paper_found"
-    LIT_PAPER_CACHED         = "literature.paper_cached"
-    LIT_PAPER_PARSED         = "literature.paper_parsed"
-    LIT_PAPER_INDEXED        = "literature.paper_indexed"
-    LIT_RETRIEVAL_QUERY      = "literature.retrieval_query"
-    LIT_RETRIEVAL_RESULTS    = "literature.retrieval_results"
-    LIT_PRIOR_BUILT          = "literature.prior_built"
-    LIT_ANSWER_FOUND         = "literature.answer_found"
-
-    # ── Round lifecycle ────────────────────────────────────────────────
-    ROUND_STARTED            = "round.started"         # new research round begins
-    ROUND_COMPLETED          = "round.completed"       # round finished, ledger updated
-    ROUND_SKIPPED            = "round.skipped"         # budget/diminishing-returns skip
-
-    # ── Hypothesis ────────────────────────────────────────────────────
-    HYPO_GENERATED           = "hypothesis.generated"
-    HYPO_RANKED              = "hypothesis.ranked"
-    HYPO_DISPATCHED          = "hypothesis.dispatched"
-    HYPO_REFINED             = "hypothesis.refined"    # existing hypothesis narrowed/sharpened
-    HYPO_DEDUPLICATED        = "hypothesis.deduplicated" # duplicate pruned before dispatch
-    HYPO_PROMOTED            = "hypothesis.promoted"   # inconclusive hypo re-queued with refinement
-    HYPO_RETIRED             = "hypothesis.retired"    # dead end, never to be retried
-
-    # ── Sub-agent lifecycle ───────────────────────────────────────────
-    AGENT_STARTED            = "agent.started"
-    AGENT_PLAN_CREATED       = "agent.plan_created"
-    AGENT_STEP_STARTED       = "agent.step_started"
-    AGENT_STEP_COMPLETED     = "agent.step_completed"
-    AGENT_STEP_FAILED        = "agent.step_failed"
-    AGENT_DECIDED_NEXT_STEP  = "agent.decided_next_step"  # think-act decision event
-    AGENT_DECIDED_STOP       = "agent.decided_stop"       # agent chose to stop early
-    AGENT_COMPLETED          = "agent.completed"
-    AGENT_FAILED             = "agent.failed"
-
-    # ── Tool calls ────────────────────────────────────────────────────
-    TOOL_SELECTED            = "tool.selected"
-    TOOL_CALLED              = "tool.called"
-    TOOL_RESULT              = "tool.result"
-    TOOL_ERROR               = "tool.error"
-
-    # ── Significance gate ─────────────────────────────────────────────
-    SIG_GATE_PASSED          = "significance.gate_passed"   # p<0.05 / effect_size found
-    SIG_GATE_FAILED          = "significance.gate_failed"   # not enough statistical evidence
-    SIG_GATE_BYPASSED        = "significance.gate_bypassed" # refuted path, gate not required
-
-    # ── Code execution ────────────────────────────────────────────────
-    CODE_GENERATED           = "code.generated"
-    CODE_SUBMITTED           = "code.submitted"
-    CODE_RESULT              = "code.result"
-    CODE_ERROR               = "code.error"
-    CODE_TIMEOUT             = "code.timeout"
-
-    # ── LLM calls ─────────────────────────────────────────────────────
-    LLM_PROMPT               = "llm.prompt"
-    LLM_RESPONSE             = "llm.response"
-    LLM_PARSE_ERROR          = "llm.parse_error"
-
-    # ── Cross-agent memory ────────────────────────────────────────────
-    MEMORY_LEDGER_BROADCAST  = "memory.ledger_broadcast"  # partial results pushed to agents
-    MEMORY_PEER_FINDING      = "memory.peer_finding"      # agent received peer's result
-    MEMORY_KB_WRITTEN        = "memory.kb_written"        # cross-session KB updated
-
-    # ── Budget & progress ─────────────────────────────────────────────
-    BUDGET_CHECKPOINT        = "budget.checkpoint"        # budget state at each round
-    BUDGET_EXHAUSTED         = "budget.exhausted"         # hard stop: budget hit
-    PROGRESS_DIMINISHING     = "progress.diminishing"     # soft stop: returns declining
-    PROGRESS_MILESTONE       = "progress.milestone"       # noteworthy finding confirmed
-
-    # ── Synthesis ─────────────────────────────────────────────────────
-    SYNTH_RESULT_RECEIVED    = "synthesis.result_received"
-    SYNTH_LEDGER_UPDATED     = "synthesis.ledger_updated"
-    SYNTH_BREAKTHROUGH       = "synthesis.breakthrough"
-    SYNTH_DEAD_END           = "synthesis.dead_end"
-    SYNTH_ALL_INCONCLUSIVE   = "synthesis.all_inconclusive" # warning when all results weak
-
-    # ── Paper ─────────────────────────────────────────────────────────
-    PAPER_TRACE_COMPILED     = "paper.trace_compiled"
-    PAPER_SECTION_STARTED    = "paper.section_started"
-    PAPER_SECTION_COMPLETED  = "paper.section_completed"
-    PAPER_LATEX_COMPILED     = "paper.latex_compiled"
-    PAPER_READY              = "paper.ready"
-    PAPER_SKIPPED            = "paper.skipped"
-```
+### `CampaignBeliefState` — `packages/propab-core/propab/belief_state.py`
+Tracks ≤3 active rival beliefs plus closed beliefs. `apply_synthesis_beliefs`
+admits beliefs only after `evidence_binding.filter_node_citations` and
+`belief_falsifiable_in_dataset` — this is Evidence Binding at write time.
 
 ---
 
-## 5. Literature Layer
+## 6. Hypothesis generation
 
-### 5.1 Ingestion Strategy — Lazy Cache
-
-Papers are fetched on demand and cached with a configurable TTL. No bulk pre-ingestion. This makes local setup feasible on a laptop.
-
-```
-User query arrives
-        │
-        ▼
-┌───────────────────────────────────┐
-│  Cache check (Postgres)           │
-│  Has this topic been indexed?     │
-└──────────────┬────────────────────┘
-               │
-      ┌────────┴────────┐
-    HIT                MISS
-      │                  │
-      ▼                  ▼
-Check TTL           Fetch from arxiv API
-(default 30d)       + Semantic Scholar API
-      │                  │
-   Fresh?           Parse PDFs
-      │                  │
-    YES → use       Chunk + Embed
-      │                  │
-     NO → re-fetch  BM25 index
-                         │
-                    Store in cache
-                         │
-                    emit(LIT_PAPER_INDEXED)
-```
-
-### 5.2 PDF Processing Pipeline
-
-```python
-def process_paper(arxiv_id: str, session_id: str) -> ProcessedPaper:
-    emit(LIT_PAPER_FOUND, {"arxiv_id": arxiv_id, "source": "arxiv_api"})
-    pdf_bytes = fetch_pdf(arxiv_id)
-
-    emit(LIT_PAPER_PARSED, {"arxiv_id": arxiv_id, "section_count": N})
-    sections = parse_pdf_sections(pdf_bytes)
-
-    chunks = chunk_sections(sections, size=512, overlap=64)
-    embeddings = embed_batch(chunks)
-    qdrant.upsert(collection="papers", points=build_points(chunks, embeddings))
-
-    bm25_index.add(paper_id=arxiv_id, text=full_text(sections))
-    refs = extract_references(sections["references"])
-    postgres.insert_citations(source=arxiv_id, cited=refs)
-
-    emit(LIT_PAPER_INDEXED, {"arxiv_id": arxiv_id})
-    return ProcessedPaper(...)
-```
-
-### 5.3 Hybrid Retrieval Pipeline
-
-```
-Query: "does attention efficiency degrade non-linearly with sequence length?"
-         │
-         ▼
-┌────────────────────────────────────────────────────────────┐
-│  QUERY EXPANSION  (1 LLM call, emits LIT_RETRIEVAL_QUERY)  │
-│                                                            │
-│  Original + 3 rephrasings + key concept extraction         │
-└──────────────────────────┬─────────────────────────────────┘
-                           │
-         ┌─────────────────┼──────────────────┐
-  ┌──────▼──────┐   ┌──────▼──────┐   ┌───────▼───────┐
-  │  DENSE      │   │  SPARSE     │   │  CITATION     │
-  │  Qdrant     │   │  BM25       │   │  GRAPH        │
-  │  top-40     │   │  top-40     │   │  2-hop walk   │
-  └──────┬──────┘   └──────┬──────┘   └───────┬───────┘
-         │                 │                  │
-  ┌──────▼─────────────────▼──────────────────▼────────┐
-  │  RECIPROCAL RANK FUSION                            │
-  └──────────────────────────┬─────────────────────────┘
-                             │
-  ┌──────────────────────────▼─────────────────────────┐
-  │  RERANKER  (cross-encoder, runs locally)            │
-  │  Model: cross-encoder/ms-marco-MiniLM-L-6-v2        │
-  └──────────────────────────┬─────────────────────────┘
-                             │
-                        Top-K chunks (default K=20)
-                        → Prior Builder
-```
-
-### 5.4 Prior Builder
-
-```python
-class Prior(TypedDict):
-    established_facts: list[Claim]
-    contested_claims:  list[Dispute]
-    open_gaps:         list[Gap]
-    dead_ends:         list[DeadEnd]
-    key_papers:        list[PaperRef]
-
-class Claim(TypedDict):
-    text:       str
-    confidence: float
-    paper_ids:  list[str]
-
-class Gap(TypedDict):
-    text:        str
-    source_paper: str
-    gap_type:    str  # "unanswered_question" | "missing_data" | "untested_assumption"
-```
-
-**Short-circuit:** If cosine similarity > 0.92 between question embedding and an established claim embedding, emit `LIT_ANSWER_FOUND` and return without generating hypotheses.
+`generate_seed_hypotheses` (`campaign_loop.py`) produces bootstrap/refill seeds
+— from the mechanism inducer when `seed_source == "anomaly"`, otherwise
+`generate_ranked_hypotheses` (`services/orchestrator/hypotheses.py`), which does
+LLM-ranked generation with scope enrichment and a question-relevance gate. Every
+seed passes scope validation and duplicate rejection before it enters the tree.
 
 ---
 
-## 6. Hypothesis Layer
+## 7. Verification
 
-### 6.1 Generation (per round)
+The worker produces raw evidence; verification decides what it means. Core never
+hardcodes a domain — it asks the resolved `DomainPlugin`.
 
-Hypotheses are generated fresh each round, but each round receives the accumulated context from prior rounds: what was tried, what was learned, what dead ends were found.
+### `run_verdict_pipeline` — `packages/propab-core/propab/verdict_pipeline.py`
+A pure composed pipeline:
+`classify_verdict_stage → artifact_gate_stage → ood_gate_stage → scope_integrity_stage`.
+Materials/mandrake have dedicated fast-path classifiers, but domain dispatch to
+them goes through the plugin registry, and the generic path reads its
+confirmation threshold from `DomainPlugin.confirmation_criteria()`.
 
-```python
-HYPOTHESIS_PROMPT = """
-You are a research hypothesis generator working on round {round_number} of a multi-round study.
+### Artifact gate — `artifact_verification.py` (`run_artifact_gate`)
+Generates ranked artifact-explanation models and runs adversarial tests
+(label-shuffle LOFO, permutation nulls) to decide whether a "confirmed" verdict
+survives. Domain artifact vocabulary lives on the plugins
+(`artifact_question_markers`), not in core.
 
-Research question: {question}
+### OOD / scope-integrity gates — `scoped_claim.py`
+Downgrade confirmed → inconclusive when out-of-distribution evidence is missing,
+or when the executed LOFO does not match the declared OOD scope. Scope templates
+live in the plugins (`scope_template()`), resolved via the registry.
 
-Prior — established facts:
-{established_facts}
-
-Prior — open gaps:
-{open_gaps}
-
-Prior — dead ends (do not repeat these):
-{dead_ends}
-
-Results from previous rounds (confirmed/refuted/inconclusive with reasons):
-{prior_round_findings}
-
-Generate exactly {N} hypotheses. Requirements:
-- Specific and falsifiable
-- Not duplicate any established fact or prior-round confirmed finding
-- Not repeat any dead end or prior-round refuted hypothesis
-- State its expected test methodology in one sentence, naming specific tools
-- Reference at least one open gap from the prior or an unresolved prior-round finding
-- For round > 1: hypotheses should be more targeted than round 1, informed by what was learned
-
-Return JSON array only. Schema:
-[{
-  "id": "h1",
-  "text": "...",
-  "test_methodology": "...",
-  "gap_reference": "gap text from prior or prior round",
-  "expected_result": "...",
-  "refinement_of": "prior hypothesis id if this refines a prior-round inconclusive, else null"
-}]
-"""
-```
-
-**Validation gate:** Reject any hypothesis whose text matches `"^Hypothesis \\d+:"` (generic fallback template). Retry generation up to 2 times with stricter prompt before accepting.
-
-### 6.2 Ranking
-
-| Dimension | Method | Weight |
-|---|---|---|
-| Novelty | Embedding distance from established_facts centroid + prior confirmed findings | 30% |
-| Testability | LLM score: can this be tested with available tools? Does it name specific tools? | 30% |
-| Potential impact | LLM score: significance if confirmed relative to gap importance | 25% |
-| Scope fit | LLM score: appropriately scoped for one session? | 15% |
-
-### 6.3 Hypothesis Lifecycle at Scale
-
-In long-running mode the system may generate and manage hundreds or thousands of hypotheses across rounds. The lifecycle tracks each one:
-
-```
-GENERATED → RANKED → DISPATCHED → [RUNNING] → COMPLETED
-                                                  │
-                              ┌───────────────────┴──────────────┐
-                           CONFIRMED                        INCONCLUSIVE/REFUTED
-                              │                                   │
-                         RETIRED                    ┌─────────────┴──────────┐
-                         (write paper)         PROMOTED               RETIRED
-                                               (refine +              (dead end)
-                                                re-queue)
-```
-
-```python
-class HypothesisStatus(str, Enum):
-    PENDING       = "pending"
-    RUNNING       = "running"
-    COMPLETED     = "completed"
-    FAILED        = "failed"
-    PROMOTED      = "promoted"   # inconclusive → refined version queued for next round
-    RETIRED       = "retired"    # dead end, not to be retried
-
-class HypothesisVerdict(str, Enum):
-    CONFIRMED     = "confirmed"
-    REFUTED       = "refuted"
-    INCONCLUSIVE  = "inconclusive"
-```
-
-**Promotion logic:** An inconclusive hypothesis is promoted (not just discarded) if its confidence was > 0.25 and its evidence showed partial signal. The promoted version carries a `refinement_of` pointer and a `learned_from` summary so the next-round agent starts with context.
-
-**Retirement logic:** A hypothesis is retired (never retried) if: (a) it was refuted, (b) it was inconclusive for 2+ rounds with no evidence improvement, or (c) it duplicates a confirmed finding.
-
-### 6.4 Deduplication
-
-Before dispatching a new round of hypotheses, run embedding-based deduplication against all prior-round hypotheses (confirmed, refuted, and inconclusive). Cosine similarity > 0.88 → flag as duplicate → emit `HYPO_DEDUPLICATED` → replace with next-ranked hypothesis.
+### Evidence Binding — `packages/propab-core/propab/evidence_binding.py`
+Ensures every citation (a node listed as supporting/contradicting a belief, any
+evidence attributed to a mechanism) actually bears on the specific claim. It runs
+**at write time**: `apply_synthesis_to_frontier` passes `tree_nodes` + metrics to
+`belief_state.apply_synthesis_beliefs`, which filters citations *before* the
+belief is persisted. A fabricated citation is rejected before it can be written
+(covered by `test_synthesis_pass_rejects_fabricated_citation_before_persist`).
 
 ---
 
-## 7. Experiment Layer — Think-Act Sub-Agent Architecture
+## 8. Domain layer
 
-### 7.1 Orchestrator ↔ Sub-Agent Contract
+The domain plugin is the single seam between domain-agnostic core and
+domain-specific science. Core imports **no** dataset name, feature name, or
+threshold directly.
 
-**What the orchestrator sends to each sub-agent:**
+### `DomainPlugin` — `packages/propab-core/propab/domain_modules/base.py`
+Contract (each has a safe default so a plugin overrides only what it needs):
+`matches` / `matches_scope`, `available_features`, `run_verification`,
+`classify_verdict`, `artifact_models`, `confirmation_criteria`, **`preflight`**,
+`literature_prior`, `scope_template`, `artifact_question_markers`,
+`domain_profile`.
 
-```python
-class ExperimentTask(TypedDict):
-    session_id:      str
-    round_id:        str
-    hypothesis_id:   str
-    hypothesis:      RankedHypothesis
-    prior:           Prior               # read-only reference
-    available_tools: list[str]           # tool names for declared domain
-    resource_limits: ResourceLimits      # sandbox caps
-    peer_findings:   list[PeerFinding]   # partial results from other agents this round
-    learned_from:    str | None          # prior-round learning if this is a promoted hypothesis
-    budget:          AgentBudget         # time/steps budget for this agent
-```
+### Registry — `packages/propab-core/propab/domain_modules/registry.py`
+`resolve_domain_plugin` resolves the owning plugin: explicit
+`domain`/`domain_profile` on the payload → `[domain_profile:<id>]` tag in the
+question → each plugin's own `matches`. Core calls only the registry.
 
-**What the sub-agent returns:**
+Built-in plugins: `MaterialsPlugin`, `MandrakePlugin`, `EnzymeKineticsPlugin`,
+`GraphInvariantsPlugin`, `NetworkDiffusionPlugin`. Domain **profiles**
+(`domain_profiles/`) configure the artifact gate; domain **adapters**
+(`domain_adapters/`) run the experiment; the plugin fronts both.
 
-```python
-class ExperimentResult(TypedDict):
-    hypothesis_id:   str
-    round_id:        str
-    verdict:         Literal["confirmed", "refuted", "inconclusive"]
-    confidence:      float           # 0–1
-    evidence_summary: str            # 2–3 sentences
-    key_finding:     str | None      # one-line breakthrough if confirmed
-    significance:    SignificanceResult | None   # p_value / effect_size / CI
-    tool_trace_id:   str
-    figures:         list[str]
-    duration_sec:    float
-    failure_reason:  str | None
-    recommend_retry: bool            # agent's own recommendation: worth re-running?
-    learned:         str | None      # what this agent learned that would help future agents
-```
+### Preflight gate (fail-fast power check)
+Before a **fresh** campaign starts, `_enforce_domain_preflight` resolves the
+owning plugin and calls `plugin.preflight()`. If it returns `passed=False`, the
+campaign is finalized immediately with `DOMAIN_PREFLIGHT_FAILED` and never burns
+compute. The materials plugin, for example, loads its frame and checks row
+count; a domain with too few samples/groups fails here in seconds instead of
+after hours of inconclusive experiments. The gate is fail-open on a plugin
+*exception* (a buggy preflight must not block launch) and fail-closed on an
+explicit `passed=False`. Resumed campaigns skip the gate (already passed).
 
-### 7.2 Think-Act Loop (Core Architecture Change)
+---
 
-The sub-agent does **not** execute a pre-built plan. It decides the next action after observing each result. This is the key difference between a recipe-executor and an actual reasoner.
+## 9. Worker
 
-```python
-async def think_act_loop(task: ExperimentTask) -> ExperimentResult:
-    """
-    Agent observes results after each step and decides what to do next.
-    No pre-built plan. The LLM chooses each action based on accumulated context.
-    """
-    emit(AGENT_STARTED, {"hypothesis_id": task.hypothesis_id})
+`run_sub_agent_async` (`services/worker/sub_agent_loop.py`) runs the think-act
+loop for one hypothesis: it resolves the domain via the plugin registry and a
+`{domain_id → worker path}` table, selects the tool cluster
+(`get_cluster_with_significance(domain)`), runs the experiment (domain fast path
+or generic tool loop), builds evidence, and returns a verdict within the compute
+budget. A timed-out worker returns `inconclusive` with reason `timeout` rather
+than hanging. Dispatched via Celery `run_sub_agent_task.delay(...)`.
 
-    context = AgentContext(
-        hypothesis=task.hypothesis,
-        prior=task.prior,
-        peer_findings=task.peer_findings,
-        learned_from=task.learned_from,
-        results_so_far=[],
-        steps_taken=0,
-    )
+---
 
-    # Initial plan: first 1–2 tool calls chosen upfront (domain-routed, question-aware)
-    # This gives the agent a starting direction without over-committing
-    initial_steps = await plan_initial_steps(task, context)
+## 10. Lifetime learning
 
-    while not _should_stop(context, task.budget):
-        # THINK: what should I do next, given everything I know so far?
-        next_action = await decide_next_action(task, context, llm)
-        emit(AGENT_DECIDED_NEXT_STEP, {"action": next_action, "reasoning": next_action.reasoning})
+At campaign end, `ingest_campaign`
+(`services/orchestrator/lifetime_knowledge.py`) writes claims, mechanisms,
+failures, and theories to the `KnowledgeGraph`, an observation to the
+`MetaScienceLedger`, fitness records to the `PolicyFitnessLedger`, and a
+candidate policy proposal. These stores are JSON files under
+`{PROPAB_DATA_DIR}/lifetime_knowledge/` with last-writer-wins semantics; because
+`ingest_campaign` runs once per campaign (single writer per campaign), there is
+no concurrent-write path today. `lifetime_context_for_seeds` injects prior
+lifetime knowledge into seed prompts.
 
-        if next_action.action_type == "stop":
-            emit(AGENT_DECIDED_STOP, {"reason": next_action.reasoning})
-            break
+---
 
-        # ACT: execute the chosen action
-        if next_action.action_type == "tool":
-            result = await execute_tool(next_action.tool_name, next_action.params, task)
-        elif next_action.action_type == "code":
-            result = await execute_sandbox(next_action.code, task)
+## 11. Health metrics and observability
 
-        context.results_so_far.append(result)
-        context.steps_taken += 1
+`packages/propab-core/propab/health_metrics.py` computes the eight
+ownership-contract metrics from data the pipeline already produces and persists
+them. It never raises into the caller — metric logging must not break a campaign.
 
-        # After each result: check if significance gate can be passed
-        sig = check_significance(context.results_so_far)
-        if sig.gate_passed:
-            emit(SIG_GATE_PASSED, {"p_value": sig.p_value, "effect_size": sig.effect_size})
-            # Significance found — still continue to corroborate, but verdict is now determinable
-        elif sig.gate_definitively_failed:
-            # Strong evidence of no effect — can emit refuted, continue to verify
-            pass
+- **Per synthesis round** (`log_synthesis_health` → `campaign_synthesis_events`):
+  hypothesis duplicate rate, evidence-binding rejection rate, belief citation
+  integrity, and belief stability (computed against the previous round's
+  persisted belief statements — correct across restarts). Emits warnings when a
+  rate leaves its target range, and warns if Evidence Binding is called 50+
+  times with zero rejections (a sign the check is not running).
+- **Per literature prior build** (`log_literature_prior_health` →
+  `campaign_literature_priors`): citation verification rate (fraction of
+  established facts carrying a retrievable citation).
+- **Per campaign end** (`log_campaign_end_health` → `research_campaigns`):
+  worker experiment success rate (definitive verdicts / tested hypotheses) and
+  worker utilization (summed sub-agent seconds / (elapsed × max concurrency)).
+- **Per campaign audit** (`log_campaign_audit` → `campaign_audit_results`):
+  artifact-gate precision — confirmed findings backed by an independent
+  null/permutation test. The in-pipeline signal is logged automatically; the
+  offline permutation-audit scripts can overwrite it with a full re-run.
 
-    # Evaluate final verdict based on accumulated results
-    verdict = evaluate_accumulated_evidence(context.results_so_far, task.hypothesis)
-    emit(AGENT_COMPLETED, {"verdict": verdict.verdict, "confidence": verdict.confidence})
+Every campaign stop event carries a non-null enum `stop_reason` in
+`research_campaigns` (the stop-reason-accuracy companion metric).
 
-    return build_experiment_result(task, verdict, context)
+---
 
+## 12. Events, streaming, and persistence
 
-async def decide_next_action(task: ExperimentTask, context: AgentContext, llm: LLMClient) -> AgentAction:
-    """
-    Core think step. LLM observes context and chooses next action.
-    Prompt includes: hypothesis, results so far, available tools, peer findings, budget remaining.
-    """
-    prompt = build_think_prompt(
-        hypothesis=task.hypothesis,
-        results_so_far=context.results_so_far,
-        available_tools=task.available_tools,
-        peer_findings=task.peer_findings,
-        steps_taken=context.steps_taken,
-        max_steps=task.budget.max_steps,
-        significance_status=check_significance(context.results_so_far),
-        learned_from=task.learned_from,
-    )
-    response = await llm.call(prompt, purpose="agent.decide_next_step", ...)
-    return parse_agent_action(response)
+- **Events.** `EventEmitter.emit` (`services/orchestrator/events.py`) publishes
+  each named event to Redis channel `propab:{session_id}` and appends it to the
+  Postgres `events` table. The SSE endpoint `GET /stream/{session_id}`
+  (`services/api/app/routes/stream.py`) replays and tails it. Peer findings use
+  Redis lists `propab:peer:{hypothesis_id}`.
+- **Persistence.** `propab/db.py` provides the async engine/session/redis
+  factories and `insert_event`. Campaign state round-trips through
+  `propab.campaign_db`.
+- **Schema (Alembic).** `research_sessions`, `research_campaigns` (+ belief-state
+  meta, `stop_reason`, `worker_experiment_success_rate`, `worker_utilization`),
+  `hypotheses`, `experiment_steps`, `tool_calls`, `llm_calls`, `events`,
+  `literature_query_cache`, and the health-metric tables
+  `campaign_synthesis_events`, `campaign_literature_priors`,
+  `campaign_audit_results`. Alembic is the single source of truth; the
+  `migrate` service applies `alembic upgrade head` before app services start.
 
+---
 
-def _should_stop(context: AgentContext, budget: AgentBudget) -> bool:
-    if context.steps_taken >= budget.max_steps:
-        return True
-    if time.monotonic() >= budget.deadline:
-        return True
-    sig = check_significance(context.results_so_far)
-    if sig.gate_passed and context.steps_taken >= budget.min_steps_after_significance:
-        return False  # significance found but still want corroboration
-    return False
-```
+## 13. Failure handling and resumability
 
-**Think prompt contract:**
+- **API restart** does not kill a running campaign — the loop lives in the
+  orchestrator.
+- **Worker crash** requeues the in-flight hypothesis (`task_acks_late` +
+  `task_reject_on_worker_lost`); it goes back to pending rather than
+  disappearing.
+- **Campaign resume** reloads full state (tree + belief state) from Postgres and
+  continues; the preflight gate is skipped for a warm resume.
+- **Fatal error** in the loop finalizes with `FATAL_ERROR` (or
+  `SALVAGED_AFTER_ERROR` when a partial paper is salvaged) — never a null stop
+  reason.
+
+---
+
+## 14. Repository structure
 
 ```
-THINK_PROMPT = """
-You are a research sub-agent testing this hypothesis:
-"{hypothesis_text}"
+packages/propab-core/propab/   # domain-agnostic core (importable everywhere)
+  campaign.py                  # ResearchCampaign, stop reasons
+  campaign_db.py               # campaign persistence (shared by all services)
+  campaign_synthesis.py        # Tier-2 synthesis + per-round metric logging
+  belief_state.py              # rival beliefs, evidence binding at write time
+  hypothesis_tree.py           # hypothesis tree + frontier
+  verdict_pipeline.py          # composed verification pipeline
+  artifact_verification.py     # artifact gate (null/permutation tests)
+  scoped_claim.py              # OOD / scope-integrity gates + templates
+  evidence_binding.py          # citation relevance at write time
+  health_metrics.py            # eight ownership-contract metrics
+  domain_modules/              # DomainPlugin interface + registry + plugins
+  domain_profiles/             # artifact-gate profiles
+  domain_adapters/             # per-domain experiment runners
+  tools/                       # discovery-based STEM tool registry
 
-Test methodology: {test_methodology}
-Learned from prior work: {learned_from or "none"}
+services/
+  api/                         # FastAPI HTTP entrypoint + routes + SSE
+  orchestrator/                # run_campaign_loop, literature, events, paper
+  worker/                      # Celery app + run_sub_agent_async + tool loop
 
-Results so far ({steps_taken} of max {max_steps} steps):
-{results_summary}
-
-Current significance status:
-  p_value: {p_value or "not yet measured"}
-  effect_size: {effect_size or "not yet measured"}
-  Has significance gate passed: {gate_passed}
-
-Peer agents in this round found:
-{peer_findings_summary or "none yet"}
-
-Available tools: {available_tools_with_descriptions}
-
-What should you do next? Choose ONE action:
-1. Call a specific tool (name the tool and its parameters)
-2. Write custom code (describe what the code should compute)
-3. Stop (if you have sufficient evidence or additional steps won't help)
-
-If stopping, explain why.
-If continuing, explain what you expect to learn from the next action.
-
-Return JSON only:
-{
-  "action_type": "tool" | "code" | "stop",
-  "tool_name": "...",   // if action_type == "tool"
-  "params": {...},      // if action_type == "tool"
-  "code_description": "...",  // if action_type == "code"
-  "reasoning": "one sentence explaining why this action next",
-  "expected_outcome": "what result would confirm/refute/clarify"
-}
-"""
-```
-
-### 7.3 Significance Gate (Enforced in Code)
-
-This is non-negotiable. Before any `confirmed` or `refuted` verdict is possible, the significance gate must be evaluated.
-
-```python
-@dataclass
-class SignificanceResult:
-    gate_passed: bool
-    gate_definitively_failed: bool
-    p_value: float | None
-    effect_size: float | None
-    confidence_interval: list[float] | None
-    n_observations: int
-    method: str | None   # "p_value" | "effect_size" | "confidence_interval"
-
-
-def check_significance(results: list[StepResult]) -> SignificanceResult:
-    """
-    Scan accumulated results for any statistical evidence.
-    Gate passes if ANY of: p < 0.05, |effect_size| > 0.2, non-overlapping 95% CI.
-    Gate definitively fails if statistical tests ran and produced null/contrary results.
-    Gate is pending if no statistical test has run yet.
-    """
-    p_value = _find_p_value(results)
-    effect_size = _find_effect_size(results)
-    ci = _find_confidence_interval(results)
-
-    gate_passed = (
-        (p_value is not None and p_value < 0.05)
-        or (effect_size is not None and abs(effect_size) > 0.2)
-        or (ci is not None and not _intervals_overlap(ci, [0.0, 0.0]))
-    )
-
-    gate_definitively_failed = (
-        (p_value is not None and p_value >= 0.3)
-        and (effect_size is None or abs(effect_size) < 0.05)
-    )
-
-    return SignificanceResult(
-        gate_passed=gate_passed,
-        gate_definitively_failed=gate_definitively_failed,
-        p_value=p_value,
-        effect_size=effect_size,
-        confidence_interval=ci,
-        n_observations=_count_observations(results),
-        method=_identify_method(p_value, effect_size, ci),
-    )
-
-
-def compute_verdict(hypothesis: Hypothesis, sig: SignificanceResult, results: list) -> HypothesisVerdict:
-    """
-    Verdict logic. Significance gate is the entry condition for confirmed/refuted.
-    Without significance evidence, verdict is always inconclusive.
-    """
-    if not sig.gate_passed and not sig.gate_definitively_failed:
-        emit(SIG_GATE_FAILED, {"reason": "no significance evidence produced"})
-        return HypothesisVerdict(verdict="inconclusive", confidence=_compute_confidence(results, sig))
-
-    if sig.gate_definitively_failed:
-        emit(SIG_GATE_BYPASSED, {"reason": "significance test found no effect"})
-        return HypothesisVerdict(verdict="refuted", confidence=0.7)
-
-    # Gate passed — check direction
-    supports = _direction_supports_hypothesis(hypothesis, results)
-    verdict = "confirmed" if supports else "refuted"
-    emit(SIG_GATE_PASSED, {"verdict": verdict, "p_value": sig.p_value, "effect_size": sig.effect_size})
-    return HypothesisVerdict(verdict=verdict, confidence=_compute_confidence(results, sig))
-```
-
-**Mandatory significance-capable tool per hypothesis:** The think-act loop's planning prompt explicitly instructs the agent to include at least one of: `statistical_significance`, `bootstrap_confidence`, `literature_baseline_compare`, or a custom statistical code block before attempting to stop. If the agent tries to stop without having run any significance-capable tool, it receives a correction prompt:
-
-```
-"You have not yet run any statistical significance test for this hypothesis.
-Before stopping, you must either:
-1. Call statistical_significance, bootstrap_confidence, or literature_baseline_compare
-2. Write custom code that computes a p-value or effect size
-Without this, the verdict will be inconclusive regardless of other evidence.
-Choose your significance test now."
-```
-
-### 7.4 Domain Routing — Question-Aware
-
-The domain router now receives both the hypothesis text **and the original research question** to prevent drift where optimizer-ranking questions end up routed to generic deep-learning tools.
-
-```python
-DOMAIN_ROUTING_PROMPT = """
-Given this hypothesis and the original research question, return the single most relevant domain.
-
-Original research question: {question}
-Hypothesis: {hypothesis_text}
-
-Domains:
-- computational_biology: DNA/RNA/protein, genomics, CRISPR, cell biology
-- chemistry: molecular simulation, reaction prediction, spectroscopy
-- physics: mechanics, electromagnetism, quantum, thermodynamics
-- mathematics: algebra, calculus, linear algebra, number theory, topology
-- statistics: hypothesis testing, regression, Bayesian analysis, experimental design
-- ml_research: statistical tests on ML results, significance testing, learning curves
-- deep_learning: training models, architecture search, activation functions, optimizers
-- algorithm_optimization: algorithm comparison, convergence, loss landscapes, benchmarking
-- data_analysis: EDA, visualization, aggregation, cleaning
-- general_computation: anything else
-
-Important: if the research question involves COMPARING or RANKING approaches,
-prefer statistics, ml_research, or algorithm_optimization over deep_learning,
-even if the hypothesis mentions neural networks.
-
-Return JSON only: {"domain": "domain_name", "reason": "one sentence"}
-"""
-```
-
-### 7.5 Cross-Agent Memory During Parallel Execution
-
-While agents run in parallel, the orchestrator broadcasts partial ledger updates to running agents. Agents receive peer findings as they arrive and can adjust their strategy.
-
-```python
-# Orchestrator: broadcast when any agent completes
-async def _broadcast_peer_finding(result: ExperimentResult, running_agent_ids: list[str]):
-    finding = PeerFinding(
-        hypothesis_id=result.hypothesis_id,
-        verdict=result.verdict,
-        confidence=result.confidence,
-        key_finding=result.key_finding,
-        learned=result.learned,
-    )
-    for agent_id in running_agent_ids:
-        await redis.publish(
-            f"propab:agent_peer:{agent_id}",
-            json.dumps(finding),
-        )
-    emit(MEMORY_LEDGER_BROADCAST, {"finding": finding, "broadcast_to": running_agent_ids})
-
-# Sub-agent: consume peer broadcasts non-blocking
-async def _poll_peer_findings(agent_id: str, redis) -> list[PeerFinding]:
-    findings = []
-    while True:
-        msg = await redis.lpop(f"propab:agent_peer:{agent_id}")
-        if msg is None:
-            break
-        findings.append(PeerFinding(**json.loads(msg)))
-    return findings
-```
-
-The agent includes peer findings in its think prompt, so it can avoid duplicating work a peer already did and focus its remaining budget on unexplored angles.
-
-### 7.6 Parallelism Model
-
-```python
-async def run_experiments_round(
-    hypotheses: list[RankedHypothesis],
-    round_id: str,
-    budget: RoundBudget,
-    ...
-) -> RoundResult:
-
-    tasks = [
-        celery_app.send_task("run_sub_agent", args=[ExperimentTask(...)])
-        for h in hypotheses
-    ]
-
-    ledger = RoundLedger(round_id=round_id)
-    running_agent_ids = [t.id for t in tasks]
-    deadline = time.monotonic() + budget.max_seconds_per_round
-
-    for future in asyncio.as_completed(tasks):
-        result = await future
-        ledger.add(result)
-        emit(SYNTH_RESULT_RECEIVED, {"result": result, "round_id": round_id})
-        emit(SYNTH_LEDGER_UPDATED, {"ledger": ledger.summary(), "round_id": round_id})
-
-        # Broadcast to remaining running agents
-        still_running = [id for id in running_agent_ids if id not in ledger.completed_ids]
-        await _broadcast_peer_finding(result, still_running)
-
-        if time.monotonic() > deadline:
-            emit(BUDGET_EXHAUSTED, {"reason": "round deadline"})
-            break
-
-    return ledger
+alembic/                       # migrations (single schema source of truth)
+frontend/                      # Vite/React campaign dashboard
+docs/                          # component_map.md and design notes
+scripts/                       # preflight, audit, power-analysis, ops scripts
+tests/                         # 467-test suite
 ```
 
 ---
 
-## 8. Tool System
+## 15. Testing
 
-### 8.1 Tool Interface Contract
+The project suite is `pytest tests` (**467 passing**). Run it from the repo root
+after `pip install -e ".[dev]"`. The vendored `asta-bench/` directory has its own
+dependencies and is **not** part of the project suite — scope pytest to `tests/`.
 
-A tool is a plain Python function with a `TOOL_SPEC` dict.
-
-```python
-TOOL_SPEC = {
-    "name":        "sequence_align",
-    "domain":      "computational_biology",
-    "description": "...",
-    "params": {
-        "sequences":  {"type": "list[str]", "required": True, "description": "..."},
-        "algorithm":  {"type": "str", "required": False, "default": "smith_waterman"},
-    },
-    "output": {
-        "alignment":        "list[str]",
-        "identity_pct":     "float",
-        "score":            "float",
-    },
-    "significance_capable": False,  # NEW: marks tools that produce p_value/effect_size
-    "example": {...}
-}
-```
-
-**`significance_capable` flag:** Tools that can produce p-values, effect sizes, or confidence intervals (e.g. `statistical_significance`, `bootstrap_confidence`, `literature_baseline_compare`) are flagged. The think-act loop enforcer checks whether at least one significance-capable tool was called before accepting a stop decision.
-
-### 8.2 Tool Registry
-
-```python
-class ToolRegistry:
-    def get_cluster(self, domain: str) -> list[ToolSpec]:
-        """Returns specs only. Sub-agent uses specs for LLM context."""
-        return [e.spec for e in self._registry.values() if e.domain == domain]
-
-    def get_significance_tools(self) -> list[ToolSpec]:
-        """Returns all significance-capable tools regardless of domain."""
-        return [e.spec for e in self._registry.values() if e.spec.get("significance_capable")]
-
-    def get_cluster_with_significance(self, domain: str) -> list[ToolSpec]:
-        """Domain cluster + always includes significance tools."""
-        cluster = {s["name"]: s for s in self.get_cluster(domain)}
-        for sig_tool in self.get_significance_tools():
-            cluster.setdefault(sig_tool["name"], sig_tool)
-        return list(cluster.values())
-```
-
-### 8.3 Sandboxed Code Execution
-
-```
-Sub-agent → generate code → emit(CODE_GENERATED)
-                                   │
-                                   ▼
-                         ┌─────────────────────┐
-                         │  SANDBOX CONTAINER  │
-                         │  network: none      │
-                         │  memory: 512MB      │
-                         │  cpu timeout: 30s   │
-                         │  fs: read-only      │
-                         │     except /tmp     │
-                         └──────────┬──────────┘
-                                    │
-                       ┌────────────┴────────────┐
-                     SUCCESS                   FAILURE
-                       │                          │
-              emit(CODE_RESULT)          emit(CODE_ERROR, {retry: N})
-```
-
-Code must write results as JSON to stdout. Retry up to 3 times with error + previous code in context.
-
-### 8.4 Per-Domain Sandbox Timeout Profiles
-
-| Domain | Default timeout | Rationale |
-|---|---|---|
-| `general_computation` | 30s | Simple ops |
-| `mathematics` | 60s | Symbolic computation |
-| `statistics` | 60s | Bootstrap resampling |
-| `data_analysis` | 60s | Large dataset processing |
-| `ml_research` | 120s | Statistical tests, grid experiments |
-| `algorithm_optimization` | 180s | Benchmarking across input sizes |
-| `deep_learning` | 300s | Training loops |
+Notable coverage: verdict pipeline composition, artifact verification, scoped
+claims, evidence binding (write-time rejection), campaign redesign/recount,
+synthesis builder, domain plugins, and the health-metric + preflight-enforcement
+tests (`tests/test_campaign_health_and_preflight.py`).
 
 ---
 
-## 9. Orchestrator — Multi-Round Research Loop
-
-No LangGraph. Every state transition is explicit Python. Every decision is a logged event.
-
-```python
-async def research_loop(session_id: str, question: str) -> ResearchResult:
-
-    ctx = ResearchContext(session_id=session_id, question=question)
-    emit = partial(emit_event, session_id=session_id)
-
-    emit(SESSION_STARTED, {"question": question})
-
-    # ── Stage 1: Intake ──────────────────────────────────────────
-    ctx.parsed_question = await intake(question, emit)
-
-    # ── Stage 2: Literature ──────────────────────────────────────
-    ctx.prior = await build_prior(ctx.parsed_question, emit)
-
-    # ── Stage 3: Short-circuit check ────────────────────────────
-    if answer := find_existing_answer(ctx.prior, ctx.parsed_question):
-        emit(LIT_ANSWER_FOUND, {"answer": answer})
-        return ResearchResult(type="existing_answer", answer=answer)
-
-    # ── Stage 4: Multi-Round Research Loop ───────────────────────
-    budget = ResearchBudget.from_config(settings)
-    round_number = 0
-    accumulated_ledger = AccumulatedLedger()
-
-    while not budget.exhausted() and not _sufficient_evidence(accumulated_ledger, budget):
-
-        round_id = str(uuid4())
-        emit(ROUND_STARTED, {
-            "round": round_number,
-            "round_id": round_id,
-            "budget_remaining": budget.summary(),
-        })
-
-        # Generate hypotheses for this round (informed by prior rounds)
-        hypotheses = await generate_ranked_hypotheses(
-            ctx.prior,
-            ctx.parsed_question,
-            prior_round_findings=accumulated_ledger.summary(),
-            round_number=round_number,
-            emit=emit,
-        )
-        # Deduplicate against prior rounds
-        hypotheses = deduplicate_hypotheses(hypotheses, accumulated_ledger.all_hypothesis_embeddings)
-
-        # Dispatch and run experiments
-        round_result = await run_experiments_round(
-            hypotheses=hypotheses,
-            round_id=round_id,
-            budget=budget.round_budget(round_number),
-            prior=ctx.prior,
-            emit=emit,
-        )
-
-        accumulated_ledger.merge(round_result)
-        budget.record_round(round_result)
-
-        emit(ROUND_COMPLETED, {
-            "round": round_number,
-            "round_id": round_id,
-            "confirmed": len(round_result.confirmed),
-            "refuted": len(round_result.refuted),
-            "inconclusive": len(round_result.inconclusive),
-            "budget_remaining": budget.summary(),
-        })
-
-        # Detect diminishing returns
-        if budget.rounds_completed >= 2:
-            returns = accumulated_ledger.marginal_return(round_number)
-            if returns < budget.min_marginal_return:
-                emit(PROGRESS_DIMINISHING, {
-                    "round": round_number,
-                    "marginal_return": returns,
-                    "threshold": budget.min_marginal_return,
-                })
-                break
-
-        # Warn if all hypotheses inconclusive again
-        if round_result.all_inconclusive():
-            emit(SYNTH_ALL_INCONCLUSIVE, {
-                "round": round_number,
-                "note": "All hypotheses inconclusive despite experiment execution. Check significance gate logs.",
-            })
-
-        # Checkpoint for resumability
-        await checkpoint_session(ctx, accumulated_ledger, round_number, budget)
-
-        round_number += 1
-
-    # ── Stage 5: Paper ────────────────────────────────────────────
-    paper_url = await write_paper(ctx, accumulated_ledger, emit)
-    emit(PAPER_READY, {"url": paper_url})
-    emit(SESSION_COMPLETED, {
-        "paper_url": paper_url,
-        "total_rounds": round_number,
-        "confirmed": accumulated_ledger.total_confirmed,
-        "refuted": accumulated_ledger.total_refuted,
-        "inconclusive": accumulated_ledger.total_inconclusive,
-    })
-
-    return ResearchResult(type="paper", url=paper_url, ledger=accumulated_ledger)
-```
-
-### 9.1 Stopping Criteria
-
-The loop terminates when **any** of these conditions is met:
-
-| Criterion | Check | Configurable |
-|---|---|---|
-| Hard time budget | `time.monotonic() >= budget.deadline` | `RESEARCH_MAX_HOURS` (default: 1h) |
-| Hard round budget | `round_number >= budget.max_rounds` | `RESEARCH_MAX_ROUNDS` (default: 5) |
-| Confirmed findings threshold | `accumulated_ledger.total_confirmed >= budget.target_confirmed` | `RESEARCH_TARGET_CONFIRMED` (default: 3) |
-| Diminishing returns | `marginal_return(round) < min_marginal_return` for 2 consecutive rounds | `RESEARCH_MIN_MARGINAL_RETURN` (default: 0.05) |
-| Budget exhausted | Token/API cost budget hit | `RESEARCH_MAX_COST_USD` (default: none) |
-
-### 9.2 Session Checkpointing (Resumability)
-
-Long-running sessions checkpoint after every round. A session can be resumed if interrupted.
-
-```python
-async def checkpoint_session(
-    ctx: ResearchContext,
-    ledger: AccumulatedLedger,
-    round_number: int,
-    budget: ResearchBudget,
-) -> None:
-    """Writes a snapshot to Postgres that can be used to resume from this point."""
-    async with session_factory() as session:
-        await session.execute(
-            text("""
-                INSERT INTO session_checkpoints
-                    (id, session_id, round_number, ledger_json, budget_json, created_at)
-                VALUES
-                    (:id, :session_id, :round_number, CAST(:ledger_json AS jsonb),
-                     CAST(:budget_json AS jsonb), NOW())
-                ON CONFLICT (session_id, round_number) DO UPDATE
-                SET ledger_json = EXCLUDED.ledger_json, budget_json = EXCLUDED.budget_json
-            """),
-            {
-                "id": str(uuid4()),
-                "session_id": ctx.session_id,
-                "round_number": round_number,
-                "ledger_json": json.dumps(ledger.to_dict()),
-                "budget_json": json.dumps(budget.to_dict()),
-            }
-        )
-
-async def resume_session(session_id: str) -> ResearchContext | None:
-    """Load last checkpoint and resume from the next round."""
-    checkpoint = await load_last_checkpoint(session_id)
-    if checkpoint is None:
-        return None
-    emit(SESSION_RESUMED, {"session_id": session_id, "from_round": checkpoint.round_number})
-    return ResearchContext.from_checkpoint(checkpoint)
-```
-
----
-
-## 10. Research Memory System
-
-Memory is what turns a one-shot pipeline into a long-running agent. Three layers:
-
-### 10.1 Session Memory (Current Run)
-
-Everything the system has done and learned in the current session. Stored in Postgres and queryable at any time.
-
-```python
-class SessionMemory:
-    """Read/write interface to the current session's accumulated knowledge."""
-
-    def get_confirmed_findings(self) -> list[Finding]:
-        """All hypotheses confirmed in any round of this session."""
-
-    def get_dead_ends(self) -> list[DeadEnd]:
-        """All refuted hypotheses + their evidence, so later rounds don't repeat them."""
-
-    def get_tried_tools(self, domain: str) -> set[str]:
-        """Tools already called in this session, to guide diversity in later rounds."""
-
-    def get_partial_findings(self) -> list[PartialFinding]:
-        """Inconclusive hypotheses with confidence > 0.25, candidates for promotion."""
-
-    def get_round_summaries(self) -> list[RoundSummary]:
-        """Per-round: what was tried, what was found, what the marginal return was."""
-
-    def summarize_for_hypothesis_generator(self) -> str:
-        """Compact text summary suitable for inclusion in hypothesis generation prompt."""
-```
-
-### 10.2 Agent Working Memory (Per Sub-Agent)
-
-Each sub-agent carries its own context window during execution. The think-act loop manages this explicitly — it does not rely on the LLM's context window to persist information.
-
-```python
-@dataclass
-class AgentContext:
-    hypothesis: RankedHypothesis
-    prior: Prior
-    peer_findings: list[PeerFinding]       # live peer results
-    learned_from: str | None               # prior-round learning for this hypothesis
-    results_so_far: list[StepResult]       # accumulated tool/code outputs THIS run
-    steps_taken: int
-    significance_status: SignificanceResult
-
-    def to_prompt_summary(self, max_tokens: int = 2000) -> str:
-        """
-        Compact, token-bounded summary for inclusion in think prompts.
-        Prioritizes: significance evidence > numeric findings > tool names run.
-        Truncates old/redundant results when budget is tight.
-        """
-```
-
-**Context window management:** As the agent runs more steps, older results are summarized or truncated. The most recent result and any significance evidence are always included verbatim. The agent never silently loses important context — the summarizer preserves the key numeric evidence.
-
-### 10.3 Cross-Session Knowledge Base (Persistent)
-
-Findings from completed sessions persist in a shared knowledge base. Future sessions on the same or related questions start with this prior work available.
-
-```python
-class CrossSessionKB:
-    """
-    Shared knowledge base that accumulates findings across all research sessions.
-    Keyed by topic embedding — supports fuzzy lookup by semantic similarity.
-    """
-
-    async def write_finding(self, finding: Finding, session_id: str) -> None:
-        """Write a confirmed finding to the KB with provenance."""
-        embed = await embed(finding.text)
-        await qdrant.upsert(
-            collection="knowledge_base",
-            points=[{
-                "id": str(uuid4()),
-                "vector": embed,
-                "payload": {
-                    "text": finding.text,
-                    "evidence": finding.evidence,
-                    "session_id": session_id,
-                    "confidence": finding.confidence,
-                    "created_at": datetime.utcnow().isoformat(),
-                }
-            }]
-        )
-        emit(MEMORY_KB_WRITTEN, {"finding": finding.text, "session_id": session_id})
-
-    async def query(self, question: str, top_k: int = 10) -> list[KBFinding]:
-        """Retrieve findings relevant to a question by semantic similarity."""
-        embed = await embed(question)
-        results = await qdrant.search(collection="knowledge_base", vector=embed, limit=top_k)
-        return [KBFinding(**r.payload) for r in results]
-```
-
-**Integration with prior builder:** Before generating hypotheses, the prior builder queries the KB for findings from prior sessions. Confirmed findings from previous runs on the same topic are added to `established_facts` in the prior, so the new session starts further ahead.
-
----
-
-## 11. Budget & Progress Management
-
-### 11.1 Research Budget
-
-```python
-@dataclass
-class ResearchBudget:
-    # Hard limits
-    max_rounds:            int    = 5
-    max_hours:             float  = 1.0    # wall clock hours
-    max_hypotheses_total:  int    = 50     # across all rounds
-    max_cost_usd:          float  = 0.0   # 0 = no cost limit
-    target_confirmed:      int    = 3      # stop if this many confirmed
-
-    # Soft limits
-    min_marginal_return:   float  = 0.05  # marginal progress threshold
-    max_stale_rounds:      int    = 2     # stop after N rounds with no new confirmed
-
-    # Per-agent
-    agent_max_steps:       int    = 15    # max think-act steps per hypothesis
-    agent_min_steps:       int    = 5     # minimum before allowing early stop
-    agent_max_seconds:     int    = 300   # per-agent wall clock cap
-
-    # Per-round
-    max_hypotheses_per_round: int = 5
-    max_seconds_per_round:    int = 600
-
-    deadline: float = field(default_factory=lambda: time.monotonic() + 3600)
-
-    def exhausted(self) -> bool:
-        return (
-            time.monotonic() >= self.deadline
-            or self.rounds_completed >= self.max_rounds
-            or self.hypotheses_tested >= self.max_hypotheses_total
-        )
-
-    def round_budget(self, round_number: int) -> RoundBudget:
-        """Allocate per-round budget. Later rounds may get less if overall budget is tight."""
-        remaining_seconds = max(0.0, self.deadline - time.monotonic())
-        rounds_remaining = self.max_rounds - round_number
-        return RoundBudget(
-            max_seconds=min(self.max_seconds_per_round, remaining_seconds / max(1, rounds_remaining)),
-            max_hypotheses=self.max_hypotheses_per_round,
-            agent_budget=AgentBudget(
-                max_steps=self.agent_max_steps,
-                min_steps=self.agent_min_steps,
-                deadline=time.monotonic() + min(self.agent_max_seconds, remaining_seconds / 2),
-            )
-        )
-```
-
-Environment variable overrides:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `RESEARCH_MAX_ROUNDS` | `5` | Hard round cap |
-| `RESEARCH_MAX_HOURS` | `1.0` | Wall-clock limit for the full session |
-| `RESEARCH_TARGET_CONFIRMED` | `3` | Stop when this many hypotheses confirmed |
-| `RESEARCH_MAX_HYPOTHESES` | `50` | Total hypothesis budget across rounds |
-| `RESEARCH_MIN_MARGINAL_RETURN` | `0.05` | Diminishing-returns threshold |
-| `AGENT_MAX_STEPS` | `15` | Per-agent think-act step cap |
-| `AGENT_MIN_STEPS` | `5` | Minimum steps before agent may stop early |
-
-For a **full-day run**, set `RESEARCH_MAX_HOURS=24`, `RESEARCH_MAX_ROUNDS=50`, `RESEARCH_TARGET_CONFIRMED=10`.
-
-### 11.2 Progress Measurement
-
-Marginal return is computed after each round to detect diminishing returns:
-
-```python
-def marginal_return(self, round_number: int) -> float:
-    """
-    Returns a 0–1 score measuring new scientific progress made in this round.
-    Combines: new confirmed findings + hypothesis confidence improvement + new tools explored.
-    """
-    if round_number < 1:
-        return 1.0
-    prev = self.round_summaries[round_number - 1]
-    curr = self.round_summaries[round_number]
-
-    delta_confirmed = (len(curr.confirmed) - len(prev.confirmed)) / max(1, len(curr.confirmed) + 1)
-    delta_confidence = _mean_confidence_delta(prev.inconclusive, curr.inconclusive)
-    delta_coverage = _new_tool_coverage(prev.tools_used, curr.tools_used)
-
-    return 0.5 * delta_confirmed + 0.3 * delta_confidence + 0.2 * delta_coverage
-```
-
----
-
-## 12. Evidence Accumulation & Significance Gate
-
-### 12.1 Accumulated Evidence Across Rounds
-
-Evidence is not just per-hypothesis per-round. It accumulates. If hypothesis H2 was promoted to H2-refined in round 2, the evidence from H2 round 1 carries forward into H2-refined round 2.
-
-```python
-class AccumulatedEvidence:
-    """
-    Cross-round evidence for a hypothesis lineage (original + all refinements).
-    Statistical power grows as more data points are added.
-    """
-    lineage: list[str]                     # hypothesis_id chain
-    all_metric_values: list[float]
-    all_p_values: list[float]
-    all_effect_sizes: list[float]
-    combined_n: int                        # total observations across rounds
-
-    def combined_significance(self) -> SignificanceResult:
-        """Fisher's method for combining p-values across rounds."""
-        if not self.all_p_values:
-            return SignificanceResult(gate_passed=False, ...)
-        chi2 = -2 * sum(math.log(p) for p in self.all_p_values if p > 0)
-        df = 2 * len(self.all_p_values)
-        combined_p = 1 - chi2_cdf(chi2, df)
-        return SignificanceResult(
-            gate_passed=combined_p < 0.05,
-            p_value=combined_p,
-            method="fisher_combined",
-            ...
-        )
-```
-
-### 12.2 Evidence Contract (Enforced)
-
-This is the complete rule set enforced in `compute_verdict()`:
-
-| Condition | Verdict | Confidence range |
-|---|---|---|
-| No metric-bearing steps | inconclusive | 0.0 |
-| Metric steps ran but no baseline | inconclusive | 0.15–0.30 |
-| Baseline present, no significance evidence | inconclusive | 0.25–0.40 |
-| Significance gate passed, direction supports | confirmed | 0.50–0.95 |
-| Significance gate definitively failed | refuted | 0.60–0.80 |
-| Significance gate passed, direction opposes | refuted | 0.60–0.85 |
-
-No LLM override of this contract. The verdict is computed from evidence fields, not inferred by language model.
-
----
-
-## 13. Paper Writing Layer
-
-### 13.1 Core Constraint
-
-The methods section is **not written by an LLM**. It is compiled deterministically from `experiment_steps` rows in order, across all rounds. Every claim in the paper can be traced to a specific database row.
-
-### 13.2 Multi-Round Paper Pipeline
-
-The paper writer now operates over the full accumulated ledger from all rounds, not just one pass.
-
-```
-INPUTS:
-  ├── research_sessions row + all session_checkpoint rows
-  ├── all hypotheses rows across all rounds (with round_id, refinement_of)
-  ├── all experiment_steps rows (ordered by round then hypothesis then step)
-  ├── all tool_calls rows
-  ├── all llm_calls rows
-  └── MinIO artifacts (figures, output files)
-
-PIPELINE:
-  1. multi_round_trace_compiler()
-     Group steps by round → hypothesis → step
-     Build hypothesis lineage graph (original + refinements)
-     Identify the "evolution story" of each finding across rounds
-     → MultiRoundTraceReport
-
-  2. section_generator()
-     abstract      ← strongest confirmed findings across all rounds
-     introduction  ← prior + motivation
-     methods       ← DETERMINISTIC: per-round experiment summaries from trace
-     results       ← per-round finding summaries + significance evidence
-     discussion    ← cross-round synthesis: how did the investigation evolve?
-     conclusion    ← confirmed findings + open questions
-     references    ← papers from prior + any fetched during experiments
-
-  3. figure_embedding()
-  4. latex_render()
-  5. emit(PAPER_READY)
-```
-
----
-
-## 14. Data Layer
-
-### 14.1 Storage Components
-
-| Store | Purpose | What lives here |
-|---|---|---|
-| **Postgres** | Source of truth | Sessions, hypotheses, experiment steps, tool calls, LLM calls, paper cache, citation graph, session checkpoints, research rounds |
-| **Qdrant** | Vector search | Paper chunk embeddings, cross-session knowledge base embeddings |
-| **Redis** | Task queue + event bus + agent peer channels | Celery queue, SSE pub/sub, agent-peer broadcast channels, query cache |
-| **MinIO** | Binary artifacts | PDFs, figures, compiled LaTeX, experiment outputs |
-| **SQLite** | BM25 index | Per-session inverted index over paper text |
-
-### 14.2 Postgres Schema
-
-```sql
--- Research sessions
-CREATE TABLE research_sessions (
-    id              UUID PRIMARY KEY,
-    question        TEXT NOT NULL,
-    status          TEXT NOT NULL,  -- pending | running | completed | failed
-    stage           TEXT,
-    prior_json      JSONB,
-    created_at      TIMESTAMPTZ DEFAULT NOW(),
-    completed_at    TIMESTAMPTZ
-);
-
--- Paper cache
-CREATE TABLE papers (
-    id              TEXT PRIMARY KEY,   -- arxiv_id
-    title           TEXT,
-    authors         JSONB,
-    abstract        TEXT,
-    pdf_url         TEXT,
-    sections_json   JSONB,
-    ingested_at     TIMESTAMPTZ DEFAULT NOW(),
-    status          TEXT
-);
-
-CREATE TABLE paper_citations (
-    source_paper_id TEXT REFERENCES papers(id),
-    cited_paper_id  TEXT,
-    PRIMARY KEY (source_paper_id, cited_paper_id)
-);
-
--- Research rounds (new — multi-round loop)
-CREATE TABLE research_rounds (
-    id              UUID PRIMARY KEY,
-    session_id      UUID REFERENCES research_sessions(id),
-    round_number    INT NOT NULL,
-    status          TEXT NOT NULL,  -- running | completed | failed
-    confirmed_count INT DEFAULT 0,
-    refuted_count   INT DEFAULT 0,
-    inconclusive_count INT DEFAULT 0,
-    marginal_return FLOAT,
-    budget_json     JSONB,          -- budget snapshot at start of round
-    started_at      TIMESTAMPTZ DEFAULT NOW(),
-    completed_at    TIMESTAMPTZ,
-    UNIQUE (session_id, round_number)
-);
-
--- Session checkpoints (new — resumability)
-CREATE TABLE session_checkpoints (
-    id              UUID PRIMARY KEY,
-    session_id      UUID REFERENCES research_sessions(id),
-    round_number    INT NOT NULL,
-    ledger_json     JSONB NOT NULL,   -- full accumulated ledger at this point
-    budget_json     JSONB NOT NULL,   -- budget state at this point
-    created_at      TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE (session_id, round_number)
-);
-
--- Hypotheses
-CREATE TABLE hypotheses (
-    id              UUID PRIMARY KEY,
-    session_id      UUID REFERENCES research_sessions(id),
-    round_id        UUID REFERENCES research_rounds(id),  -- which round
-    text            TEXT NOT NULL,
-    test_methodology TEXT,
-    scores_json     JSONB,
-    rank            INT,
-    status          TEXT,   -- pending | running | completed | failed | promoted | retired
-    verdict         TEXT,   -- confirmed | refuted | inconclusive
-    confidence      FLOAT,
-    evidence_summary TEXT,
-    key_finding     TEXT,
-    tool_trace_id   TEXT,
-    refinement_of   UUID REFERENCES hypotheses(id),   -- prior-round parent if promoted
-    learned_from    TEXT,                              -- summary from prior round
-    created_at      TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Full experiment trace
-CREATE TABLE experiment_steps (
-    id              UUID PRIMARY KEY,
-    hypothesis_id   UUID REFERENCES hypotheses(id),
-    step_type       TEXT NOT NULL,  -- tool_call | code_exec | llm_reasoning | think_decision
-    step_index      INT,
-    input_json      JSONB,
-    output_json     JSONB,
-    error_json      JSONB,
-    duration_ms     INT,
-    memory_mb       INT,
-    timeout_sec     INT,
-    summary         TEXT,
-    significance_json JSONB,   -- new: p_value/effect_size/CI if this step produced them
-    created_at      TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Tool calls (denormalized for convenience)
-CREATE TABLE tool_calls (
-    id              UUID PRIMARY KEY,
-    step_id         UUID REFERENCES experiment_steps(id),
-    hypothesis_id   UUID REFERENCES hypotheses(id),
-    tool_name       TEXT NOT NULL,
-    domain          TEXT NOT NULL,
-    params_json     JSONB,
-    result_json     JSONB,
-    success         BOOLEAN,
-    significance_capable BOOLEAN DEFAULT FALSE,  -- new
-    produced_p_value FLOAT,                       -- new: extracted from result
-    produced_effect_size FLOAT,                   -- new
-    duration_ms     INT,
-    created_at      TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Every LLM call stored verbatim
-CREATE TABLE llm_calls (
-    id              UUID PRIMARY KEY,
-    session_id      UUID REFERENCES research_sessions(id),
-    hypothesis_id   UUID,
-    call_purpose    TEXT,   -- "hypothesis_generation" | "agent.decide_next_step" | etc.
-    model           TEXT,
-    prompt_text     TEXT NOT NULL,
-    response_text   TEXT NOT NULL,
-    input_tokens    INT,
-    output_tokens   INT,
-    duration_ms     INT,
-    created_at      TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Cross-session knowledge base entries
-CREATE TABLE kb_findings (
-    id              UUID PRIMARY KEY,
-    session_id      UUID REFERENCES research_sessions(id),
-    hypothesis_id   UUID REFERENCES hypotheses(id),
-    text            TEXT NOT NULL,
-    evidence        TEXT,
-    confidence      FLOAT,
-    embedding_id    TEXT,   -- Qdrant point ID in "knowledge_base" collection
-    created_at      TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Session budget tracking
-CREATE TABLE session_budgets (
-    id              UUID PRIMARY KEY,
-    session_id      UUID REFERENCES research_sessions(id),
-    config_json     JSONB NOT NULL,     -- initial budget config
-    consumed_json   JSONB DEFAULT '{}', -- running totals: rounds, hypotheses, cost
-    updated_at      TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Agent memory state (per-agent working memory snapshots)
-CREATE TABLE agent_memory (
-    id              UUID PRIMARY KEY,
-    hypothesis_id   UUID REFERENCES hypotheses(id),
-    step_index      INT,
-    significance_json   JSONB,   -- significance status at this step
-    peer_findings_json  JSONB,   -- peer results received so far
-    results_summary TEXT,        -- compact summary for context management
-    created_at      TIMESTAMPTZ DEFAULT NOW()
-);
-
--- Event log
-CREATE TABLE events (
-    id              UUID PRIMARY KEY,
-    session_id      UUID REFERENCES research_sessions(id),
-    round_id        UUID REFERENCES research_rounds(id),  -- new
-    event_type      TEXT NOT NULL,
-    source          TEXT,
-    step            TEXT,
-    hypothesis_id   UUID,
-    parent_event_id UUID,
-    payload_json    JSONB,
-    created_at      TIMESTAMPTZ DEFAULT NOW()
-);
-CREATE INDEX events_session_idx ON events(session_id, created_at);
-CREATE INDEX events_round_idx   ON events(round_id, created_at);
-```
-
----
-
-## 15. API & Streaming Layer
-
-### 15.1 Endpoints
-
-```
-POST   /research                         Submit a research question → returns session_id
-GET    /stream/{session_id}              SSE stream of all events
-GET    /sessions/{session_id}            Full session state
-GET    /sessions/{session_id}/prior      Prior JSON
-GET    /sessions/{session_id}/rounds     All research rounds with summaries
-GET    /sessions/{session_id}/hypotheses All hypotheses (filterable by round, verdict)
-GET    /sessions/{session_id}/trace      Full experiment trace (all rounds, all steps)
-GET    /sessions/{session_id}/paper      Paper PDF + .tex download URLs
-GET    /sessions/{session_id}/memory     Session memory summary (confirmed findings, dead ends)
-GET    /sessions/{session_id}/budget     Current budget status and consumption
-GET    /sessions/{session_id}/llm-calls  All LLM prompts + responses
-POST   /sessions/{session_id}/resume     Resume an interrupted long-running session
-GET    /knowledge-base                   Query the cross-session KB
-GET    /tools                            List all tools with specs
-GET    /tools/{domain}                   Tools for a domain
-GET    /tools/significance               All significance-capable tools
-GET    /health                           Liveness check
-```
-
-### 15.2 POST /research
-
-```json
-{
-  "question": "...",
-  "config": {
-    "max_rounds":           5,
-    "max_hours":            1.0,
-    "target_confirmed":     3,
-    "max_hypotheses":       5,
-    "agent_max_steps":      15,
-    "paper_ttl_days":       30,
-    "llm_model":            "gpt-4o",
-    "plan_source":          "hybrid"
-  }
-}
-```
-
----
-
-## 16. Infrastructure & Setup
-
-### 16.1 docker-compose.yml
-
-Services: `frontend`, `api`, `orchestrator`, `worker`, `postgres`, `redis`, `qdrant`, `minio`.
-
-Workers are scaled with `PROPAB_WORKERS` (default: 3). For long-running sessions, increase workers and Celery concurrency.
-
-### 16.2 Environment Variables
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `OPENAI_API_KEY` | — | LLM + embedding calls |
-| `LLM_PROVIDER` | `openai` | `openai` \| `anthropic` \| `ollama` \| `gemini` |
-| `LLM_MODEL` | `gpt-4o` | Model for orchestrator + agents |
-| `EMBED_MODEL` | `text-embedding-3-small` | Embedding model |
-| `RERANKER_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Local cross-encoder |
-| `PROPAB_WORKERS` | `3` | Parallel experiment workers |
-| `PROPAB_MAX_HYPOTHESES` | `5` | Hypotheses per round |
-| `PAPER_TTL_DAYS` | `30` | Paper cache TTL |
-| `SANDBOX_TIMEOUT_SEC` | `30` | Global sandbox timeout default |
-| `SUB_AGENT_PLAN_SOURCE` | `hybrid` | `heuristic` \| `llm` \| `hybrid` |
-| `SUB_AGENT_MAX_ROUNDS` | `3` | Heuristic plan rounds |
-| `SUB_AGENT_TOOLS_PER_ROUND` | `3` | Tools selected per heuristic round |
-| `SUB_AGENT_MAX_PLANNED_STEPS` | `8` | LLM plan max steps |
-| `RESEARCH_MAX_ROUNDS` | `5` | Multi-round loop hard cap |
-| `RESEARCH_MAX_HOURS` | `1.0` | Wall-clock budget hours |
-| `RESEARCH_TARGET_CONFIRMED` | `3` | Confirmed findings to aim for |
-| `RESEARCH_MAX_HYPOTHESES` | `50` | Total hypothesis budget |
-| `RESEARCH_MIN_MARGINAL_RETURN` | `0.05` | Diminishing-returns threshold |
-| `AGENT_MAX_STEPS` | `15` | Think-act steps per agent |
-| `AGENT_MIN_STEPS` | `5` | Min steps before early stop allowed |
-
-### 16.3 Setup
-
-```bash
-git clone https://github.com/propab/propab
-cd propab
-cp .env.example .env          # add your OPENAI_API_KEY
-docker compose up
-# → frontend: http://localhost:3000
-# → api:      http://localhost:8000/docs
-```
-
----
-
-## 17. Failure Handling
-
-| Failure | Detection | Recovery | Event |
-|---|---|---|---|
-| Literature fetch returns 0 papers | Empty results | Broaden query, retry once | `SESSION_FAILED` |
-| Prior builder malformed JSON | JSON parse fails | Retry with schema-injected prompt (max 2x) | `LLM_PARSE_ERROR` |
-| Think decision LLM parse failure | JSON parse fails | Fall back to heuristic next-step selection | `LLM_PARSE_ERROR` |
-| Sub-agent exceeds step budget | steps >= agent_max_steps | Evaluate with accumulated evidence, mark incomplete | `AGENT_COMPLETED` |
-| Sub-agent crashes | Celery exception | Hypothesis inconclusive, full traceback stored | `AGENT_FAILED` |
-| Significance gate not passable | Max steps reached, no sig tool ran | Mandatory correction prompt or inconclusive | `SIG_GATE_FAILED` |
-| All sub-agents inconclusive | Round ledger check | Emit warning, still continue to next round | `SYNTH_ALL_INCONCLUSIVE` |
-| Round deadline exceeded | time.monotonic() check | Cancel remaining tasks, proceed with partial results | `BUDGET_EXHAUSTED` |
-| Session interrupted | Process killed / infra failure | Checkpoint exists → resume from last round | `SESSION_RESUMED` |
-| LaTeX compilation fails | pdflatex exit code != 0 | Return .tex with error attached | `PAPER_LATEX_COMPILED {success: false}` |
-| LLM rate limit | HTTP 429 | Exponential backoff: 2s, 4s, 8s, 16s | `LLM_PROMPT` retry |
-
-**Failure Principle:** A session never silently fails. If interrupted, it checkpoints. If a tool fails, the agent continues. If a round fails, the orchestrator proceeds. A partial result with honest failure documentation is more valuable than an aborted run.
-
----
-
-## 18. Build Roadmap
-
-### Phase 1 — Foundation (Complete)
-- [x] Monorepo structure, Docker Compose, all services stubbed
-- [x] Postgres schema + migrations (Alembic)
-- [x] Event system: `emit()` → Redis → Postgres
-- [x] SSE endpoint
-- [x] arxiv API client + PDF parser
-- [x] Hybrid retrieval: dense + sparse + citation graph + reranker
-- [x] Prior builder
-- [x] Hypothesis generator + ranker
-- [x] Sub-agent harness + Celery
-- [x] Domain routing
-- [x] Tool registry + 40+ STEM tools
-- [x] Sandbox executor with resource caps
-- [x] Paper writer (trace compiler + section generator + LaTeX)
-- [x] Evidence contract: metric-based verdict, confidence computation
-- [x] Crash hardening: Q1/Q4 failure path resolved
-
-### Phase 2 — Iterative Agent Core (Active)
-- [ ] **Think-act sub-agent loop**: LLM decides next step after observing each result
-- [ ] **Significance gate**: enforced per-hypothesis, mandatory before verdict
-- [ ] **Question-aware domain routing**: research question injected alongside hypothesis
-- [ ] **Significance-capable tool injection**: always include stat tools in domain cluster
-- [ ] **Hypothesis quality gate**: reject generic fallback text, retry
-- [ ] **Promoted hypotheses**: inconclusive with signal → refined version re-queued
-- [ ] **Agent working memory**: `AgentContext.to_prompt_summary()` with token budget
-
-### Phase 3 — Multi-Round Orchestrator (Next)
-- [ ] `research_rounds` table + migrations
-- [ ] `session_checkpoints` table + resumability
-- [ ] Multi-round `research_loop()` with budget control
-- [ ] `AccumulatedLedger` across rounds
-- [ ] Diminishing-returns detection
-- [ ] Round-aware hypothesis generator (prior round findings in prompt)
-- [ ] Hypothesis deduplication across rounds
-- [ ] `SYNTH_ALL_INCONCLUSIVE` warning event + handling
-- [ ] Budget management API: `GET /sessions/{id}/budget`
-
-### Phase 4 — Memory & Cross-Agent (Following)
-- [ ] Cross-agent peer finding broadcast (Redis channels per agent)
-- [ ] Agent think prompts include peer findings
-- [ ] `CrossSessionKB`: Qdrant collection + write/query API
-- [ ] KB query integrated into prior builder
-- [ ] `agent_memory` table: per-step significance snapshots
-- [ ] `kb_findings` table + `GET /knowledge-base` endpoint
-- [ ] Cross-round evidence accumulation (Fisher's method for combined p-values)
-
-### Phase 5 — Long-Running Mode & Scale (Future)
-- [ ] Full-day run mode: `RESEARCH_MAX_HOURS=24`, `RESEARCH_MAX_ROUNDS=50`
-- [ ] Thousands-of-hypotheses management: priority queue, aggressive deduplication
-- [ ] Dataset connectors (UCI ML, NCBI, HuggingFace datasets)
-- [ ] Claim grounding / hallucination guard (each paper claim traced to DB row)
-- [ ] Ollama / local model support (chat adapter already written)
-- [ ] Community tool plugin submission process
-
-### Phase 6 — Campaign Model (Active)
-- [x] `ResearchCampaign` schema + `BreakthroughCriteria` (`propab/campaign.py`)
-- [x] `HypothesisTree` data structure with expansion, frontier, pruning (`propab/hypothesis_tree.py`)
-- [x] `campaign_loop()` — baseline measurement, tree-guided batch dispatch, breakthrough detection
-- [x] `research_campaigns` table + migration (`migrations/006_campaigns.sql`)
-- [x] `POST /campaigns` API endpoint
-- [x] New event types: `CAMPAIGN_STARTED/PROGRESS/BREAKTHROUGH/BUDGET_EXHAUSTED`, `BASELINE_MEASURED`, `HYPO_TREE_EXPANDED/PRUNED`
-- [x] `campaign` profile in `config.py` (4-hour budget, 500-hypothesis cap)
-- [ ] **Campaign v1 first run**: single hard question, 4-hour budget, measured baseline, tree to 50+ hypotheses
-- [ ] Interim paper writing at 10% hypothesis budget milestone
-- [ ] `GET /campaigns/{id}` endpoint — query live campaign state, tree summary, best finding
-- [ ] `POST /campaigns/{id}/pause` + `POST /campaigns/{id}/resume`
-- [ ] Evidence requirement scaling: claim-size → experiment-size mapping in think-act planner
-
----
-
-## 19. Repository Structure
-
-```
-propab/
-├── docker-compose.yml
-├── .env.example
-├── ARCHITECTURE.md               ← this document
-│
-├── services/
-│   ├── api/                      # FastAPI gateway
-│   │   └── app/routes/
-│   │       ├── research.py
-│   │       ├── stream.py
-│   │       ├── sessions.py
-│   │       └── knowledge_base.py    # new: KB query endpoint
-│   │
-│   ├── orchestrator/             # Multi-round research loop
-│   │   ├── research_loop.py      # multi-round explicit state machine
-│   │   ├── round_loop.py         # new: single-round logic extracted
-│   │   ├── accumulated_ledger.py # new: cross-round evidence tracking
-│   │   ├── budget.py             # new: budget + progress management
-│   │   ├── hypothesis_lifecycle.py # new: promote/retire logic
-│   │   ├── intake.py
-│   │   ├── literature.py
-│   │   ├── hypotheses.py
-│   │   ├── paper.py
-│   │   └── ...
-│   │
-│   └── worker/                   # Celery think-act agents
-│       ├── sub_agent_loop.py     # updated: think-act loop
-│       ├── think_act.py          # new: decide_next_action, AgentContext
-│       ├── significance.py       # new: SignificanceResult, check_significance
-│       ├── agent_memory.py       # new: AgentContext.to_prompt_summary()
-│       ├── peer_findings.py      # new: poll_peer_findings, broadcast
-│       ├── domain_router.py      # updated: question-aware routing
-│       └── ...
-│
-├── packages/
-│   └── propab-core/propab/
-│       ├── events.py             # updated: new event types
-│       ├── types.py              # updated: Round, Budget, SignificanceResult types
-│       ├── memory.py             # new: CrossSessionKB
-│       ├── budget.py             # new: ResearchBudget, AgentBudget
-│       └── tools/
-│           ├── registry.py       # updated: get_cluster_with_significance()
-│           └── ...
-│
-├── migrations/
-│   └── versions/
-│       ├── 001_initial.sql
-│       ├── 002_research_rounds.sql    # new
-│       ├── 003_session_checkpoints.sql # new
-│       ├── 004_agent_memory.sql        # new
-│       └── 005_kb_findings.sql         # new
-│
-└── frontend/
-    └── src/pages/
-        ├── Session.tsx           # updated: round progress, budget display
-        ├── Results.tsx           # updated: multi-round results
-        └── KnowledgeBase.tsx     # new: KB explorer
-```
-
----
-
----
-
-## 20. Campaign Model
-
-A **campaign** is the long-running research primitive — it persists indefinitely (days or weeks) where a session is ephemeral (one run, minutes to hours). The session model remains unchanged for short queries; the campaign model wraps and extends it for serious R&D work.
-
-### 20.1 Campaign vs Session
-
-| Dimension | Session | Campaign |
-|---|---|---|
-| Lifetime | Single process run | Persists across restarts, days, weeks |
-| Hypothesis source | Generated fresh per round | Grown from a `HypothesisTree` |
-| Stopping criterion | Budget / diminishing returns | Breakthrough threshold OR budget |
-| Baseline | Inferred from prior literature | Measured by system at campaign start |
-| Paper trigger | Any confirmed findings | Breakthrough OR budget exhausted |
-| Scale | 5–50 hypotheses | 500–18,000+ hypotheses |
-
-### 20.2 ResearchCampaign Schema
-
-```python
-@dataclass
-class ResearchCampaign:
-    """
-    A campaign is a long-running research effort that persists indefinitely.
-    Unlike a session, it has no natural end — it runs until breakthrough or budget.
-    """
-    id:               str
-    question:         str
-    status:           str    # active | paused | breakthrough | budget_exhausted
-    started_at:       str    # ISO 8601
-
-    # Accumulated across all rounds, all days
-    hypothesis_tree:  HypothesisTree
-    breakthrough_criteria: BreakthroughCriteria
-    total_hypotheses: int           # could reach 18,000
-    total_confirmed:  int
-    best_finding:     dict | None
-    baseline_metric:  float         # measured at campaign start, not assumed
-    best_metric:      float         # best achieved so far
-    improvement_pct:  float         # vs baseline
-
-    # Budget tracking
-    compute_seconds_used:   int
-    compute_budget_seconds: int     # e.g. 4 hours = 14400
-    wall_clock_days:        float
-
-    # Checkpointing
-    last_checkpoint:  str           # ISO 8601
-    checkpoint_every: int           # seconds between DB checkpoints
-
-    def should_stop(self) -> bool:
-        if self.status in ("breakthrough", "budget_exhausted", "paused"):
-            return True
-        if self.compute_seconds_used >= self.compute_budget_seconds:
-            return True
-        return False
-```
-
-### 20.3 Campaign Loop
-
-```python
-async def campaign_loop(campaign_id: str, session_factory, emitter) -> None:
-    """Runs indefinitely until breakthrough or budget exhausted."""
-
-    campaign = await db_load_campaign(campaign_id, session_factory)
-    emit(CAMPAIGN_STARTED, {"campaign_id": campaign_id, "question": campaign.question})
-
-    # Step 0: Measure baseline if not yet measured
-    if campaign.baseline_metric == 0.0:
-        campaign.baseline_metric = await measure_baseline(campaign, session_factory, emitter)
-        emit(BASELINE_MEASURED, {
-            "metric_name": campaign.breakthrough_criteria.metric_name,
-            "baseline_value": campaign.baseline_metric,
-        })
-
-    while not campaign.should_stop():
-        await db_checkpoint_campaign(campaign, session_factory)
-
-        # Get next batch from hypothesis tree frontier
-        batch = campaign.hypothesis_tree.next_batch(
-            size=campaign_batch_size(campaign),
-            strategy="highest_expected_value",
-        )
-
-        if not batch:
-            # Frontier exhausted — generate new seed hypotheses from accumulated prior
-            batch = await expand_frontier(campaign, session_factory, emitter)
-
-        # Run experiments (reuses existing session-level experiment infrastructure)
-        results = await run_campaign_round(batch, campaign, session_factory, emitter)
-
-        # Update tree and check for breakthrough
-        breakthrough_found = False
-        for result in results:
-            campaign.hypothesis_tree.update_node(
-                result["hypothesis_id"], result["verdict"], result["confidence"],
-            )
-            campaign.total_hypotheses += 1
-            if result["verdict"] == "confirmed":
-                campaign.total_confirmed += 1
-                children = await campaign.hypothesis_tree.expand(
-                    result["hypothesis_id"], result["evidence_summary"], llm,
-                )
-                campaign.hypothesis_tree.add_to_frontier(children)
-
-                # Update best metric
-                metric_val = _extract_metric(result, campaign.breakthrough_criteria.metric_name)
-                if metric_val is not None and _is_better(
-                    metric_val, campaign.best_metric, campaign.breakthrough_criteria.direction
-                ):
-                    campaign.best_metric = metric_val
-                    campaign.best_finding = result
-                    campaign.improvement_pct = _improvement_pct(
-                        campaign.baseline_metric, metric_val,
-                        campaign.breakthrough_criteria.direction,
-                    )
-
-                if campaign.breakthrough_criteria.is_breakthrough(result):
-                    breakthrough_found = True
-
-        emit(CAMPAIGN_PROGRESS, {
-            "campaign_id": campaign_id,
-            "hypotheses_tested": campaign.total_hypotheses,
-            "confirmed": campaign.total_confirmed,
-            "best_improvement_pct": campaign.improvement_pct,
-            "frontier_size": len(campaign.hypothesis_tree.frontier),
-        })
-
-        if breakthrough_found:
-            campaign.status = "breakthrough"
-            emit(CAMPAIGN_BREAKTHROUGH, {
-                "campaign_id": campaign_id,
-                "best_finding": campaign.best_finding,
-                "improvement_pct": campaign.improvement_pct,
-            })
-            await write_campaign_paper(campaign, session_factory, emitter)
-            break
-
-    if campaign.status != "breakthrough":
-        campaign.status = "budget_exhausted"
-        emit(CAMPAIGN_BUDGET_EXHAUSTED, {"campaign_id": campaign_id})
-        await write_campaign_paper(campaign, session_factory, emitter)
-```
-
-### 20.4 Baseline Measurement Protocol
-
-The baseline is always measured by the system itself at campaign start, not provided by the user. The system runs the standard approach on the target problem (e.g. train a vanilla 784-60-10 MLP on MNIST for 150 steps), records the metric, and uses that as the reference. This guarantees that all hypothesis experiments are compared under identical experimental conditions.
-
-```python
-async def measure_baseline(campaign: ResearchCampaign, ...) -> float:
-    """
-    Run the standard approach once, record the primary metric.
-    The baseline config is derived from the campaign question via LLM.
-    """
-    # LLM extracts: dataset, architecture, optimizer, n_steps from question
-    baseline_config = await extract_baseline_config(campaign.question, llm)
-    result = await run_baseline_experiment(baseline_config, ...)
-    return result[campaign.breakthrough_criteria.metric_name]
-```
-
-### 20.5 Budget Types
-
-| Budget type | Config key | Default | Description |
-|---|---|---|---|
-| Compute seconds | `campaign_compute_budget_seconds` | `14400` (4h) | Wall-clock time for the full campaign |
-| Hypothesis budget | `campaign_max_hypotheses` | `500` | Hard cap on total hypotheses tested |
-| Cost budget | `campaign_max_cost_usd` | `0` (no limit) | API cost cap |
-| Breakthrough threshold | `BreakthroughCriteria.improvement_threshold` | `0.05` (5%) | Minimum improvement to declare success |
-
-### 20.6 Database Schema
-
-```sql
-CREATE TABLE research_campaigns (
-    id                       UUID PRIMARY KEY,
-    question                 TEXT NOT NULL,
-    status                   TEXT NOT NULL DEFAULT 'active',
-    breakthrough_criteria_json JSONB NOT NULL,
-    hypothesis_tree_json     JSONB,
-    baseline_metric          FLOAT,
-    best_metric              FLOAT,
-    improvement_pct          FLOAT,
-    best_finding_json        JSONB,
-    total_hypotheses         INT DEFAULT 0,
-    total_confirmed          INT DEFAULT 0,
-    compute_seconds_used     INT DEFAULT 0,
-    compute_budget_seconds   INT NOT NULL DEFAULT 14400,
-    started_at               TIMESTAMPTZ DEFAULT NOW(),
-    last_checkpoint_at       TIMESTAMPTZ,
-    completed_at             TIMESTAMPTZ
-);
-```
-
----
-
-## 21. Hypothesis Tree
-
-The hypothesis tree is the mechanism that grows the hypothesis space from 5 seed hypotheses to 18,000+ without generating them all upfront. It is a guided tree search over the space of possible research directions, where confirmed findings are the branches worth expanding and refuted ones prune the tree.
-
-### 21.1 Data Structures
-
-```python
-@dataclass
-class HypothesisNode:
-    id:          str
-    text:        str
-    parent_id:   str | None      # None for root/seed hypotheses
-    depth:       int             # how many generations from seed
-    verdict:     str             # pending | confirmed | refuted | inconclusive
-    confidence:  float
-    children:    list[str]       # IDs of child hypotheses generated from this one
-    generation:  int             # which campaign round spawned this
-    evidence_summary: str | None # from experiment result
-
-@dataclass
-class HypothesisTree:
-    nodes:     dict[str, HypothesisNode]
-    frontier:  list[str]   # hypothesis IDs ready to be tested next
-    confirmed: list[str]   # confirmed — children may be generated
-    exhausted: list[str]   # tested, no children worth generating
-```
-
-### 21.2 Expansion Strategies
-
-When a hypothesis is **confirmed**, the tree expands in three directions:
-
-```
-CONFIRMED: "Bottleneck architecture (784-32-64-10) beats 784-60-10 by +3% accuracy"
-    │
-    ├── Boundary probing:
-    │   "Does the accuracy gain hold at a 25k-parameter budget, not just 50k?"
-    │
-    ├── Mechanistic investigation:
-    │   "Is the gain driven by the bottleneck compression or by the expansion layer?"
-    │
-    └── Generalization testing:
-        "Does bottleneck architecture outperform single hidden layer on Fashion-MNIST too?"
-```
-
-When a hypothesis is **refuted**:
-```
-REFUTED: "Adding a second hidden layer improves accuracy under 50k-param budget"
-    │
-    └── Alternative generation:
-        "If layer count doesn't help, do skip connections help instead?"
-        "Does width matter more than depth under this parameter constraint?"
-```
-
-When a hypothesis is **inconclusive**:
-```
-INCONCLUSIVE: "Batch normalization improves test accuracy" (confidence 0.28, partial signal)
-    │
-    └── Better-powered retest:
-        "Run same experiment with 10+ seeds and proper bootstrap confidence interval"
-```
-
-### 21.3 Expansion Prompt
-
-```python
-EXPAND_PROMPT = """
-This hypothesis was {verdict} with confidence {confidence:.2f}.
-
-Hypothesis: {parent_text}
-
-Finding: {evidence_summary}
-
-Generate 3-5 child hypotheses that:
-{expansion_instructions}
-
-Rules:
-- Do not repeat the parent hypothesis
-- Each child must be more specific than the parent, not broader
-- Each child must name its expected test methodology
-- Depth {depth} hypothesis: scope to what can be answered in a single experiment
-
-Return JSON array only:
-[{{"id": "...", "text": "...", "test_methodology": "...", "expansion_type": "boundary|mechanistic|generalization|alternative|retest"}}]
-"""
-
-EXPANSION_INSTRUCTIONS = {
-    "confirmed": """
-1. Probe the BOUNDARY CONDITIONS: where does this effect break down?
-2. Ask WHY: what mechanism drives this effect?
-3. Ask HOW FAR: does this generalize to other architectures/datasets?
-4. Test whether this finding enables a downstream improvement""",
-    "refuted": """
-1. Generate ALTERNATIVE approaches: what else could achieve the goal?
-2. Ask WHAT IF: change the variable that caused refutation""",
-    "inconclusive": """
-1. Design a BETTER-POWERED version of the same experiment
-2. Add more replications, tighter controls, or a direct baseline comparison""",
-}
-```
-
-### 21.4 Frontier Prioritization
-
-The `next_batch` method selects hypotheses from the frontier using an expected-value score:
-
-```python
-def _expected_value_score(self, node: HypothesisNode) -> float:
-    """
-    Score a hypothesis for prioritization.
-    Confirmed parents, shallow depth, and specific methodology score higher.
-    """
-    # Reward shallow depth (closer to a confirmed finding is more promising)
-    depth_score = 1.0 / (1.0 + node.depth * 0.3)
-
-    # Reward if parent was confirmed (confirmed lineage)
-    lineage_score = 1.0
-    if node.parent_id and node.parent_id in self.confirmed:
-        lineage_score = 1.5
-
-    # Reward specific methodology mention (heuristic: longer = more specific)
-    methodology_len = len((node.text or ""))
-    specificity_score = min(1.0, methodology_len / 200.0)
-
-    return depth_score * lineage_score * 0.5 + specificity_score * 0.5
-```
-
-### 21.5 Pruning Rules
-
-A branch stops expanding when:
-
-| Condition | Action |
-|---|---|
-| Depth ≥ 8 | Mark node `exhausted`, do not generate children |
-| Node refuted AND all siblings refuted | Mark subtree `exhausted` |
-| Node inconclusive for 2nd time in same lineage | Mark node `exhausted` (no more retests) |
-| Parent confirmed but children all inconclusive × 2 | Mark children `exhausted`, still keep parent `confirmed` |
-
-### 21.6 Tree Serialization
-
-The full tree is serialized to JSON and checkpointed to the `research_campaigns.hypothesis_tree_json` column after every campaign round. This makes it possible to resume the campaign from the exact tree state after any interruption.
-
----
-
-## 22. Breakthrough Detection
-
-A breakthrough is a quantitative claim: the system found something that improves the target metric by at least the threshold over the measured baseline, with sufficient statistical confidence and replication. This must be defined at campaign start, measured rigorously during the run, and declared only when all criteria are met.
-
-### 22.1 BreakthroughCriteria Schema
-
-```python
-@dataclass
-class BreakthroughCriteria:
-    metric_name:           str     # "val_accuracy" | "loss" | "flops_per_token" | custom
-    baseline_value:        float   # measured at campaign start, not assumed
-    improvement_threshold: float   # 0.05 = 5% improvement required
-    direction:             str     # "higher_is_better" | "lower_is_better"
-    min_confidence:        float   # 0.85 — don't declare breakthrough without strong evidence
-    min_replications:      int     # 3 — must replicate before declaring
-
-    def is_breakthrough(self, finding: dict) -> bool:
-        if finding.get("confidence", 0) < self.min_confidence:
-            return False
-        if finding.get("replication_count", 1) < self.min_replications:
-            return False
-        metric_val = finding.get("metric_value") or finding.get(self.metric_name)
-        if metric_val is None:
-            return False
-        improvement = (metric_val - self.baseline_value) / max(abs(self.baseline_value), 1e-9)
-        if self.direction == "higher_is_better":
-            return improvement >= self.improvement_threshold
-        else:
-            return improvement <= -self.improvement_threshold
-```
-
-### 22.2 Evidence Requirements by Claim Size
-
-The think-act planner scales experiment design to match the claim being made:
-
-| Claim | Required evidence |
-|---|---|
-| "this technique improves accuracy" | 5+ independent runs, proper train/val/test split, comparison against baseline, p < 0.05, effect size > 0.2 |
-| "this technique generalizes across architectures" | Test on MLP + CNN + Transformer, same finding in all three, p < 0.05 in each |
-| "+40% improvement over baseline" | Baseline measured by same system, 10+ replications, p < 0.001, effect size > 1.0, ablation showing which component drives it |
-
-The planner receives the `BreakthroughCriteria` in its context so it knows whether the current hypothesis is a candidate for a breakthrough-level claim and can design accordingly.
-
-### 22.3 Replication Tracking
-
-Before a breakthrough can be declared, the finding must be replicated. The campaign loop tracks replications across hypotheses that share the same parent lineage:
-
-```python
-def count_replications(self, hypothesis_id: str) -> int:
-    """
-    Count how many confirmed hypotheses in the same lineage produced the same direction of effect.
-    Used to check min_replications before declaring breakthrough.
-    """
-    node = self.hypothesis_tree.nodes.get(hypothesis_id)
-    if node is None or node.parent_id is None:
-        return 1
-    # Count confirmed siblings (same parent, same direction)
-    parent = self.hypothesis_tree.nodes[node.parent_id]
-    confirmed_siblings = [
-        c for c in parent.children
-        if self.hypothesis_tree.nodes.get(c, HypothesisNode(...)).verdict == "confirmed"
-    ]
-    return len(confirmed_siblings)
-```
-
-### 22.4 Progressive Paper Writing
-
-The system does not wait for a breakthrough to write. At each milestone it produces an interim summary:
-
-| Trigger | Output |
-|---|---|
-| Campaign starts | Baseline paper: "Measuring X on Y, baseline = Z" |
-| 10% of hypothesis budget used | Interim findings: top confirmed hypotheses so far |
-| Breakthrough detected | Full paper: background, methods, findings, discussion |
-| Budget exhausted (no breakthrough) | Progress paper: best finding, improvement achieved, open questions |
-
-The paper writer receives the full `ResearchCampaign` state and the `HypothesisTree` so it can reconstruct the evolution of the investigation — which seeds grew into findings, which branches were pruned, and what the most promising direction turned out to be.
-
-### 22.5 Campaign v1 Target
-
-The first campaign to run after implementing this infrastructure:
-
-> **Question:** Find the optimal MLP architecture for MNIST under a 50,000 parameter budget that maximizes test accuracy.
-> **Baseline:** 784-60-10 single hidden layer (measured by system).
-> **Breakthrough threshold:** +5% accuracy improvement over baseline.
-> **Budget:** 4 hours compute.
-> **Success signal:** Tree reaches 50+ hypotheses, best finding improves baseline by >3%.
-
----
-
-*This document is the authoritative architecture reference for Propab. Implementation decisions that diverge from this spec must be recorded here with rationale before the divergence is merged.*
+## 16. Known gaps
+
+- No single end-to-end `run_campaign_loop` unit test (the loop is exercised
+  piecewise + validated live on a running stack).
+- Enzyme/graph domains have artifact-gate profiles but no dedicated worker
+  verification path yet (they use the generic path with per-domain
+  `min_metric_steps`).
+- Artifact-gate precision is logged from the in-pipeline null-test signal at
+  campaign end; a full independent permutation re-audit is run by the offline
+  audit scripts.
+- Lifetime-learning stores are JSON with last-writer-wins; moving them to
+  Postgres is a future item once campaigns run concurrently.

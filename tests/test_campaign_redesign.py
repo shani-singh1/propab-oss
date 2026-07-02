@@ -262,7 +262,7 @@ def test_stop_reason_and_should_stop_use_wall_clock() -> None:
 
 
 def test_campaign_meta_roundtrip_in_breakthrough_blob() -> None:
-    from services.orchestrator.campaign_loop import (
+    from propab.campaign_db import (
         _apply_campaign_meta_from_db,
         _breakthrough_criteria_for_db,
     )

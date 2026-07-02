@@ -42,6 +42,10 @@ _EXPANSION_INSTRUCTIONS: dict[str, str] = {
 3. Reduce confounds by isolating the variable of interest.""",
 }
 
+# KEPT: not used in the live campaign loop (Tier-2 synthesis replaces per-node
+# expansion). Retained because build_expand_prompt/parse_expanded_nodes still
+# encode the scope-gate-on-expansion behavior covered by
+# tests/test_scoped_tree_expansion.py and tests/test_research_quality.py.
 _EXPAND_PROMPT_TEMPLATE = """\
 This hypothesis was {verdict} with confidence {confidence:.2f}.
 
@@ -458,7 +462,10 @@ class HypothesisTree:
         question: str = "",
     ) -> str | None:
         """
-        Build the LLM prompt for expanding a node (legacy path — campaign synthesis replaces this).
+        Build the LLM prompt for expanding a node.
+
+        KEPT: not called from run_campaign_loop (Tier-2 synthesis replaces per-node
+        expansion). Retained for the scope-gate-on-expansion tests.
         """
         node = self._expansion_gate(node_id)
         if node is None:

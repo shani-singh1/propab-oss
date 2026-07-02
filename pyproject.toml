@@ -36,6 +36,11 @@ dependencies = [
 propab = "propab.cli:main"
 
 [project.optional-dependencies]
+materials = [
+  "pymatgen>=2023.8.10",
+  "spglib>=2.4.0",
+  "mp-api>=0.39.0",
+]
 dev = [
   "alembic>=1.13.2",
   "psycopg[binary]>=3.2.0",
@@ -55,8 +60,16 @@ packages = [
   "propab",
   "propab.anomaly_engine",
   "propab.domain_adapters",
+  "propab.domain_profiles",
+  "propab.domain_modules",
+  "propab.domain_modules.materials",
+  "propab.domain_modules.mandrake",
+  "propab.domain_modules.enzyme_kinetics",
+  "propab.domain_modules.graph_invariants",
+  "propab.domain_modules.math_combinatorics",
   "propab.tools",
   "propab.tools.mandrake",
+  "propab.tools.materials",
   "propab.tools.general_computation",
   "propab.tools.mathematics",
   "propab.tools.statistics",
@@ -76,8 +89,16 @@ packages = [
 propab = "packages/propab-core/propab"
 "propab.anomaly_engine" = "packages/propab-core/propab/anomaly_engine"
 "propab.domain_adapters" = "packages/propab-core/propab/domain_adapters"
+"propab.domain_profiles" = "packages/propab-core/propab/domain_profiles"
+"propab.domain_modules" = "packages/propab-core/propab/domain_modules"
+"propab.domain_modules.materials" = "packages/propab-core/propab/domain_modules/materials"
+"propab.domain_modules.mandrake" = "packages/propab-core/propab/domain_modules/mandrake"
+"propab.domain_modules.enzyme_kinetics" = "packages/propab-core/propab/domain_modules/enzyme_kinetics"
+"propab.domain_modules.graph_invariants" = "packages/propab-core/propab/domain_modules/graph_invariants"
+"propab.domain_modules.math_combinatorics" = "packages/propab-core/propab/domain_modules/math_combinatorics"
 "propab.tools" = "packages/propab-core/propab/tools"
 "propab.tools.mandrake" = "packages/propab-core/propab/tools/mandrake"
+"propab.tools.materials" = "packages/propab-core/propab/tools/materials"
 "propab.tools.general_computation" = "packages/propab-core/propab/tools/general_computation"
 "propab.tools.mathematics" = "packages/propab-core/propab/tools/mathematics"
 "propab.tools.statistics" = "packages/propab-core/propab/tools/statistics"

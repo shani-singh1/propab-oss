@@ -357,14 +357,21 @@ def filter_mechanism_anomalies(
 def belief_falsifiable_in_dataset(
     statement: str,
     *,
-    feature_count: int = 98,
-    n_samples: int = 56,
+    feature_count: int = 0,
+    n_samples: int = 0,
 ) -> tuple[bool, str]:
-    """Reject beliefs that cannot be killed by any experiment in the fixed dataset."""
+    """
+    Reject beliefs that cannot be killed by any experiment in a fixed dataset.
+
+    Domain-agnostic: a belief that "the feature set is fundamentally insufficient"
+    cannot be falsified within a fixed-feature dataset regardless of the domain.
+    ``feature_count``/``n_samples`` are optional domain-provided shape hints
+    (reserved for future power checks); no dataset-specific numbers live here.
+    """
     t = (statement or "").lower()
     if re.search(r"insufficient|inadequate|fundamentally insufficient|cannot capture", t):
-        if re.search(r"98.feature|feature set|biophysical set|current feature", t):
-            return False, "feature_insufficiency_unfalsifiable_in_fixed_98_feature_dataset"
+        if re.search(r"feature set|feature space|current feature|\d+[\s-]?feature", t):
+            return False, "feature_insufficiency_unfalsifiable_in_fixed_feature_dataset"
     if re.search(r"more research is needed|requires larger dataset|cannot be determined", t):
         return False, "vague_escape_hatch"
     if feature_count > 0 and n_samples > 0:

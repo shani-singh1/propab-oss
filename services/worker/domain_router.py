@@ -19,6 +19,7 @@ Domains (choose exactly one name from this list):
 - statistics: classical stats, regression, inference (not deep nets)
 - data_analysis: EDA, aggregation, cleaning, tabular summaries
 - general_computation: anything else — sandboxed code, parsing, glue logic
+- materials: matbench dielectric, crystal-system LOFO, composition/structural descriptors
 - mandrake: RT activity, biophysical features, leave-one-family-out (LOFO), Mandrake tabular data
 
 Important: if the research question involves COMPARING or RANKING approaches (e.g. "which optimizer
@@ -38,9 +39,24 @@ _ALLOWED = frozenset(
         "statistics",
         "data_analysis",
         "general_computation",
+        "materials",
         "mandrake",
     },
 )
+
+_DOMAIN_PROFILE_TAG = re.compile(r"\[domain_profile:(\w+)\]", re.IGNORECASE)
+
+
+def domain_from_profile_tag(question: str = "", payload: dict | None = None) -> str | None:
+    """Explicit [domain_profile:X] tag or payload field overrides keyword routing."""
+    m = _DOMAIN_PROFILE_TAG.search(question or "")
+    if m:
+        return m.group(1).lower()
+    if payload:
+        raw = str(payload.get("domain_profile") or "").strip().lower()
+        if raw:
+            return raw
+    return None
 _LEGACY_TO_PRIMARY: dict[str, str] = {
     "ml_modeling": "deep_learning",
     "computational_biology": "general_computation",
@@ -57,6 +73,20 @@ def _keyword_fallback_domain(hypothesis_text: str) -> str:
         return "algorithm_optimization"
     if any(k in t for k in ("baseline", "significance", "p-value", "confidence interval", "reproduc", "flops", "experiment grid")):
         return "ml_research"
+    if any(
+        k in t
+        for k in (
+            "matbench",
+            "dielectric",
+            "crystal system",
+            "crystal-system",
+            "materials project",
+            "formation energy",
+            "domain_profile:materials",
+            "magpie",
+        )
+    ):
+        return "materials"
     if any(k in t for k in ("lofo", "leave-one-family", "leave-one-group", "rt activity", "t70_raw", "t55_raw", "foldseek", "triad_best_rmsd", "evolutionary family")):
         return "mandrake"
     return "general_computation"
@@ -92,7 +122,13 @@ async def route_domain(
     session_id: str,
     hypothesis_id: str,
     question: str = "",
+    payload: dict | None = None,
 ) -> tuple[str, str]:
+    tag_domain = domain_from_profile_tag(question, payload)
+    if tag_domain:
+        domain = coerce_routed_domain(tag_domain)
+        if domain in _ALLOWED:
+            return domain, f"Explicit domain profile tag: {tag_domain}"
     prompt = DOMAIN_ROUTING_PROMPT.format(
         hypothesis_text=hypothesis_text,
         question=question or hypothesis_text,

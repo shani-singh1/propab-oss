@@ -106,9 +106,6 @@ class Settings(BaseSettings):
     campaign_breakthrough_threshold: float = 0.05   # 5% improvement to declare success
     campaign_min_confidence: float = 0.85           # min confidence for breakthrough
     campaign_min_replications: int = 3              # min confirmed replications
-    campaign_expand_on_confirmed: bool = True       # expand tree on confirmed findings
-    campaign_expand_on_refuted: bool = True         # generate alternatives on refuted
-    campaign_expand_on_inconclusive: bool = True    # legacy; synthesis replaces per-node expansion
     campaign_synthesis_enabled: bool = True         # fixes.md redesign: sole generation-conditioning step
     campaign_synthesis_trigger_multiplier: float = 1.0  # results threshold = max_concurrent * this
     campaign_expansion_merit_novelty_min: float = 0.25
@@ -205,9 +202,6 @@ def _apply_profile(s: Settings) -> None:
             "campaign_batch_size": 2,
             "campaign_max_hypotheses": 24,
             "campaign_checkpoint_every": 60,
-            "campaign_expand_on_confirmed": False,
-            "campaign_expand_on_refuted": False,
-            "campaign_expand_on_inconclusive": False,
             "campaign_frontier_evict_idle_sec": 45,
             "campaign_batch_max_wait_sec": 300,
             "campaign_prior_timeout_sec": 45,

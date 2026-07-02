@@ -129,6 +129,7 @@ def main() -> int:
             "direction": "higher_is_better",
             "min_confidence": 0.85,
             "min_replications": 2,
+            "min_confirmed_findings": 1,
         },
     }).encode("utf-8")
 

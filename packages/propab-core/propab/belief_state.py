@@ -120,8 +120,8 @@ class CampaignBeliefState:
         raw_beliefs: list[dict[str, Any]],
         *,
         tree_nodes: dict[str, Any] | None = None,
-        dataset_feature_count: int = 98,
-        dataset_n_samples: int = 56,
+        dataset_feature_count: int = 0,
+        dataset_n_samples: int = 0,
         metrics: Any | None = None,
     ) -> None:
         """Merge synthesis output into active beliefs, with Evidence Binding + admission gates."""

@@ -28,6 +28,14 @@ class InternalResearchBody(BaseModel):
     paper_ttl_days: int = Field(default=30, ge=1, le=365)
 
 
+class InternalCampaignBody(BaseModel):
+    campaign_id: str = Field(min_length=8)
+    # "start" for a fresh campaign, "resume" for a warm checkpoint. The API has
+    # already persisted the (possibly resume-mutated) campaign to Postgres before
+    # calling; the orchestrator reloads it by id and runs the loop in-process.
+    mode: str = Field(default="start", pattern="^(start|resume)$")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     engine = create_engine(settings.database_url)
@@ -74,3 +82,33 @@ async def internal_research(
         session_factory=request.app.state.session_factory,
     )
     return {"status": "accepted", "session_id": body.session_id}
+
+
+@app.post("/internal/campaign")
+async def internal_campaign(
+    request: Request,
+    body: InternalCampaignBody,
+    background_tasks: BackgroundTasks,
+    _: None = Depends(_verify_internal),
+) -> dict[str, str]:
+    """Run a campaign loop in the orchestrator process (off the API process).
+
+    The campaign has already been persisted by the API (create) or mutated and
+    re-persisted (resume) before this call, so the orchestrator reconstructs the
+    full campaign from Postgres by id. Running here means an API restart cannot
+    kill an in-flight campaign — the loop's lifecycle is owned by the orchestrator.
+    """
+    from propab.campaign_db import db_load_campaign
+    from services.orchestrator.campaign_loop import run_campaign_loop
+
+    campaign = await db_load_campaign(body.campaign_id, request.app.state.session_factory)
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    background_tasks.add_task(
+        run_campaign_loop,
+        campaign,
+        session_factory=request.app.state.session_factory,
+        emitter=request.app.state.emitter,
+    )
+    return {"status": "accepted", "campaign_id": body.campaign_id, "mode": body.mode}

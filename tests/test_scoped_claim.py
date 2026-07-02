@@ -87,6 +87,22 @@ def test_scope_integrity_pass_on_matching_lofo():
     assert r.scope_gate_result == "PASS"
 
 
+def test_materials_scope_boilerplate_passes_when_lofo_executed():
+    from propab.scoped_claim import ExecutedOOD, check_scope_executed_integrity, infer_domain_scope_template
+
+    q = "[domain_profile:materials] matbench dielectric crystal system LOFO"
+    scope = infer_domain_scope_template(q)
+    executed = ExecutedOOD(
+        train_contexts=["cubic", "tetragonal"],
+        held_out_contexts=["orthorhombic"],
+        metric_used="lofo_r2",
+        evaluation_code_hash="x",
+        summary="LOFO train=['cubic','tetragonal'] hold_out=['orthorhombic'] label-shuffle permutation",
+    )
+    r = check_scope_executed_integrity(scope, executed, question=q)
+    assert r.scope_gate_result == "PASS"
+
+
 def test_scope_integrity_fail_on_mismatch():
     from propab.scoped_claim import ExecutedOOD, ScopedClaim, check_scope_executed_integrity
     scope = ScopedClaim(

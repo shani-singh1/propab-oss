@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from propab.belief_state import CampaignBeliefState, ClosedBelief
 from propab.campaign import (
     ACC_METRIC_PLAUSIBILITY_MAX,
     BreakthroughCriteria,
@@ -25,19 +26,60 @@ from propab.campaign_resume import (
     backfill_belief_state_if_empty,
     validate_resume_readiness,
 )
+from propab.campaign_db import (
+    db_load_campaign,
+    db_load_session_events_tail,
+    db_save_campaign,
+)
 from propab.config import settings
 from propab.events import EventEmitter
 from propab.types import EventType
 from services.api.app.deps import get_emitter, get_session_factory
-from services.orchestrator.campaign_loop import (
-    db_load_campaign,
-    db_load_session_events_tail,
-    db_save_campaign,
-    run_campaign_loop,
-)
-from services.orchestrator.research_loop import run_research_loop
 
 router = APIRouter(tags=["research"])
+
+
+async def _dispatch_campaign(
+    *,
+    campaign_id: str,
+    mode: str,
+    campaign: ResearchCampaign,
+    background_tasks: BackgroundTasks,
+    session_factory: async_sessionmaker,
+    emitter: EventEmitter,
+) -> None:
+    """Run a campaign loop off the API process.
+
+    Delegates to the orchestrator service over HTTP when ``orchestrator_url`` is
+    configured (production), so an API restart cannot kill an in-flight campaign.
+    Falls back to an in-API BackgroundTask only for local/dev/test where no
+    orchestrator is configured.
+    """
+    orch = (settings.orchestrator_url or "").strip()
+    if orch:
+        body = {"campaign_id": campaign_id, "mode": mode}
+        headers: dict[str, str] = {}
+        if (settings.orchestrator_internal_token or "").strip():
+            headers["Authorization"] = f"Bearer {settings.orchestrator_internal_token.strip()}"
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                r = await client.post(f"{orch.rstrip('/')}/internal/campaign", json=body, headers=headers)
+            r.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(status_code=502, detail=f"Orchestrator error: {exc.response.text[:500]}") from exc
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"Orchestrator unreachable: {exc}") from exc
+    else:
+        # Lazy import: only the dev/test fallback runs the loop in-process, so the
+        # API package has no module-level dependency on the orchestrator service.
+        from services.orchestrator.campaign_loop import run_campaign_loop
+
+        background_tasks.add_task(
+            run_campaign_loop,
+            campaign,
+            session_factory=session_factory,
+            emitter=emitter,
+        )
 
 
 class ResearchConfig(BaseModel):
@@ -110,6 +152,10 @@ async def create_research_session(
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=f"Orchestrator unreachable: {exc}") from exc
     else:
+        # Lazy import keeps the API free of a module-level orchestrator dependency;
+        # this in-process fallback only runs when no orchestrator URL is configured.
+        from services.orchestrator.research_loop import run_research_loop
+
         background_tasks.add_task(
             run_research_loop,
             session_id=session_id,
@@ -138,6 +184,7 @@ class BreakthroughCriteriaRequest(BaseModel):
     # Optional declared instrumentation ceiling for higher_is_better metrics. If omitted,
     # accuracy-style criteria adopt the default accuracy ceiling; other metrics stay unbounded.
     plausibility_max: float | None = Field(default=None, ge=0.0, le=1.0)
+    min_confirmed_findings: int | None = Field(default=None, ge=1, le=50)
 
 
 class CampaignRequest(BaseModel):
@@ -152,6 +199,18 @@ class CampaignRequest(BaseModel):
     seed_source: str = Field(default="default", pattern="^(default|anomaly)$")
     anomaly_artifacts_dir: str | None = Field(default=None)
     max_hypotheses: int | None = Field(default=None, ge=1, le=500)
+    literature_prior: dict[str, Any] | None = Field(
+        default=None,
+        description="Pre-built prior_json for campaign 2 A/B (skips LLM prior build when set)",
+    )
+    closed_beliefs: list[dict[str, str]] | None = Field(
+        default=None,
+        description="Belief subspaces to close at launch (statement + reason)",
+    )
+    orchestrator_directive: str | None = Field(
+        default=None,
+        description="Pinned human message for belief_state at campaign start",
+    )
 
 
 class CampaignResponse(BaseModel):
@@ -208,6 +267,7 @@ async def create_campaign(
         min_confidence=bc.min_confidence,
         min_replications=bc.min_replications,
         plausibility_max=plausibility_max,
+        min_confirmed_findings=bc.min_confirmed_findings,
     )
     campaign = ResearchCampaign(
         id=campaign_id,
@@ -220,25 +280,52 @@ async def create_campaign(
         anomaly_artifacts_dir=request.anomaly_artifacts_dir,
         max_hypotheses_cap=request.max_hypotheses,
     )
+    if request.closed_beliefs:
+        campaign.belief_state.closed_beliefs.extend(
+            ClosedBelief(
+                statement=str(item.get("statement") or ""),
+                reason=str(item.get("reason") or ""),
+            )
+            for item in request.closed_beliefs
+            if item.get("statement")
+        )
+    if request.orchestrator_directive:
+        campaign.belief_state.add_human_message(request.orchestrator_directive)
 
     # Persist initial state so it can be queried immediately
     await db_save_campaign(campaign, session_factory)
 
+    prior_json_str: str | None = None
+    if request.literature_prior:
+        prior_json_str = json.dumps(request.literature_prior, ensure_ascii=False)
+
     # Also create a research_sessions row so the SSE stream endpoint can find it
     async with session_factory() as db:
-        await db.execute(
-            text("""
-                INSERT INTO research_sessions (id, question, status, stage)
-                VALUES (:id, :question, 'running', 'campaign')
-                ON CONFLICT (id) DO NOTHING
-            """),
-            {"id": campaign_id, "question": request.question},
-        )
+        if prior_json_str:
+            await db.execute(
+                text("""
+                    INSERT INTO research_sessions (id, question, status, stage, prior_json)
+                    VALUES (:id, :question, 'running', 'campaign', CAST(:prior_json AS jsonb))
+                    ON CONFLICT (id) DO UPDATE SET prior_json = EXCLUDED.prior_json
+                """),
+                {"id": campaign_id, "question": request.question, "prior_json": prior_json_str},
+            )
+        else:
+            await db.execute(
+                text("""
+                    INSERT INTO research_sessions (id, question, status, stage)
+                    VALUES (:id, :question, 'running', 'campaign')
+                    ON CONFLICT (id) DO NOTHING
+                """),
+                {"id": campaign_id, "question": request.question},
+            )
         await db.commit()
 
-    background_tasks.add_task(
-        run_campaign_loop,
-        campaign,
+    await _dispatch_campaign(
+        campaign_id=campaign_id,
+        mode="start",
+        campaign=campaign,
+        background_tasks=background_tasks,
         session_factory=session_factory,
         emitter=emitter,
     )
@@ -414,9 +501,11 @@ async def resume_campaign(
         )
         await db.commit()
 
-    background_tasks.add_task(
-        run_campaign_loop,
-        campaign,
+    await _dispatch_campaign(
+        campaign_id=campaign_id,
+        mode="resume",
+        campaign=campaign,
+        background_tasks=background_tasks,
         session_factory=session_factory,
         emitter=emitter,
     )

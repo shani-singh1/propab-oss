@@ -36,7 +36,6 @@ from services.worker.sandbox_code_rewrite import (
 from services.worker.significance import (
     any_significance_tool_ran,
     check_significance,
-    classify_verdict,
     scan_verification,
 )
 from services.worker.think_act import (
@@ -188,6 +187,7 @@ _SIGNIFICANCE_TOOL_NAMES = frozenset({
 })
 
 _MANDRAKE_TOOL_NAMES = frozenset({"mandrake_verification"})
+_MATERIALS_TOOL_NAMES = frozenset({"materials_verification"})
 
 _GENERIC_STATS_FOR_MANDRAKE = _SIGNIFICANCE_TOOL_NAMES
 
@@ -484,6 +484,54 @@ def _build_mandrake_evidence(
     return evidence_obj
 
 
+def _build_materials_evidence(
+    *,
+    output: dict[str, Any],
+    verdict: str,
+    reason: str,
+    baseline: dict[str, Any],
+) -> dict[str, Any]:
+    metric_value = output.get("mean_r2", output.get("lofo_r2"))
+    if metric_value is not None:
+        metric_value = float(metric_value)
+    p_value = output.get("permutation_p")
+    if p_value is not None:
+        p_value = float(p_value)
+    baseline_value = baseline.get("value")
+    if baseline_value is None:
+        fam = output.get("family_baseline_r2")
+        baseline_value = float(fam) if fam is not None else None
+    lofo_gap = output.get("lofo_gap")
+    effect_size = float(lofo_gap) if lofo_gap is not None else None
+    evidence_obj: dict[str, Any] = {
+        "metric_value": metric_value,
+        "baseline_value": baseline_value,
+        "p_value": p_value,
+        "effect_size": effect_size,
+        "lofo_r2": metric_value,
+        "lofo_gap": effect_size,
+        "n_samples": output.get("n_samples"),
+        "n_families": output.get("n_families"),
+        "group_column": output.get("group_column") or "crystal_system",
+        "methodology": output.get("methodology") or "LOFO",
+        "feature_subset": output.get("feature_subset"),
+        "n_tool_steps": 1,
+        "n_metric_steps": 1 if metric_value is not None else 0,
+        "verdict_reason": reason,
+        "verification_tool": "materials_verification",
+        "label_shuffle_permutation_p": output.get("label_shuffle_permutation_p"),
+        "label_shuffle_null_p95": output.get("label_shuffle_null_p95"),
+        "family_leakage_confirmed": output.get("family_leakage_confirmed"),
+    }
+    if verdict == "confirmed":
+        evidence_obj["verified_true_steps"] = 1
+    elif verdict == "refuted":
+        evidence_obj["verified_false_steps"] = 1
+    if metric_value is not None and baseline_value is not None:
+        evidence_obj["delta"] = metric_value - float(baseline_value)
+    return evidence_obj
+
+
 def attach_scope_integrity(
     evidence_obj: dict[str, Any],
     *,
@@ -691,7 +739,7 @@ async def _hydrate_hypothesis_from_campaign(
     if not campaign_node_id:
         return hypothesis
     try:
-        from services.orchestrator.campaign_loop import db_load_campaign
+        from propab.campaign_db import db_load_campaign
 
         campaign = await db_load_campaign(session_id, session_factory)
         node = campaign.hypothesis_tree.nodes.get(campaign_node_id)
@@ -891,6 +939,188 @@ async def _mandrake_verification_path(
     return result_dict
 
 
+async def _materials_verification_path(
+    *,
+    payload: dict,
+    hypothesis: dict,
+    hypothesis_id: str,
+    campaign_node_id: str | None,
+    session_id: str,
+    question: str,
+    session_factory: async_sessionmaker,
+    emitter: EventEmitter,
+    registry: ToolRegistry,
+    trace_pointer: str,
+    started: float,
+    baseline: dict,
+) -> dict:
+    """Run crystal-system LOFO via materials_verification on matbench dielectric."""
+    from propab.domain_adapters.materials_adapter import (
+        MaterialsExperimentSpec,
+        classify_materials_verdict,
+    )
+    from propab.artifact_verification import (
+        evidence_context_from_hypothesis,
+        merge_artifact_into_evidence,
+        run_artifact_gate,
+    )
+
+    spec = MaterialsExperimentSpec.from_hypothesis(hypothesis, question=question)
+    art_dir = f"/data/propab/sessions/{session_id}/materials/{hypothesis_id}"
+    tool_result = registry.call(
+        "materials_verification",
+        {**spec.to_tool_params(), "artifacts_dir": art_dir},
+    )
+
+    await emitter.emit(
+        session_id=session_id,
+        event_type=EventType.TOOL_CALLED,
+        step=f"experiment.{hypothesis_id}.materials",
+        payload={"tool": "materials_verification", "features": spec.feature_subset},
+        hypothesis_id=hypothesis_id,
+    )
+
+    gate = None
+    if not tool_result.success or not isinstance(tool_result.output, dict):
+        err = tool_result.error.message if tool_result.error else "materials_verification failed"
+        await emitter.emit(
+            session_id=session_id,
+            event_type=EventType.TOOL_ERROR,
+            step=f"experiment.{hypothesis_id}.materials",
+            payload={"tool": "materials_verification", "error": err},
+            hypothesis_id=hypothesis_id,
+        )
+        verdict, reason, confidence = "inconclusive", f"LOFO experiment failed: {err}", 0.0
+        output: dict = {}
+    else:
+        output = tool_result.output
+        await emitter.emit(
+            session_id=session_id,
+            event_type=EventType.TOOL_RESULT,
+            step=f"experiment.{hypothesis_id}.materials",
+            payload={"tool": "materials_verification", "output": output},
+            hypothesis_id=hypothesis_id,
+        )
+        verdict, reason, confidence = classify_materials_verdict(str(hypothesis.get("text") or ""), output)
+        ctx = evidence_context_from_hypothesis(
+            str(hypothesis.get("text") or ""),
+            {
+                "metric_value": output.get("mean_r2"),
+                "lofo_r2": output.get("lofo_r2"),
+                "lofo_gap": output.get("lofo_gap"),
+                "p_value": output.get("permutation_p"),
+                "n_samples": output.get("n_samples"),
+                "n_families": output.get("n_families"),
+                "group_column": output.get("group_column"),
+                "methodology": "LOFO",
+                "feature_subset": output.get("feature_subset"),
+                "label_shuffle_permutation_p": output.get("label_shuffle_permutation_p"),
+                "label_shuffle_null_p95": output.get("label_shuffle_null_p95"),
+            },
+            methodology="LOFO",
+            domain_bucket="materials",
+        )
+        gate = run_artifact_gate(
+            ctx, output, question=question, payload=payload if isinstance(payload, dict) else None,
+        )
+        if verdict == "confirmed" and gate.verdict != "confirmed":
+            verdict, reason, confidence = gate.verdict, gate.verdict_reason, gate.confidence
+        elif verdict == "confirmed":
+            reason = gate.verdict_reason
+
+    evidence_obj = _build_materials_evidence(
+        output=output, verdict=verdict, reason=reason, baseline=baseline,
+    )
+    evidence_obj = attach_scope_integrity(
+        evidence_obj,
+        hypothesis_text=str(hypothesis.get("text") or ""),
+        test_methodology=str(hypothesis.get("test_methodology") or spec.methodology),
+        experiment_output=output,
+        question=question,
+        code=str(output.get("executed_code") or ""),
+    )
+    if gate is not None:
+        evidence_obj = merge_artifact_into_evidence(evidence_obj, gate)
+    from propab.scoped_claim import apply_ood_gate_to_verdict
+    verdict, reason = apply_ood_gate_to_verdict(
+        verdict, reason, evidence_obj,
+        hypothesis_text=str(hypothesis.get("text") or ""),
+        test_methodology=str(hypothesis.get("test_methodology") or spec.methodology),
+    )
+    if evidence_obj.get("scope_gate_result") == "FAIL" and verdict == "confirmed":
+        verdict = "inconclusive"
+        reason = f"scope integrity fail: {evidence_obj.get('scope_integrity', {}).get('reason', '?')}"
+    evidence_obj["verdict_reason"] = reason
+    evidence = (
+        f"evidence={json.dumps(evidence_obj, ensure_ascii=False)}; "
+        f"materials_verification; LOFO={output.get('lofo_r2')}; "
+        f"gap={output.get('lofo_gap')}; label_p95={output.get('label_shuffle_null_p95')}; "
+        f"features={output.get('feature_subset', spec.feature_subset)}"
+    )
+    key_finding = str(hypothesis.get("text") or "")[:300] if verdict == "confirmed" else None
+
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    await _insert_experiment_step_tool(
+        session_factory,
+        step_id=str(uuid4()),
+        hypothesis_id=hypothesis_id,
+        step_index=0,
+        tool_name="materials_verification",
+        params={**spec.to_tool_params(), "artifacts_dir": art_dir},
+        result_output=output if output else None,
+        result_error=(
+            {"message": tool_result.error.message}
+            if not tool_result.success and tool_result.error
+            else None
+        ),
+        duration_ms=duration_ms,
+    )
+
+    await _update_hypothesis(
+        session_factory,
+        hypothesis_id,
+        status="completed",
+        verdict=verdict,
+        confidence=confidence,
+        evidence_summary=evidence,
+        key_finding=key_finding,
+        tool_trace_id=trace_pointer,
+    )
+    await emitter.emit(
+        session_id=session_id,
+        event_type=EventType.AGENT_COMPLETED,
+        step=f"experiment.{hypothesis_id}.complete",
+        payload={
+            "verdict": verdict,
+            "confidence": confidence,
+            "sig_gate_passed": verdict in {"confirmed", "refuted"},
+            "materials": True,
+            "lofo_r2": output.get("lofo_r2"),
+        },
+        hypothesis_id=hypothesis_id,
+    )
+
+    metric_key = str(baseline.get("metric_name") or "lofo_r2").strip()
+    result_dict: dict[str, Any] = {
+        "hypothesis_id": hypothesis_id,
+        "campaign_node_id": campaign_node_id,
+        "verdict": verdict,
+        "confidence": confidence,
+        "evidence_summary": evidence,
+        "key_finding": key_finding,
+        "tool_trace_id": trace_pointer,
+        "figures": [],
+        "duration_sec": round(time.perf_counter() - started, 3),
+        "failure_reason": None if verdict != "inconclusive" else reason,
+        "learned": reason,
+        "metric_value": output.get("lofo_r2"),
+        "materials_artifacts_dir": art_dir,
+    }
+    if output.get("lofo_r2") is not None:
+        result_dict[metric_key] = output.get("lofo_r2")
+    return result_dict
+
+
 async def run_sub_agent_async(payload: dict) -> dict:
     """
     Execute sub-agent trace with think-act or heuristic execution.
@@ -952,10 +1182,25 @@ async def run_sub_agent_async(payload: dict) -> dict:
             session_factory=session_factory,
         )
 
-        from propab.domain_adapters.mandrake_adapter import is_mandrake_campaign
+        # Domain routing goes through the plugin registry — the worker never
+        # inspects the question for domain keywords itself. Plugins own their own
+        # detection (DomainPlugin.matches). This local table binds a resolved
+        # plugin to the worker-side verification coroutine, which needs worker-only
+        # objects (emitter, redis, registry) and therefore cannot live in core.
+        from propab.domain_modules.registry import resolve_domain_plugin
 
-        if is_mandrake_campaign(question=question, payload=payload):
-            result = await _mandrake_verification_path(
+        _domain_plugin = resolve_domain_plugin(question=question, payload=payload)
+        _worker_verification_paths = {
+            "materials": _materials_verification_path,
+            "mandrake": _mandrake_verification_path,
+        }
+        _worker_path = (
+            _worker_verification_paths.get(_domain_plugin.domain_id)
+            if _domain_plugin is not None
+            else None
+        )
+        if _worker_path is not None:
+            result = await _worker_path(
                 payload=payload,
                 hypothesis=hypothesis,
                 hypothesis_id=hypothesis_id,
@@ -1084,6 +1329,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
                 session_id=session_id,
                 hypothesis_id=hypothesis_id,
                 question=question,
+                payload=payload,
             )
         sandbox_timeout_sec = effective_sandbox_timeout_sec(
             domain,
@@ -1099,13 +1345,10 @@ async def run_sub_agent_async(payload: dict) -> dict:
             hypothesis_id=hypothesis_id,
         )
 
-        # Mandrake campaigns: mandrake_verification only (no generic stats merge)
-        from propab.domain_adapters.mandrake_adapter import is_mandrake_campaign as _is_mandrake
-
-        if _is_mandrake(question=question, payload=payload):
-            specs = registry.get_cluster("mandrake") or []
-        else:
-            specs = registry.get_cluster_with_significance(domain)
+        # Materials/mandrake campaigns take their dedicated verification path above
+        # and return before reaching here; every remaining campaign uses the routed
+        # domain's tool cluster (plus significance-capable tools).
+        specs = registry.get_cluster_with_significance(domain)
         if not specs:
             specs = registry.get_cluster_with_significance("general_computation")
         available_tools = [str(s["name"]) for s in specs]
@@ -1837,56 +2080,38 @@ async def run_sub_agent_async(payload: dict) -> dict:
         sig_result = check_significance(successful_tool_outputs)
 
         _vesc = payload.get("verification_escalation") if isinstance(payload.get("verification_escalation"), dict) else {}
-        min_metric_steps = int(_vesc.get("min_metric_steps") or getattr(settings, "min_metric_steps_for_confirm", 2))
+        # Per-domain confirmation threshold: read the base from the resolved domain
+        # plugin's confirmation_criteria() (ownership contract), falling back to the
+        # global setting when no scientific-domain plugin owns this campaign.
+        _base_metric_steps = int(getattr(settings, "min_metric_steps_for_confirm", 2))
+        if _domain_plugin is not None:
+            try:
+                _crit = _domain_plugin.confirmation_criteria()
+                _base_metric_steps = int(_crit.get("min_metric_steps_for_confirm") or _base_metric_steps)
+            except Exception:
+                pass
+        min_metric_steps = int(_vesc.get("min_metric_steps") or _base_metric_steps)
         if _vesc.get("require_replication"):
             min_metric_steps = max(min_metric_steps, 3)
         if _vesc.get("extra_significance_rounds"):
             min_metric_steps = max(min_metric_steps, 2)
 
-        verdict, verdict_reason = classify_verdict(
+        from propab.verdict_pipeline import run_verdict_pipeline
+
+        campaign_context = {
+            "question": question,
+            "payload": payload if isinstance(payload, dict) else None,
+            "hyp_text": str(hyp_text or ""),
+            "tools_used": successful_tool_names,
+            "domain_bucket": str(payload.get("domain_bucket") or payload.get("domain") or ""),
+            "min_metric_steps": min_metric_steps,
+            "sig_result": sig_result,
+            "test_methodology": str(hypothesis.get("test_methodology") or ""),
+        }
+        verdict, confidence, verdict_reason = run_verdict_pipeline(
             evidence_obj,
-            sig_result,
-            min_metric_steps_for_confirm=min_metric_steps,
-        )
-        from propab.artifact_verification import (
-            evidence_context_from_hypothesis,
-            merge_artifact_into_evidence,
-            run_artifact_gate,
-        )
-        _domain = str(payload.get("domain_bucket") or payload.get("domain") or "")
-        ctx = evidence_context_from_hypothesis(
-            str(hyp_text or ""),
-            evidence_obj,
-            tools_used=successful_tool_names,
-            domain_bucket=_domain or None,
-        )
-        gate = run_artifact_gate(
-            ctx,
-            None,
-            question=question,
-            payload=payload if isinstance(payload, dict) else None,
-        )
-        evidence_obj = merge_artifact_into_evidence(evidence_obj, gate)
-        if verdict == "confirmed" and gate.verdict != "confirmed":
-            verdict, verdict_reason = gate.verdict, gate.verdict_reason
-        elif verdict == "confirmed":
-            verdict_reason = gate.verdict_reason
-        from propab.scoped_claim import (
-            apply_ood_gate_to_verdict,
-            check_ood_evidence,
-            parse_scope_from_methodology,
-        )
-        _scope = parse_scope_from_methodology(
-            str(hyp_text or ""),
-            str(hypothesis.get("test_methodology") or ""),
-        )
-        _ood_ok, _ood_reason = check_ood_evidence(evidence_obj, _scope)
-        evidence_obj["ood_passed"] = _ood_ok
-        evidence_obj["ood_reason"] = _ood_reason
-        verdict, verdict_reason = apply_ood_gate_to_verdict(
-            verdict, verdict_reason, evidence_obj,
-            hypothesis_text=str(hyp_text or ""),
-            test_methodology=str(hypothesis.get("test_methodology") or ""),
+            hypothesis=hypothesis,
+            campaign_context=campaign_context,
         )
         evidence_obj = attach_scope_integrity(
             evidence_obj,
@@ -1902,14 +2127,12 @@ async def run_sub_agent_async(payload: dict) -> dict:
         claim_type = classify_claim_type(evidence_obj, verdict, hypothesis_text=str(hyp_text or ""))
         if claim_type:
             evidence_obj["claim_type"] = claim_type
-        # Deterministic verification carries its own (high) confidence; it has no
-        # metric steps, so the statistical confidence path would wrongly report 0.0.
         if int(evidence_obj.get("verified_true_steps") or 0) > 0 and verdict == "confirmed":
-            confidence = 0.95
+            confidence = max(confidence, 0.95)
         elif int(evidence_obj.get("verified_false_steps") or 0) > 0 and verdict == "refuted":
-            confidence = 0.95
-        else:
-            confidence = 0.0 if evidence_obj["n_metric_steps"] == 0 else _compute_confidence(evidence_obj)
+            confidence = max(confidence, 0.95)
+        elif confidence == 0.0 and evidence_obj.get("n_metric_steps", 0) > 0:
+            confidence = _compute_confidence(evidence_obj)
 
         sig_summary = {
             "gate_passed": sig_result.gate_passed,

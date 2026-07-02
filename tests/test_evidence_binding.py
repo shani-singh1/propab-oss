@@ -118,3 +118,79 @@ def test_insufficiency_subject_tags() -> None:
 def test_lofo_node_tags() -> None:
     tags = infer_test_targets(LOFO_NODE["text"])
     assert "cross_family_lofo" in tags
+
+
+# --- Checklist 3: Evidence Binding at WRITE TIME on a real synthesis pass ---
+
+REDUNDANCY_BELIEF = (
+    "Observed intra-family predictive signals are artifacts of sequence redundancy; "
+    "model performance collapses under clustered split holdout."
+)
+
+# A citation that has nothing to do with the belief's claim — a fabricated
+# "supporting" node from an unrelated subject. Binding must strip it before the
+# belief is ever persisted to supporting_nodes.
+FABRICATED_UNRELATED_NODE = {
+    "id": "fabricated-vit-1",
+    "text": (
+        "Does adding dropout to a vision transformer improve ImageNet top-1 accuracy? "
+        "Population: ImageNet images. OOD test: held-out image classes."
+    ),
+    "verdict": "confirmed",
+    "claim_scope": {
+        "population": "ImageNet images",
+        "claimed_generalization": "vision models",
+        "ood_test": "held-out image classes",
+    },
+}
+
+
+def test_synthesis_pass_rejects_fabricated_citation_before_persist() -> None:
+    """A fabricated citation must be removed at write time, on the real synthesis pass.
+
+    This drives ``apply_synthesis_to_frontier`` (the orchestrator write path) rather
+    than calling the binding check in isolation, proving rejection happens before the
+    BeliefObject is persisted to ``supporting_nodes`` (ownership contract: Evidence
+    Binding — "citations that fail binding are removed before the citing object is
+    persisted").
+    """
+    from propab.campaign_synthesis import apply_synthesis_to_frontier
+    from propab.hypothesis_tree import HypothesisTree
+
+    tree = HypothesisTree()
+    # apply_synthesis_to_frontier accepts nodes that are dicts or objects with
+    # to_dict(); inject the relevant + fabricated nodes directly.
+    tree.nodes = {  # type: ignore[assignment]
+        WITHIN_FAMILY_NODE["id"]: WITHIN_FAMILY_NODE,
+        FABRICATED_UNRELATED_NODE["id"]: FABRICATED_UNRELATED_NODE,
+    }
+    state = CampaignBeliefState()
+    parsed = {
+        "beliefs": [
+            {
+                "statement": REDUNDANCY_BELIEF,
+                "confidence": "weak",
+                "status": "active",
+                "supporting_nodes": [
+                    WITHIN_FAMILY_NODE["id"],
+                    FABRICATED_UNRELATED_NODE["id"],
+                ],
+            },
+        ],
+        "frontier_candidates": [],
+    }
+
+    _added, metrics = apply_synthesis_to_frontier(
+        tree,
+        state,
+        parsed,
+        question="RT activity sequence redundancy under clustered split",
+        generation=1,
+    )
+
+    assert len(state.active_beliefs) == 1
+    belief = state.active_beliefs[0]
+    # Relevant citation survives; fabricated one is stripped BEFORE persistence.
+    assert WITHIN_FAMILY_NODE["id"] in belief.supporting_nodes
+    assert FABRICATED_UNRELATED_NODE["id"] not in belief.supporting_nodes
+    assert int(metrics.get("binding_rejected_count") or 0) >= 1

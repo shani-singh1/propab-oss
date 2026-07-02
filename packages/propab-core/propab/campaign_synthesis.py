@@ -226,6 +226,7 @@ async def run_campaign_synthesis_pass(
     generation: int,
     prior_snippets: list[str] | None = None,
     emitter: Any | None = None,
+    session_factory: Any | None = None,
 ) -> tuple[list[HypothesisNode], dict[str, Any]]:
     """Tier-2 batched synthesis: one LLM call per trigger."""
     completed_ids = {
@@ -257,6 +258,20 @@ async def run_campaign_synthesis_pass(
 
     belief_state.results_since_last_synthesis = 0
     belief_state.last_synthesis_node_ids = list(completed_ids)
+
+    # Ownership-contracts observability: persist this round's health metrics
+    # (duplicate rate, evidence-binding rejection rate, citation integrity,
+    # belief stability). Never blocks synthesis if logging fails.
+    if session_factory is not None:
+        from propab.health_metrics import log_synthesis_health
+
+        await log_synthesis_health(
+            session_factory,
+            campaign_id=campaign_id,
+            generation=generation,
+            metrics=metrics,
+            active_belief_statements=[b.statement for b in belief_state.active_beliefs],
+        )
 
     if emitter is not None:
         from propab.types import EventType

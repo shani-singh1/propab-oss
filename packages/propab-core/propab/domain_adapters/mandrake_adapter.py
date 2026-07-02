@@ -192,8 +192,6 @@ class MandrakeAdapter:
 
 def is_mandrake_campaign(*, question: str = "", payload: dict[str, Any] | None = None) -> bool:
     q = (question or "").lower()
-    if payload and str(payload.get("seed_source") or "") == "anomaly":
-        return True
     if payload and str(payload.get("domain") or "") == "mandrake":
         return True
     markers = ("rt activity", "reverse transcriptase", "evolutionary family", "biophysical propert")

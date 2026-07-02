@@ -21,6 +21,7 @@ services:
       - ./artifacts:/app/artifacts
       - ./demo:/app/demo
       - ./mandrake-data:/app/mandrake-data
+      - ./data/v1_candidates:/app/data/v1_candidates
       - ./prompts:/app/prompts
 
   orchestrator:
@@ -37,6 +38,7 @@ services:
       - ./artifacts:/app/artifacts
       - ./demo:/app/demo
       - ./mandrake-data:/app/mandrake-data
+      - ./data/v1_candidates:/app/data/v1_candidates
       - ./prompts:/app/prompts
 
   worker:
@@ -51,4 +53,5 @@ services:
       - ./artifacts:/app/artifacts
       - ./demo:/app/demo
       - ./mandrake-data:/app/mandrake-data
+      - ./data/v1_candidates:/app/data/v1_candidates
       - ./prompts:/app/prompts

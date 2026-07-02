@@ -30,10 +30,22 @@ TEST_HELD_OUT_GROUP = "held_out_group"
 TEST_ALTERNATE_SIMULATOR = "alternate_simulator"
 TEST_ROBUSTNESS = "robustness_analysis"
 
-_NETWORK_MARKERS = (
-    "network", "graph", "contagion", "sis", "sir", "topology", "modular",
-    "scale-free", "barab", "erdős", "erdos", "k-shell", "k-core", "diffusion",
-)
+def _network_markers() -> tuple[str, ...]:
+    """Network/graph artifact vocabulary, owned by the network-diffusion plugin.
+
+    Core no longer hardcodes per-domain keywords: it asks the domain registry for
+    the marker set. Falls back to an empty set if the plugin is unavailable, in
+    which case network detection relies on ``domain_bucket == "graphs"`` alone.
+    """
+    try:
+        from propab.domain_modules.registry import get_domain_plugin
+
+        plugin = get_domain_plugin("network_diffusion")
+        return tuple(getattr(plugin, "artifact_question_markers", ()) or ()) if plugin else ()
+    except Exception:
+        return ()
+
+
 _SIM_MARKERS = ("simulation", "simulator", "monte carlo", "synthetic", "sandbox")
 _GROUP_MARKERS = ("family", "group", "lofo", "logo", "leave-one", "cross-group", "topology")
 
@@ -141,7 +153,7 @@ def generate_artifact_models(ctx: EvidenceContext) -> list[ArtifactModel]:
     models: list[ArtifactModel] = []
 
     has_groups = (ctx.n_groups or 0) >= 2 or ctx.group_column is not None
-    is_network = any(m in text for m in _NETWORK_MARKERS) or ctx.domain_bucket == "graphs"
+    is_network = any(m in text for m in _network_markers()) or ctx.domain_bucket == "graphs"
     is_lofo = "lofo" in method or "leave-one" in method or "logo" in method
     is_sim = any(m in text for m in _SIM_MARKERS) or any("code" in t for t in ctx.tools_used)
     n = ctx.n_samples or 0
@@ -653,7 +665,7 @@ def audit_confirmed_row(row: dict[str, Any], experiment: dict[str, Any] | None =
     ev = parse_evidence_summary(str(row.get("evidence_summary") or ""))
     if experiment:
         ev = {**ev, **{k: v for k, v in experiment.items() if v is not None}}
-    domain = "graphs" if any(m in text.lower() for m in _NETWORK_MARKERS) else None
+    domain = "graphs" if any(m in text.lower() for m in _network_markers()) else None
     ctx = evidence_context_from_hypothesis(text, ev, domain_bucket=domain)
     return run_artifact_gate(ctx, experiment)
 

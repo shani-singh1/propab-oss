@@ -59,6 +59,7 @@ class BreakthroughCriteria:
     direction: str = "higher_is_better"  # "higher_is_better" | "lower_is_better"
     min_confidence: float = 0.85       # significance confidence required
     min_replications: int = 3          # confirmed siblings before declaring
+    min_confirmed_findings: int | None = None  # verification campaigns (baseline=0)
     # Optional declared ceiling: a higher_is_better result at/above this is rejected as
     # implausible (instrumentation guard). None disables the guard. Domain-agnostic.
     plausibility_max: float | None = None
@@ -71,7 +72,16 @@ class BreakthroughCriteria:
         )
 
     def is_breakthrough(self, finding: dict[str, Any]) -> bool:
-        """Return True only when ALL criteria are met."""
+        """Return True when breakthrough criteria are met for this finding."""
+        if abs(self.baseline_value) < 1e-12:
+            conf = float(finding.get("confidence", 0.0))
+            reps = int(finding.get("replication_count", 1))
+            if self.min_confirmed_findings is not None:
+                confirmed_nodes = int(finding.get("confirmed_nodes", 0))
+                if confirmed_nodes >= self.min_confirmed_findings:
+                    return True
+            return conf >= self.min_confidence and reps >= self.min_replications
+
         if finding.get("confidence", 0.0) < self.min_confidence:
             return False
         if finding.get("replication_count", 1) < self.min_replications:
@@ -119,6 +129,7 @@ class BreakthroughCriteria:
             "min_confidence": self.min_confidence,
             "min_replications": self.min_replications,
             "plausibility_max": self.plausibility_max,
+            "min_confirmed_findings": self.min_confirmed_findings,
         }
 
     @classmethod
@@ -131,6 +142,7 @@ class BreakthroughCriteria:
             min_confidence=data.get("min_confidence", 0.85),
             min_replications=data.get("min_replications", 3),
             plausibility_max=data.get("plausibility_max"),
+            min_confirmed_findings=data.get("min_confirmed_findings"),
         )
 
     @classmethod
@@ -166,6 +178,8 @@ STOP_REASON_SYNTHESIS_EMPTY = "SYNTHESIS_EMPTY"
 STOP_REASON_NO_SEEDS_GENERATED = "NO_SEEDS_GENERATED"
 STOP_REASON_FRONTIER_REFILL_FAILED = "FRONTIER_REFILL_FAILED"
 STOP_REASON_SALVAGED_AFTER_ERROR = "SALVAGED_AFTER_ERROR"
+STOP_REASON_FATAL_ERROR = "FATAL_ERROR"
+STOP_REASON_DOMAIN_PREFLIGHT_FAILED = "DOMAIN_PREFLIGHT_FAILED"
 
 
 # ── ResearchCampaign ─────────────────────────────────────────────────────────
