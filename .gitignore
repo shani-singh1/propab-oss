@@ -27,3 +27,19 @@ artifacts/mini_campaign_verify_latest.json
 
 DESIGN.md
 propab_roadmap.md
+mandrake-data/
+
+# Local run outputs (campaign JSON, benches, poll logs)
+artifacts/
+
+# AstaBench eval logs and cached solutions
+logs/
+
+# Upstream clone — clone separately and apply scripts/patch_astabench_windows.py
+asta-bench/
+
+# Ad-hoc session scratch scripts
+scripts/_*.py
+
+# Mandrake demo dataset wiring (requires private mandrake-data/)
+demo/mandrake/
