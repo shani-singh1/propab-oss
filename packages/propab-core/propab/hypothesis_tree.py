@@ -11,6 +11,7 @@ without generating them all upfront.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -46,9 +47,22 @@ This hypothesis was {verdict} with confidence {confidence:.2f}.
 
 Hypothesis: {parent_text}
 
+## Structured failure diagnostics
+verdict_reason: {verdict_reason}
+inconclusive_reason: {inconclusive_reason}
+failure_signature: {failure_signature}
+artifact_gate: {artifact_gate_summary}
+
 Finding: {evidence_summary}
 {mechanism_block}
 Depth in tree: {depth} (root = 0). Hypotheses at depth >= 8 will not be expanded further.
+
+ParentScope (inherit unless you intentionally narrow or shift):
+Population: {parent_population}
+Distribution: {parent_distribution}
+Claimed generalization: {parent_claimed_generalization}
+Expected failure modes: {parent_expected_failure_modes}
+OOD test: {parent_ood_test}
 
 Generate 3-5 child hypotheses that:
 {expansion_instructions}
@@ -56,13 +70,22 @@ Generate 3-5 child hypotheses that:
 Rules:
 - Do not repeat the parent hypothesis.
 - Each child must be MORE specific than the parent, not broader.
+- Inherit the parent's scope unless you intentionally change it; if you change scope, state the new values explicitly.
+- Every child MUST include ALL scope fields (same schema as seed generation):
+  population, distribution, claimed_generalization, expected_failure_modes, ood_test
+- Children missing any scope field are invalid and will be rejected.
 - Each child must include a one-sentence test_methodology naming specific tools.
 - Do not generate hypotheses that contradict confirmed findings from other branches.
 
 Return a JSON array only (no prose):
 [{{
   "id": "<short unique slug>",
-  "text": "...",
+  "text": "<core claim without scope labels>",
+  "population": "...",
+  "distribution": "...",
+  "claimed_generalization": "...",
+  "expected_failure_modes": "...",
+  "ood_test": "...",
   "test_methodology": "...",
   "expansion_type": "boundary|mechanistic|generalization|alternative|retest"
 }}]
@@ -105,6 +128,12 @@ class HypothesisNode:
     failure_signature: str | None = None
     theme_confidence: float | None = None
     lineage_length: int | None = None
+    # fixes.md P2 — preserve seed experiment metadata
+    test_methodology: str | None = None
+    feature_subset: list[str] = field(default_factory=list)
+    mechanism_id: str | None = None
+    claim_scope: dict[str, str] | None = None
+    scope_delta: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -137,6 +166,11 @@ class HypothesisNode:
             "failure_signature": self.failure_signature,
             "theme_confidence": self.theme_confidence,
             "lineage_length": self.lineage_length,
+            "test_methodology": self.test_methodology,
+            "feature_subset": self.feature_subset,
+            "mechanism_id": self.mechanism_id,
+            "claim_scope": self.claim_scope,
+            "scope_delta": self.scope_delta,
         }
 
     @classmethod
@@ -171,6 +205,11 @@ class HypothesisNode:
             failure_signature=data.get("failure_signature"),
             theme_confidence=data.get("theme_confidence"),
             lineage_length=data.get("lineage_length"),
+            test_methodology=data.get("test_methodology"),
+            feature_subset=data.get("feature_subset") or [],
+            mechanism_id=data.get("mechanism_id"),
+            claim_scope=data.get("claim_scope"),
+            scope_delta=data.get("scope_delta"),
         )
 
 
@@ -262,6 +301,10 @@ class HypothesisTree:
                 theme_confidence=theme_conf,
                 lineage_length=1,
                 question_relevance_score=h.get("question_relevance_score"),
+                test_methodology=h.get("test_methodology"),
+                feature_subset=list(h.get("feature_subset") or []),
+                mechanism_id=h.get("mechanism_id"),
+                claim_scope=h.get("claim_scope"),
             )
             self.nodes[node.id] = node
             if node.id not in self.frontier:
@@ -346,11 +389,53 @@ class HypothesisTree:
 
     # ── Expansion ────────────────────────────────────────────────────────────
 
-    def build_expand_prompt(self, node_id: str) -> str | None:
-        """
-        Build the LLM prompt for expanding a node.  Returns None if the node
-        should not be expanded (exhausted, too deep, already has children, etc.).
-        """
+    @staticmethod
+    def _parse_evidence_blob(evidence_summary: str | None) -> dict[str, Any]:
+        if not evidence_summary:
+            return {}
+        m = re.search(r"evidence=(\{.*?\});", evidence_summary)
+        if not m:
+            return {}
+        try:
+            obj = json.loads(m.group(1))
+            return obj if isinstance(obj, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    @staticmethod
+    def _artifact_gate_summary(evidence_obj: dict[str, Any]) -> str:
+        ag = evidence_obj.get("artifact_gate")
+        if not isinstance(ag, dict):
+            return "n/a"
+        ranked = ag.get("ranked_artifacts") or []
+        top = ranked[0] if ranked and isinstance(ranked[0], dict) else {}
+        top_id = top.get("artifact_id") or "?"
+        return f"{ag.get('verdict', '?')} — {top_id}: {ag.get('verdict_reason', '')}"[:300]
+
+    def _failure_fields(self, node: HypothesisNode) -> dict[str, str]:
+        ev = self._parse_evidence_blob(node.evidence_summary)
+        return {
+            "verdict_reason": str(ev.get("verdict_reason") or node.mechanism or "n/a"),
+            "inconclusive_reason": str(node.inconclusive_reason or "n/a"),
+            "failure_signature": str(node.failure_signature or "n/a"),
+            "artifact_gate_summary": self._artifact_gate_summary(ev),
+        }
+
+    def _parent_scope_fields(self, node: HypothesisNode, *, question: str = "") -> dict[str, str]:
+        from propab.scoped_claim import infer_domain_scope_template, parse_scope_from_methodology
+
+        parent_scope = parse_scope_from_methodology(node.text, node.test_methodology)
+        if parent_scope is None:
+            parent_scope = infer_domain_scope_template(question)
+        return {
+            "parent_population": parent_scope.population,
+            "parent_distribution": parent_scope.distribution,
+            "parent_claimed_generalization": parent_scope.claimed_generalization,
+            "parent_expected_failure_modes": parent_scope.expected_failure_modes,
+            "parent_ood_test": parent_scope.ood_test,
+        }
+
+    def _expansion_gate(self, node_id: str) -> HypothesisNode | None:
         from propab.research_quality import is_discovery_node
 
         node = self.nodes.get(node_id)
@@ -364,11 +449,28 @@ class HypothesisTree:
             return None
         if len(node.children) >= 5:
             return None
+        return node
 
-        verdict_key = node.verdict if node.verdict in _EXPANSION_INSTRUCTIONS else EXPANSION_INCONCLUSIVE
+    def build_expand_prompt(
+        self,
+        node_id: str,
+        *,
+        question: str = "",
+    ) -> str | None:
+        """
+        Build the LLM prompt for expanding a node (legacy path — campaign synthesis replaces this).
+        """
+        node = self._expansion_gate(node_id)
+        if node is None:
+            return None
+
+        scope = self._parent_scope_fields(node, question=question)
+        fields = self._failure_fields(node)
         mechanism_block = ""
         if node.mechanism:
             mechanism_block = f"\nExtracted mechanism: {node.mechanism}\n"
+
+        verdict_key = node.verdict if node.verdict in _EXPANSION_INSTRUCTIONS else EXPANSION_INCONCLUSIVE
         return _EXPAND_PROMPT_TEMPLATE.format(
             verdict=node.verdict,
             confidence=node.confidence,
@@ -377,6 +479,8 @@ class HypothesisTree:
             mechanism_block=mechanism_block,
             depth=node.depth,
             expansion_instructions=_EXPANSION_INSTRUCTIONS[verdict_key],
+            **fields,
+            **scope,
         )
 
     def parse_expanded_nodes(
@@ -384,50 +488,93 @@ class HypothesisTree:
         node_id: str,
         llm_response: str,
         generation: int,
-    ) -> list[HypothesisNode]:
+        *,
+        question: str = "",
+    ) -> tuple[list[HypothesisNode], dict[str, Any]]:
         """
         Parse raw LLM JSON response into HypothesisNode objects.
-        Returns empty list on any parse failure (caller may log and continue).
+        P3 — scope gate rejects children missing required fields before tree insertion.
+        Returns (accepted_children, gate_metrics).
         """
         parent = self.nodes.get(node_id)
+        empty_metrics: dict[str, Any] = {
+            "n_children_generated": 0,
+            "n_children_rejected": 0,
+            "n_children_passed": 0,
+            "scope_rejection_rate": 0.0,
+            "rejection_reasons": {},
+            "rejected": [],
+        }
         if parent is None:
-            return []
+            return [], empty_metrics
         try:
             raw = llm_response.strip()
-            # Strip markdown code fences if present
             if raw.startswith("```"):
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
                     raw = raw[4:]
             items: list[dict] = json.loads(raw)
         except (json.JSONDecodeError, IndexError, ValueError):
-            return []
+            return [], empty_metrics
+
+        from collections import Counter
 
         from propab.research_quality import extract_theme_vector, infer_node_role
+        from propab.scoped_claim import parse_scope_from_methodology, validate_expansion_child
 
+        parent_scope = parse_scope_from_methodology(parent.text, parent.test_methodology)
         children: list[HypothesisNode] = []
+        rejected: list[dict[str, Any]] = []
         for item in items:
             if not isinstance(item, dict) or not item.get("text"):
+                rejected.append({"text": str(item)[:120], "reason": "missing_text"})
                 continue
-            primary, secondary, theme_conf = extract_theme_vector(item["text"])
+            ok, enriched, reason = validate_expansion_child(
+                item, parent=parent_scope, question=question,
+            )
+            if not ok:
+                rejected.append({
+                    "text": str(item.get("text", ""))[:200],
+                    "reason": reason or "missing_scope",
+                })
+                continue
+            primary, secondary, theme_conf = extract_theme_vector(enriched["text"])
             child = HypothesisNode(
                 id=str(uuid4()),
-                text=item["text"],
+                text=enriched["text"],
                 parent_id=parent.id,
                 depth=parent.depth + 1,
                 verdict="pending",
                 generation=generation,
                 expansion_type=item.get("expansion_type"),
-                node_role=infer_node_role(item["text"]),
+                node_role=infer_node_role(enriched["text"]),
                 primary_theme=primary,
                 secondary_themes=secondary,
                 theme_id=item.get("theme_id") or primary,
                 theme_confidence=theme_conf,
                 lineage_length=self.lineage_length(parent.id) + 1 if parent.id else 1,
                 question_relevance_score=item.get("question_relevance_score"),
+                test_methodology=enriched.get("test_methodology"),
+                feature_subset=list(item.get("feature_subset") or []),
+                mechanism_id=item.get("mechanism_id"),
+                claim_scope=enriched.get("claim_scope"),
+                scope_delta=enriched.get("scope_delta"),
             )
             children.append(child)
-        return children
+
+        n_gen = len(items)
+        n_rej = len(rejected)
+        reasons = dict(Counter(r.get("reason", "?") for r in rejected))
+        metrics = {
+            "n_children_generated": n_gen,
+            "n_children_rejected": n_rej,
+            "n_children_passed": len(children),
+            "scope_rejection_rate": round(n_rej / max(1, n_gen), 4),
+            "rejection_reasons": reasons,
+            "rejected": rejected[:12],
+            "parent_id": node_id,
+        }
+        return children, metrics
 
     # ── Frontier selection ───────────────────────────────────────────────────
 
