@@ -37,6 +37,7 @@ def classify_evidence_type(evidence: dict[str, Any]) -> str:
             "exact_check",
             "counterexample_search",
             "combinatorial_verification",
+            "combinatorial_computation",
             "counterexample",
         }
         or (

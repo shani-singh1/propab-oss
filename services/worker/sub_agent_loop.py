@@ -939,6 +939,155 @@ async def _mandrake_verification_path(
     return result_dict
 
 
+async def _plugin_verification_path(
+    *,
+    payload: dict,
+    hypothesis: dict,
+    hypothesis_id: str,
+    campaign_node_id: str | None,
+    session_id: str,
+    question: str,
+    session_factory: async_sessionmaker,
+    emitter: EventEmitter,
+    registry: ToolRegistry,
+    trace_pointer: str,
+    started: float,
+    baseline: dict,
+    domain_plugin: Any,
+) -> dict:
+    """Generic worker path: delegate experiment + verdict to a DomainPlugin."""
+    import asyncio
+    import json
+
+    from propab.verdict_pipeline import run_verdict_pipeline
+
+    domain_id = domain_plugin.domain_id
+    hyp_dict = {
+        "text": str(hypothesis.get("text") or ""),
+        "statement": str(hypothesis.get("text") or ""),
+        "test_methodology": str(hypothesis.get("test_methodology") or ""),
+        "feature_subset": list(hypothesis.get("feature_subset") or []),
+    }
+    features = list(hypothesis.get("feature_subset") or [])
+
+    await emitter.emit(
+        session_id=session_id,
+        event_type=EventType.TOOL_CALLED,
+        step=f"experiment.{hypothesis_id}.{domain_id}",
+        payload={"tool": f"{domain_id}_verification", "domain": domain_id, "features": features},
+        hypothesis_id=hypothesis_id,
+    )
+
+    try:
+        output = await asyncio.to_thread(
+            domain_plugin.run_verification,
+            hyp_dict,
+            None,
+            features or None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        err = str(exc)[:500]
+        await emitter.emit(
+            session_id=session_id,
+            event_type=EventType.TOOL_ERROR,
+            step=f"experiment.{hypothesis_id}.{domain_id}",
+            payload={"tool": f"{domain_id}_verification", "error": err},
+            hypothesis_id=hypothesis_id,
+        )
+        return {
+            "hypothesis_id": hypothesis_id,
+            "campaign_node_id": campaign_node_id,
+            "verdict": "inconclusive",
+            "confidence": 0.0,
+            "evidence_summary": json.dumps({"error": err, "domain": domain_id}),
+            "key_finding": err,
+            "tool_trace_id": trace_pointer,
+            "figures": [],
+            "duration_sec": round(time.perf_counter() - started, 3),
+            "failure_reason": err,
+            "learned": err,
+        }
+
+    if not isinstance(output, dict):
+        output = {"raw": output}
+
+    await emitter.emit(
+        session_id=session_id,
+        event_type=EventType.TOOL_RESULT,
+        step=f"experiment.{hypothesis_id}.{domain_id}",
+        payload={"tool": f"{domain_id}_verification", "output": output, "deterministic": output.get("deterministic")},
+        hypothesis_id=hypothesis_id,
+    )
+
+    criteria = domain_plugin.confirmation_criteria()
+    min_steps = int(criteria.get("min_metric_steps_for_confirm") or 1)
+    try:
+        verdict, reason, confidence = domain_plugin.classify_verdict(
+            str(hypothesis.get("text") or ""), output,
+        )
+    except Exception:
+        verdict, confidence, reason = run_verdict_pipeline(
+            output,
+            hypothesis=hypothesis,
+            campaign_context={"min_metric_steps": min_steps},
+        )
+
+    evidence = json.dumps(output, default=str)
+    key_finding = str(output.get("notes") or reason or "")[:500] if verdict == "confirmed" else None
+
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    await _insert_experiment_step_tool(
+        session_factory,
+        step_id=str(uuid4()),
+        hypothesis_id=hypothesis_id,
+        step_index=0,
+        tool_name=f"{domain_id}_verification",
+        params={"domain": domain_id, "features": features},
+        result_output=output,
+        result_error=None,
+        duration_ms=duration_ms,
+    )
+
+    await _update_hypothesis(
+        session_factory,
+        hypothesis_id,
+        status="completed",
+        verdict=verdict,
+        confidence=confidence,
+        evidence_summary=evidence,
+        key_finding=key_finding,
+        tool_trace_id=trace_pointer,
+    )
+    await emitter.emit(
+        session_id=session_id,
+        event_type=EventType.AGENT_COMPLETED,
+        step=f"experiment.{hypothesis_id}.complete",
+        payload={
+            "verdict": verdict,
+            "confidence": confidence,
+            "domain": domain_id,
+            "deterministic": output.get("deterministic"),
+            "metric_value": output.get("metric_value"),
+        },
+        hypothesis_id=hypothesis_id,
+    )
+
+    return {
+        "hypothesis_id": hypothesis_id,
+        "campaign_node_id": campaign_node_id,
+        "verdict": verdict,
+        "confidence": confidence,
+        "evidence_summary": evidence,
+        "key_finding": key_finding,
+        "tool_trace_id": trace_pointer,
+        "figures": [],
+        "duration_sec": round(time.perf_counter() - started, 3),
+        "failure_reason": None if verdict != "inconclusive" else reason,
+        "learned": reason,
+        "metric_value": output.get("metric_value"),
+    }
+
+
 async def _materials_verification_path(
     *,
     payload: dict,
@@ -1199,21 +1348,40 @@ async def run_sub_agent_async(payload: dict) -> dict:
             if _domain_plugin is not None
             else None
         )
+        if _worker_path is None and _domain_plugin is not None:
+            _worker_path = _plugin_verification_path
         if _worker_path is not None:
-            result = await _worker_path(
-                payload=payload,
-                hypothesis=hypothesis,
-                hypothesis_id=hypothesis_id,
-                campaign_node_id=campaign_node_id,
-                session_id=session_id,
-                question=question,
-                session_factory=session_factory,
-                emitter=emitter,
-                registry=registry,
-                trace_pointer=trace_pointer,
-                started=started,
-                baseline=baseline,
-            )
+            if _worker_path is _plugin_verification_path:
+                result = await _worker_path(
+                    payload=payload,
+                    hypothesis=hypothesis,
+                    hypothesis_id=hypothesis_id,
+                    campaign_node_id=campaign_node_id,
+                    session_id=session_id,
+                    question=question,
+                    session_factory=session_factory,
+                    emitter=emitter,
+                    registry=registry,
+                    trace_pointer=trace_pointer,
+                    started=started,
+                    baseline=baseline,
+                    domain_plugin=_domain_plugin,
+                )
+            else:
+                result = await _worker_path(
+                    payload=payload,
+                    hypothesis=hypothesis,
+                    hypothesis_id=hypothesis_id,
+                    campaign_node_id=campaign_node_id,
+                    session_id=session_id,
+                    question=question,
+                    session_factory=session_factory,
+                    emitter=emitter,
+                    registry=registry,
+                    trace_pointer=trace_pointer,
+                    started=started,
+                    baseline=baseline,
+                )
             await redis.close()
             await engine.dispose()
             return result

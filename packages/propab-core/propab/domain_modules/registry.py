@@ -46,6 +46,7 @@ def _ensure_loaded() -> None:
     from propab.domain_modules.enzyme_kinetics.plugin import EnzymeKineticsPlugin
     from propab.domain_modules.graph_invariants.plugin import GraphInvariantsPlugin
     from propab.domain_modules.network_diffusion.plugin import NetworkDiffusionPlugin
+    from propab.domain_modules.math_combinatorics.plugin import MathCombinatoricsPlugin
 
     for plugin_cls in (
         MaterialsPlugin,
@@ -53,6 +54,7 @@ def _ensure_loaded() -> None:
         EnzymeKineticsPlugin,
         GraphInvariantsPlugin,
         NetworkDiffusionPlugin,
+        MathCombinatoricsPlugin,
     ):
         try:
             register_plugin(plugin_cls())
@@ -103,3 +105,16 @@ def resolve_domain_plugin(
         except Exception:  # noqa: BLE001 — a broken matcher must not break routing
             continue
     return None
+
+
+def hypothesis_is_on_topic(
+    text: str,
+    *,
+    question: str = "",
+    domain_id: str | None = None,
+) -> bool:
+    """Return False when a domain plugin rejects hypothesis text as off-topic."""
+    plugin = get_domain_plugin(domain_id) if domain_id else resolve_domain_plugin(question=question)
+    if plugin is None:
+        return True
+    return plugin.hypothesis_on_topic(text)

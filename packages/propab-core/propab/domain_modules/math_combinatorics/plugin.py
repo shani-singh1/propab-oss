@@ -1,0 +1,253 @@
+"""Math combinatorics DomainPlugin — deterministic Sidon/cap-set/AP-free verification."""
+from __future__ import annotations
+
+import re
+from typing import Any
+
+from propab.domain_modules.base import DomainPlugin, PreflightResult
+from propab.domain_modules.math_combinatorics.problems import get_literature_prior
+from propab.domain_modules.math_combinatorics.verifier import run_combinatorics_experiment
+
+_OFF_TOPIC_RE = re.compile(
+    r"|".join(
+        (
+            r"\bsystem\s+path\b",
+            r"\bpath\s+for\s+binar",
+            r"\bsearch\s+(?:the\s+)?(?:system\s+)?path\b",
+            r"\bfind\s+binar",
+            r"\bbinar(?:y|ies)\s+related",
+            r"\bpropab-submit\b",
+            r"\bsubmit-results\b",
+            r"\breport-metrics\b",
+            r"\bfile\s*system\b",
+            r"\bfilesystem\b",
+            r"\bos\.environ\b",
+            r"\bsubprocess\b",
+            r"\bshell\s+command",
+            r"\boperating\s+system\b",
+        )
+    ),
+    re.IGNORECASE,
+)
+
+_TOPIC_RE = re.compile(
+    r"|".join(
+        (
+            r"\bsidon\b",
+            r"\bcap[\s-]?set\b",
+            r"\bsumset\b",
+            r"\bap[\s-]?free\b",
+            r"\barithmetic\s+progression",
+            r"\badditive\s+combinator",
+            r"\bextremal\b",
+            r"\|A\+A\|",
+            r"\bF_3\b",
+            r"\bf_3\b",
+            r"\|\{1,\.\.\.,n\}\|",
+            r"\{1,\.\.\.,n\}",
+        )
+    ),
+    re.IGNORECASE,
+)
+
+
+class MathCombinatoricsPlugin(DomainPlugin):
+    domain_id = "math_combinatorics"
+    display_name = "Additive Combinatorics and Extremal Set Theory"
+    version = "0.1.0"
+
+    scope_question_markers = (
+        "domain_profile:math_combinatorics",
+        "sidon",
+        "cap set",
+        "sumset",
+        "additive combinatorics",
+        "arithmetic progression",
+        "ap-free",
+        "extremal set",
+    )
+
+    artifact_question_markers = (
+        "combinatorics",
+        "sidon",
+        "cap set",
+        "sumset",
+        "additive",
+        "extremal",
+        "arithmetic progression",
+        "ramsey",
+    )
+
+    def hypothesis_on_topic(self, text: str) -> bool:
+        """Reject OS/filesystem hypotheses; require combinatorics vocabulary."""
+        t = (text or "").strip()
+        if not t:
+            return False
+        if _OFF_TOPIC_RE.search(t):
+            return False
+        return bool(_TOPIC_RE.search(t))
+
+    def scope_template(self) -> dict[str, str]:
+        return {
+            "population": "Integers {1,...,n} or vector space F_3^n",
+            "distribution": "All admissible combinatorial structures in the domain",
+            "claimed_generalization": (
+                "Structural/density property holds for the stated n or dimension range"
+            ),
+            "expected_failure_modes": (
+                "Greedy construction artifact; bound valid only for tested n range"
+            ),
+            "ood_test": (
+                "Independent search strategy or larger n replicates the claimed pattern"
+            ),
+        }
+
+    def matches(self, *, question: str = "", payload: dict[str, Any] | None = None) -> bool:
+        q = (question or "").lower()
+        if "domain_profile:math_combinatorics" in q:
+            return True
+        if payload:
+            if str(payload.get("domain_profile") or "") == "math_combinatorics":
+                return True
+            if str(payload.get("domain") or "") == "math_combinatorics":
+                return True
+        markers = ("sidon", "cap set", "sumset", "additive combinator", "ap-free")
+        return any(m in q for m in markers)
+
+    def available_features(self) -> list[str]:
+        return [
+            "sidon_set_density",
+            "cap_set_size",
+            "sumset_growth",
+            "arithmetic_progression_free_density",
+            "b2_plus_set_density",
+        ]
+
+    def run_verification(
+        self,
+        hypothesis: dict[str, Any],
+        evidence: dict[str, Any] | None = None,
+        features: list[str] | None = None,
+    ) -> dict[str, Any]:
+        feats = list(features or hypothesis.get("feature_subset") or [])
+        if not feats:
+            text = str(hypothesis.get("text") or hypothesis.get("statement") or "")
+            if "cap" in text.lower():
+                feats = ["cap_set_size"]
+            elif "sumset" in text.lower():
+                feats = ["sumset_growth"]
+            elif "ap-free" in text.lower() or "arithmetic progression" in text.lower():
+                feats = ["arithmetic_progression_free_density"]
+            else:
+                feats = ["sidon_set_density"]
+        return run_combinatorics_experiment(hypothesis, feats)
+
+    def classify_verdict(
+        self, hypothesis_text: str, result: dict[str, Any]
+    ) -> tuple[str, str, float]:
+        _ = hypothesis_text
+        vt = int(result.get("verified_true_steps") or 0)
+        vf = int(result.get("verified_false_steps") or 0)
+        if vf > 0:
+            return (
+                "refuted",
+                result.get("notes") or "counterexample found",
+                0.95,
+            )
+        if vt > 0:
+            return (
+                "confirmed",
+                result.get("notes") or "combinatorial pattern verified",
+                0.95,
+            )
+        return "inconclusive", "no definitive combinatorial result", 0.5
+
+    def artifact_models(
+        self,
+        evidence: dict[str, Any] | None = None,
+        hypothesis: dict[str, Any] | None = None,
+    ) -> list[Any]:
+        from propab.artifact_verification import ArtifactModel
+
+        _ = evidence, hypothesis
+        return [
+            ArtifactModel(
+                artifact_id="algorithm_specific",
+                description=(
+                    "Pattern may be specific to the greedy search algorithm, "
+                    "not a general structural property"
+                ),
+                plausibility_score=0.3,
+                why_plausible="Greedy Sidon/cap-set constructions are not proven optimal.",
+                affected_components=["search_strategy"],
+                proposed_test="Rerun with a different search strategy (exhaustive vs greedy)",
+                artifact_rank=1,
+            ),
+        ]
+
+    def confirmation_criteria(self) -> dict[str, Any]:
+        return {
+            "min_metric_steps_for_confirm": 1,
+            "min_confidence": 0.90,
+            "requires_holdout": False,
+            "holdout_type": "none",
+            "null_test": "exhaustive_counterexample_search",
+            "verification_type": "deterministic",
+        }
+
+    def preflight(self) -> PreflightResult:
+        try:
+            def is_sidon(s: set[int]) -> bool:
+                lst = sorted(s)
+                sums: set[int] = set()
+                for i in range(len(lst)):
+                    for j in range(i + 1, len(lst)):
+                        pair_sum = lst[i] + lst[j]
+                        if pair_sum in sums:
+                            return False
+                        sums.add(pair_sum)
+                return True
+
+            test_set = {1, 2, 5}
+            if not is_sidon(test_set):
+                return PreflightResult(False, "Known Sidon set failed check")
+
+            import time
+
+            start = time.time()
+            max_size = 0
+            for n in range(10, 201):
+                current = [1]
+                sums: set[int] = set()
+                for x in range(2, n + 1):
+                    new_sums = {x + y for y in current}
+                    if not new_sums & sums:
+                        sums |= new_sums
+                        current.append(x)
+                max_size = max(max_size, len(current))
+            elapsed = time.time() - start
+
+            if elapsed > 30:
+                return PreflightResult(
+                    passed=False,
+                    reason=f"Combinatorial search too slow: {elapsed:.1f}s for n≤200",
+                )
+
+            return PreflightResult(
+                passed=True,
+                reason=(
+                    f"Combinatorial computation works. Max Sidon size in {{1..200}}: "
+                    f"{max_size}. Search time: {elapsed:.2f}s"
+                ),
+                details={"max_sidon_size": max_size, "elapsed_seconds": elapsed},
+            )
+        except Exception as exc:  # noqa: BLE001
+            return PreflightResult(passed=False, reason=f"Preflight computation failed: {exc}")
+
+    def literature_prior(self, question: str) -> dict[str, Any]:
+        return get_literature_prior(question)
+
+    def domain_profile(self):
+        from propab.domain_profiles.math_combinatorics import MATH_COMBINATORICS_PROFILE
+
+        return MATH_COMBINATORICS_PROFILE

@@ -117,6 +117,10 @@ class DomainPlugin(ABC):
         """
         return "inconclusive", "no domain verdict classifier configured", 0.5
 
+    def hypothesis_on_topic(self, text: str) -> bool:
+        """Return True if hypothesis text is on-topic for this domain (default: accept all)."""
+        return True
+
     # --- Artifact detection -------------------------------------------------
     def artifact_models(
         self,

@@ -145,6 +145,13 @@ def frontier_snapshot(
 def parse_evidence_obj(evidence_summary: str) -> dict[str, Any]:
     if not evidence_summary:
         return {}
+    raw = evidence_summary.strip()
+    if raw.startswith("{"):
+        try:
+            obj = json.loads(raw)
+            return obj if isinstance(obj, dict) else {}
+        except json.JSONDecodeError:
+            pass
     m = re.search(r"evidence=(\{.*?\});", evidence_summary)
     if not m:
         return {}

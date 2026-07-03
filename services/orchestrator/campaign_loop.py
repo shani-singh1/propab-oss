@@ -926,10 +926,13 @@ async def generate_seed_hypotheses(
         )
     seed_dicts = []
     same_round_texts: list[str] = []
+    from propab.domain_modules.registry import hypothesis_is_on_topic
     from propab.scoped_claim import enrich_entry_with_scope, parse_scope_from_methodology, validate_scoped_claim
 
     for h in raw_hyps:
         raw_text = h.text
+        if not hypothesis_is_on_topic(raw_text, question=campaign.question):
+            continue
         dup, _ = _is_duplicate_frontier_candidate(
             raw_text,
             campaign.hypothesis_tree,
@@ -958,19 +961,22 @@ async def generate_seed_hypotheses(
             "mechanism_id": (h.scores or {}).get("mechanism_id"),
         })
     if not seed_dicts and raw_hyps:
-        h = raw_hyps[0]
-        entry = enrich_entry_with_scope(
-            {"id": h.id, "text": h.text, "test_methodology": h.test_methodology},
-            parsed_question.text,
-        )
-        seed_dicts.append({
-            "id": h.id,
-            "text": entry["text"],
-            "test_methodology": entry["test_methodology"],
-            "claim_scope": entry.get("claim_scope"),
-            "theme_id": infer_hypothesis_theme(entry["text"]),
-            "question_relevance_score": (h.scores or {}).get("question_relevance"),
-        })
+        for h in raw_hyps:
+            if not hypothesis_is_on_topic(h.text, question=campaign.question):
+                continue
+            entry = enrich_entry_with_scope(
+                {"id": h.id, "text": h.text, "test_methodology": h.test_methodology},
+                parsed_question.text,
+            )
+            seed_dicts.append({
+                "id": h.id,
+                "text": entry["text"],
+                "test_methodology": entry["test_methodology"],
+                "claim_scope": entry.get("claim_scope"),
+                "theme_id": infer_hypothesis_theme(entry["text"]),
+                "question_relevance_score": (h.scores or {}).get("question_relevance"),
+            })
+            break
     return campaign.hypothesis_tree.add_seeds(seed_dicts, generation=generation)
 
 

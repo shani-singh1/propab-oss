@@ -50,6 +50,20 @@ _QUESTIONS: dict[str, str] = {
         "with natural category groups. Prefer exact combinatorial or spectral checks "
         "where possible; empirical claims require cross-category LOFO."
     ),
+    "math_combinatorics": (
+        "[domain_profile:math_combinatorics] "
+        "You are investigating specific mathematical properties of additive "
+        "combinatorial structures. Every hypothesis must be a specific, falsifiable "
+        "claim about one of: (1) Sidon sets in {1,...,n} for specific values of n, "
+        "(2) cap sets in F_3^n for specific dimensions n, (3) AP-free sets in {1,...,n}, "
+        "(4) sumset growth |A+A|/|A| for structured sets A. "
+        "Every experiment must use combinatorics verification (Sidon, cap-set, AP-free, "
+        "or sumset computation) only. Do NOT perform file system searches, PATH lookups, "
+        "binary searches, or any action unrelated to combinatorial mathematics. "
+        "Do NOT write code that interacts with the operating system. "
+        "Focus on: extremal Sidon density vs sqrt(n), cap-set gap to CLP bound (2.756^n), "
+        "and AP-free density structure in {1,...,n}."
+    ),
 }
 
 
@@ -64,6 +78,18 @@ def _load_winner_domain() -> str | None:
 
 
 def _power_gate_ok(domain: str) -> tuple[bool, str]:
+    # Deterministic math domains use plugin preflight at campaign launch, not LOFO power gate.
+    if domain == "math_combinatorics":
+        from propab.domain_modules.registry import get_domain_plugin
+
+        plugin = get_domain_plugin(domain)
+        if plugin is None:
+            return False, f"domain plugin {domain} not registered"
+        pf = plugin.preflight()
+        if pf.passed:
+            return True, f"preflight passed: {pf.reason}"
+        return False, f"preflight failed: {pf.reason}"
+
     if not EVAL_PATH.is_file():
         return False, f"Missing {EVAL_PATH} — run evaluate_v1_domain_candidates.py first"
     data = json.loads(EVAL_PATH.read_text(encoding="utf-8"))
@@ -105,8 +131,14 @@ def main() -> int:
 
     profile = get_profile(domain)
     if profile is None:
-        print(f"Unknown domain profile: {domain}", file=sys.stderr)
-        return 1
+        from propab.domain_modules.registry import get_domain_plugin
+
+        if get_domain_plugin(domain) is None:
+            print(f"Unknown domain profile: {domain}", file=sys.stderr)
+            return 1
+        profile_meta = {"profile_id": domain, "display_name": domain}
+    else:
+        profile_meta = profile.to_dict()
 
     if not args.skip_power_check:
         ok, reason = _power_gate_ok(domain)
@@ -117,20 +149,32 @@ def main() -> int:
 
     question = _QUESTIONS.get(domain, f"[domain_profile:{domain}] Open discovery campaign.")
     api = args.api.rstrip("/")
+
+    breakthrough = {
+        "metric_name": "lofo_r2",
+        "improvement_threshold": 0.05,
+        "direction": "higher_is_better",
+        "min_confidence": 0.85,
+        "min_replications": 2,
+        "min_confirmed_findings": 1,
+    }
+    if domain == "math_combinatorics":
+        breakthrough = {
+            "metric_name": "verified_true_steps",
+            "improvement_threshold": 0.001,
+            "direction": "higher_is_better",
+            "min_confidence": 0.90,
+            "min_replications": 1,
+            "min_confirmed_findings": 1,
+        }
+
     body = json.dumps({
         "question": question,
         "compute_budget_hours": args.hours,
         "max_hypotheses": None,
         "domain_profile": domain,
         "policy_mode": "accepted",
-        "breakthrough_criteria": {
-            "metric_name": "lofo_r2",
-            "improvement_threshold": 0.05,
-            "direction": "higher_is_better",
-            "min_confidence": 0.85,
-            "min_replications": 2,
-            "min_confirmed_findings": 1,
-        },
+        "breakthrough_criteria": breakthrough,
     }).encode("utf-8")
 
     req = Request(
@@ -153,7 +197,7 @@ def main() -> int:
     record = {
         "campaign_id": cid,
         "domain_profile": domain,
-        "domain_profile_meta": profile.to_dict(),
+        "domain_profile_meta": profile_meta,
         "question": question,
         "compute_budget_hours": args.hours,
         "max_hypotheses": None,

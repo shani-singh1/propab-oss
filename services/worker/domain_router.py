@@ -41,6 +41,7 @@ _ALLOWED = frozenset(
         "general_computation",
         "materials",
         "mandrake",
+        "math_combinatorics",
     },
 )
 
@@ -87,8 +88,10 @@ def _keyword_fallback_domain(hypothesis_text: str) -> str:
         )
     ):
         return "materials"
-    if any(k in t for k in ("lofo", "leave-one-family", "leave-one-group", "rt activity", "t70_raw", "t55_raw", "foldseek", "triad_best_rmsd", "evolutionary family")):
+    if any(k in t for k in ("lofo", "leave-one-family", "leave-one-group", "rt activity", "t55_raw", "t70_raw", "foldseek", "triad_best_rmsd", "evolutionary family")):
         return "mandrake"
+    if any(k in t for k in ("sidon", "cap set", "sumset", "ap-free", "additive combinator", "domain_profile:math_combinatorics")):
+        return "math_combinatorics"
     return "general_computation"
 
 

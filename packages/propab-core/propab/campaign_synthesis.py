@@ -112,6 +112,7 @@ def apply_synthesis_to_frontier(
         "n_candidates_raw": len(_candidate_dicts(parsed)),
         "n_added": 0,
         "n_rejected_duplicate": 0,
+        "n_rejected_off_topic": 0,
         "binding_rejected_count": 0,
         "binding_accepted_count": 0,
         "falsifiability_rejected_count": 0,
@@ -150,10 +151,16 @@ def apply_synthesis_to_frontier(
     belief_state.record_synthesis_exhaustion(bool(parsed.get("direction_exhausted")))
 
     # Frontier candidates — dedup before add_seeds (fixes.md P2)
+    from propab.domain_modules.registry import hypothesis_is_on_topic
+
     seed_dicts: list[dict[str, Any]] = []
     same_round_texts: list[str] = []
     for item in _candidate_dicts(parsed):
         raw_text = str(item.get("text") or "")
+        if not hypothesis_is_on_topic(raw_text, question=question):
+            metrics["n_rejected_off_topic"] = int(metrics.get("n_rejected_off_topic") or 0) + 1
+            logger.debug("Rejected off-topic frontier candidate: %s", raw_text[:80])
+            continue
         dup, dup_reason = _is_duplicate_frontier_candidate(
             raw_text,
             tree,

@@ -9,11 +9,13 @@ from propab.domain_profiles.base import DomainProfile
 from propab.domain_profiles.enzyme_kinetics import ENZYME_KINETICS_PROFILE
 from propab.domain_profiles.graph_invariants import GRAPH_INVARIANTS_PROFILE
 from propab.domain_profiles.materials import MATERIALS_PROFILE
+from propab.domain_profiles.math_combinatorics import MATH_COMBINATORICS_PROFILE
 
 _PROFILES: tuple[DomainProfile, ...] = (
     ENZYME_KINETICS_PROFILE,
     MATERIALS_PROFILE,
     GRAPH_INVARIANTS_PROFILE,
+    MATH_COMBINATORICS_PROFILE,
 )
 
 _BY_ID: dict[str, DomainProfile] = {p.profile_id: p for p in _PROFILES}
