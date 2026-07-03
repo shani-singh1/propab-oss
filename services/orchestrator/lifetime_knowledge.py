@@ -168,6 +168,30 @@ def ingest_campaign(
     for c in claims:
         graph.add_claim(c)
 
+    from propab.domain_modules.registry import get_domain_plugin
+    from propab.numerical_seeds import classify_hypothesis_bucket
+    from propab.synthesis_diversity import aggregate_diversity_distribution
+
+    plugin = get_domain_plugin(session_domain or db)
+    confirmed_nodes = [
+        nodes[nid] for nid, n in nodes.items()
+        if isinstance(n, dict) and n.get("verdict") == "confirmed"
+    ]
+    if plugin is not None and confirmed_nodes:
+        seeds = plugin.extract_numerical_seeds(confirmed_nodes)
+        if seeds:
+            graph.store_numerical_seeds(session_domain or db, cid, seeds)
+    buckets = [
+        classify_hypothesis_bucket(
+            str(n.get("text") or ""),
+            str(n.get("test_methodology") or ""),
+        )
+        for n in nodes.values()
+        if isinstance(n, dict) and n.get("verdict") in ("confirmed", "refuted", "inconclusive")
+    ]
+    if buckets:
+        graph.store_diversity_distribution(session_domain or db, aggregate_diversity_distribution(buckets))
+
     for entry in ledger:
         mech = extract_mechanism_from_finding(entry, campaign_id=cid)
         if mech and mech.claim_id:

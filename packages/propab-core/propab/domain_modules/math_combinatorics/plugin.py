@@ -50,6 +50,64 @@ _TOPIC_RE = re.compile(
     re.IGNORECASE,
 )
 
+_UNIMPLEMENTED_METHODOLOGY_RE = re.compile(
+    r"|".join(
+        (
+            r"simulated\s+anneal",
+            r"fourier\s+analysis",
+            r"\bfourier\b",
+            r"\bgowers\b",
+            r"\bsat\s+(?:solver|based|encoding|search)\b",
+            r"\bz3\b",
+            r"\bmilp\b",
+            r"integer\s+linear\s+program",
+            r"tensor\s+decomposition",
+            r"neural\s+network",
+            r"genetic\s+algorithm",
+            r"branch[\s-]?and[\s-]?bound.*F_3\^8",
+            r"exhaustive.*F_3\^8",
+            r"F_3\^8.*exhaustive",
+            r"\btabu\b",
+            r"tabu\s+search",
+            r"\bmcmc\b",
+            r"markov\s+chain",
+            r"hill[\s-]?climbing",
+            r"stochastic\s+hill",
+            r"stochastic\s+search",
+            r"stochastic\s+optim",
+            r"evolutionary\s+algorithm",
+            r"chi[\s-]?squared",
+            r"kolmogorov[\s-]?smirnov",
+            r"\bks[\s-]?test\b",
+            r"poisson",
+            r"decile",
+            r"spectral\s+peak",
+        )
+    ),
+    re.IGNORECASE,
+)
+
+_VERIFIABLE_METHODOLOGY_RE = re.compile(
+    r"|".join(
+        (
+            r"\bgreedy\b",
+            r"bose[\s-]?chowla",
+            r"exhaustive\s+search",
+            r"multi[\s-]?n",
+            r"\bsweep\b",
+            r"cap[\s-]?set",
+            r"ap[\s-]?free",
+            r"best[\s-]?known",
+            r"combinatorial\s+computation",
+            r"product\s+construction",
+            r"algebraic\s+construction",
+            r"greedy\s+construction",
+            r"sidon",
+        )
+    ),
+    re.IGNORECASE,
+)
+
 
 class MathCombinatoricsPlugin(DomainPlugin):
     domain_id = "math_combinatorics"
@@ -78,14 +136,27 @@ class MathCombinatoricsPlugin(DomainPlugin):
         "ramsey",
     )
 
-    def hypothesis_on_topic(self, text: str) -> bool:
-        """Reject OS/filesystem hypotheses; require combinatorics vocabulary."""
+    def hypothesis_on_topic(self, text: str, methodology: str | None = None) -> bool:
+        """Reject OS/filesystem hypotheses and unimplemented test methodologies."""
         t = (text or "").strip()
         if not t:
             return False
         if _OFF_TOPIC_RE.search(t):
             return False
-        return bool(_TOPIC_RE.search(t))
+        if not _TOPIC_RE.search(t):
+            return False
+        combined = f"{t}\n{methodology or ''}"
+        if _UNIMPLEMENTED_METHODOLOGY_RE.search(combined):
+            return False
+        if _VERIFIABLE_METHODOLOGY_RE.search(combined):
+            return True
+        meth = (methodology or "").strip()
+        # Scope-enriched methodology is JSON; accept when hypothesis text is on-topic.
+        if meth.startswith("{"):
+            return True
+        if meth:
+            return False
+        return True
 
     def scope_template(self) -> dict[str, str]:
         return {
@@ -131,12 +202,19 @@ class MathCombinatoricsPlugin(DomainPlugin):
     ) -> dict[str, Any]:
         feats = list(features or hypothesis.get("feature_subset") or [])
         if not feats:
+            from propab.domain_modules.math_combinatorics.constructors import (
+                extract_claim_text,
+                is_cap_set_hypothesis,
+            )
+
             text = str(hypothesis.get("text") or hypothesis.get("statement") or "")
-            if "cap" in text.lower():
+            methodology = str(hypothesis.get("test_methodology") or "")
+            claim = extract_claim_text(text, test_methodology=methodology, full_text=text)
+            if is_cap_set_hypothesis(text, methodology, full_text=text):
                 feats = ["cap_set_size"]
-            elif "sumset" in text.lower():
+            elif "sumset" in claim.lower():
                 feats = ["sumset_growth"]
-            elif "ap-free" in text.lower() or "arithmetic progression" in text.lower():
+            elif "ap-free" in claim.lower() or "arithmetic progression" in claim.lower():
                 feats = ["arithmetic_progression_free_density"]
             else:
                 feats = ["sidon_set_density"]
@@ -258,6 +336,41 @@ class MathCombinatoricsPlugin(DomainPlugin):
 
     def literature_prior(self, question: str) -> dict[str, Any]:
         return get_literature_prior(question)
+
+    def belief_promotion_threshold(self) -> dict[str, Any]:
+        return {
+            "requires_supporting_nodes": 3,
+            "requires_confidence": "weak",
+            "allow_trend_promotion": True,
+            "trend_definition": (
+                "3+ confirmed nodes whose metric_value shows consistent "
+                "directional movement across increasing parameter values"
+            ),
+        }
+
+    def implementable_methodologies(self) -> list[str]:
+        return [
+            "greedy construction",
+            "greedy search",
+            "greedy sidon",
+            "bose-chowla",
+            "bose chowla",
+            "exhaustive search",
+            "cap set table",
+            "cap-set lookup",
+            "threshold sweep",
+            "ratio sweep",
+            "band validation",
+            "counterexample search",
+            "table lookup",
+            "ap-free",
+            "sumset",
+        ]
+
+    def extract_numerical_seeds(self, confirmed_nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        from propab.numerical_seeds import extract_math_combinatorics_seeds
+
+        return extract_math_combinatorics_seeds(confirmed_nodes)
 
     def domain_profile(self):
         from propab.domain_profiles.math_combinatorics import MATH_COMBINATORICS_PROFILE

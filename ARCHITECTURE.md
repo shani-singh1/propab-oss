@@ -236,7 +236,8 @@ Contract (each has a safe default so a plugin overrides only what it needs):
 `matches` / `matches_scope`, `available_features`, `run_verification`,
 `classify_verdict`, `artifact_models`, `confirmation_criteria`, **`preflight`**,
 `literature_prior`, `scope_template`, `artifact_question_markers`,
-`domain_profile`.
+`domain_profile`, **`belief_promotion_threshold`**, **`implementable_methodologies`**,
+**`extract_numerical_seeds`** (math compounding: trend promotion + numerical seeds).
 
 ### Registry — `packages/propab-core/propab/domain_modules/registry.py`
 `resolve_domain_plugin` resolves the owning plugin: explicit

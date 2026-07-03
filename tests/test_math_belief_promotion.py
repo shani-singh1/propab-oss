@@ -1,0 +1,72 @@
+"""Belief trend promotion for math_combinatorics (fixes.md A1)."""
+from __future__ import annotations
+
+from propab.belief_promotion import (
+    apply_trend_promotion_to_beliefs,
+    is_consistent_trend,
+    try_trend_promotion,
+)
+from propab.belief_state import CampaignBeliefState, BeliefObject
+from propab.domain_modules.math_combinatorics.plugin import MathCombinatoricsPlugin
+
+
+def _confirmed_node(nid: str, n: int, ratio: float) -> dict:
+    return {
+        "id": nid,
+        "verdict": "confirmed",
+        "text": f"Greedy Sidon at n={n} ratio {ratio}",
+        "finding": {
+            "metric_name": "sidon_ratio_to_sqrt_n",
+            "metric_value": ratio,
+            "n": n,
+            "sweep": [{"n": n, "ratio_to_sqrt_n": ratio}],
+        },
+    }
+
+
+def test_trend_promotion_three_monotone_nodes() -> None:
+    nodes = {
+        "a": _confirmed_node("a", 500, 0.939),
+        "b": _confirmed_node("b", 1000, 0.885),
+        "c": _confirmed_node("c", 2000, 0.827),
+    }
+    threshold = MathCombinatoricsPlugin().belief_promotion_threshold()
+    ids = try_trend_promotion(
+        "greedy F(n)/sqrt(n) is monotonically decreasing for n in [500, 10000]",
+        nodes,
+        threshold,
+    )
+    assert ids is not None
+    assert len(ids) >= 3
+
+
+def test_trend_promotion_two_nodes_insufficient() -> None:
+    nodes = {
+        "a": _confirmed_node("a", 500, 0.939),
+        "b": _confirmed_node("b", 1000, 0.885),
+    }
+    threshold = MathCombinatoricsPlugin().belief_promotion_threshold()
+    assert try_trend_promotion("monotonically decreasing Sidon ratio", nodes, threshold) is None
+
+
+def test_non_monotonic_trend_rejected() -> None:
+    assert is_consistent_trend([0.939, 0.950, 0.827], decreasing=True) is False
+
+
+def test_apply_trend_promotion_moves_to_active() -> None:
+    state = CampaignBeliefState()
+    state.proposed_ungrounded_beliefs.append(BeliefObject(
+        statement="greedy F(n)/sqrt(n) is monotonically decreasing",
+        confidence="weak",
+    ))
+    nodes = {
+        "a": _confirmed_node("a", 500, 0.939),
+        "b": _confirmed_node("b", 1000, 0.885),
+        "c": _confirmed_node("c", 2000, 0.827),
+    }
+    n = apply_trend_promotion_to_beliefs(
+        state, nodes, MathCombinatoricsPlugin().belief_promotion_threshold(),
+    )
+    assert n == 1
+    assert len(state.active_beliefs) == 1
+    assert len(state.active_beliefs[0].supporting_nodes) >= 3

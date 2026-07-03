@@ -76,6 +76,7 @@ from propab.research_quality import (
     build_verification_escalation,
     classify_claim_strength,
     classify_inconclusive_reason,
+    compute_claim_dedup_key,
     compute_evidence_hash,
     compute_replication_level,
     compute_verification_hash,
@@ -233,7 +234,7 @@ def _apply_result_diagnostics(
             node.failure_signature = failure_signature_from_reason(node.inconclusive_reason, verdict_reason=vr)
             if node_id in tree.confirmed:
                 tree.confirmed.remove(node_id)
-        elif not tree.register_evidence_hash(ev_hash):
+        elif not tree.register_confirmed_claim(compute_claim_dedup_key(node.text)):
             effective_verdict = "inconclusive"
             node.verdict = "inconclusive"
             node.inconclusive_reason = "duplicate_evidence"
@@ -865,6 +866,7 @@ async def _maybe_run_campaign_synthesis(
         prior_snippets=prior_snippets,
         emitter=emitter,
         session_factory=session_factory,
+        domain_id=str(getattr(campaign, "domain_profile", None) or ""),
     )
     return len(added) > 0
 
@@ -931,7 +933,11 @@ async def generate_seed_hypotheses(
 
     for h in raw_hyps:
         raw_text = h.text
-        if not hypothesis_is_on_topic(raw_text, question=campaign.question):
+        if not hypothesis_is_on_topic(
+            raw_text,
+            question=campaign.question,
+            test_methodology=str(h.test_methodology or ""),
+        ):
             continue
         dup, _ = _is_duplicate_frontier_candidate(
             raw_text,
@@ -962,7 +968,11 @@ async def generate_seed_hypotheses(
         })
     if not seed_dicts and raw_hyps:
         for h in raw_hyps:
-            if not hypothesis_is_on_topic(h.text, question=campaign.question):
+            if not hypothesis_is_on_topic(
+                h.text,
+                question=campaign.question,
+                test_methodology=str(h.test_methodology or ""),
+            ):
                 continue
             entry = enrich_entry_with_scope(
                 {"id": h.id, "text": h.text, "test_methodology": h.test_methodology},
@@ -1641,6 +1651,16 @@ async def run_campaign_loop(
             policy_record=lifetime.policy_record,
         )
         lifetime_seed_context = lifetime_context_for_seeds(lifetime.graph, lifetime.policy)
+        from propab.numerical_seeds import format_seeds_for_question
+
+        domain_profile_id = str(getattr(parsed, "domain_profile", None) or domain or "")
+        seed_block = format_seeds_for_question(
+            knowledge_graph.get_numerical_seeds(domain_profile_id or "math_combinatorics"),
+        )
+        if seed_block:
+            lifetime_seed_context = f"{lifetime_seed_context}\n\n{seed_block}".strip()
+        synthesis_history_buckets: list[dict[str, str]] = []
+        diversity_reset_attempts = 0
         search_policy = lifetime.policy
         knowledge_graph = lifetime.graph
         prior_snippets = _prior_snippets(prior_dict)
@@ -1782,6 +1802,18 @@ async def run_campaign_loop(
                         stop_reason = STOP_REASON_ALL_BRANCHES_EXHAUSTED
                         break
                     elif bool(getattr(settings, "campaign_synthesis_enabled", True)):
+                        from propab.synthesis_diversity import diversity_reset_instruction
+
+                        reset_prompt = None
+                        if (
+                            campaign.hypothesis_tree.next_dispatch_candidate(frozenset()) is None
+                            and diversity_reset_attempts < 3
+                        ):
+                            reset_prompt = diversity_reset_instruction(
+                                synthesis_history_buckets,
+                                attempt=diversity_reset_attempts,
+                            )
+                            diversity_reset_attempts += 1
                         added, _syn_metrics = await run_campaign_synthesis_pass(
                             campaign_id=campaign.id,
                             question=campaign.question,
@@ -1792,7 +1824,27 @@ async def run_campaign_loop(
                             prior_snippets=prior_snippets,
                             emitter=emitter,
                             session_factory=session_factory,
+                            domain_id=domain_profile_id or domain,
+                            synthesis_history_buckets=synthesis_history_buckets,
+                            diversity_reset_instruction=reset_prompt,
                         )
+                        from propab.numerical_seeds import classify_hypothesis_bucket
+
+                        for node in added:
+                            synthesis_history_buckets.append(
+                                classify_hypothesis_bucket(node.text, node.test_methodology or ""),
+                            )
+                        if (
+                            not added
+                            and campaign.hypothesis_tree.next_dispatch_candidate(frozenset()) is None
+                            and diversity_reset_attempts < 3
+                        ):
+                            logger.info(
+                                "[campaign %s] Diversity reset attempt %s produced no candidates; retrying.",
+                                campaign.id,
+                                diversity_reset_attempts,
+                            )
+                            continue
                         if (
                             not added
                             and campaign.hypothesis_tree.next_dispatch_candidate(frozenset()) is None

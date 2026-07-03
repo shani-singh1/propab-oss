@@ -117,8 +117,9 @@ class DomainPlugin(ABC):
         """
         return "inconclusive", "no domain verdict classifier configured", 0.5
 
-    def hypothesis_on_topic(self, text: str) -> bool:
+    def hypothesis_on_topic(self, text: str, methodology: str | None = None) -> bool:
         """Return True if hypothesis text is on-topic for this domain (default: accept all)."""
+        _ = methodology
         return True
 
     # --- Artifact detection -------------------------------------------------
@@ -170,6 +171,26 @@ class DomainPlugin(ABC):
     def literature_prior(self, question: str) -> dict[str, Any]:
         """Domain-specific literature context to seed a campaign. Default: none."""
         return {}
+
+    def belief_promotion_threshold(self) -> dict[str, Any]:
+        """
+        Domain-appropriate rules for when a belief becomes active.
+        Statistical domains require strong confidence; math trends may use weak.
+        """
+        return {
+            "requires_supporting_nodes": 1,
+            "requires_confidence": "strong",
+            "allow_trend_promotion": False,
+        }
+
+    def implementable_methodologies(self) -> list[str]:
+        """Keywords mapping to implemented verifier features (empty = no filter)."""
+        return []
+
+    def extract_numerical_seeds(self, confirmed_nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Extract numerical findings from confirmed nodes for next campaign seeding."""
+        _ = confirmed_nodes
+        return []
 
     # --- Link to the artifact-gate profile ---------------------------------
     def domain_profile(self):  # -> DomainProfile | None

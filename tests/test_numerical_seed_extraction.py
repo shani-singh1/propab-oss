@@ -1,0 +1,46 @@
+"""Numerical seed extraction (fixes.md A2)."""
+from __future__ import annotations
+
+from propab.knowledge_graph import KnowledgeGraph
+from propab.numerical_seeds import extract_math_combinatorics_seeds, format_seeds_for_question
+from propab.domain_modules.math_combinatorics.plugin import MathCombinatoricsPlugin
+
+
+def _sweep_node(ratios: list[float], ns: list[int]) -> dict:
+    sweep = [{"n": n, "ratio_to_sqrt_n": r} for n, r in zip(ns, ratios)]
+    return {
+        "id": "sweep-1",
+        "verdict": "confirmed",
+        "finding": {
+            "metric_name": "sidon_ratio_to_sqrt_n",
+            "metric_value": sum(ratios) / len(ratios),
+            "sweep": sweep,
+            "notes": f"Sidon sweep over n={ns}: ratios={ratios}",
+        },
+    }
+
+
+def test_extract_monotone_and_thresholds() -> None:
+    ns = [500, 1000, 2000, 5000, 10000]
+    ratios = [0.939, 0.885, 0.827, 0.721, 0.670]
+    seeds = extract_math_combinatorics_seeds([_sweep_node(ratios, ns)])
+    types = {s["finding_type"] for s in seeds}
+    assert "monotonic_trend" in types
+    assert "threshold_crossing" in types
+    crossing_70 = [s for s in seeds if s.get("parameters", {}).get("threshold") == 0.70]
+    assert crossing_70
+    assert crossing_70[0]["parameters"]["crossing_n"] == 10000
+
+
+def test_plugin_and_knowledge_graph_storage() -> None:
+    plugin = MathCombinatoricsPlugin()
+    ns = [500, 1000, 2000]
+    ratios = [0.939, 0.885, 0.827]
+    seeds = plugin.extract_numerical_seeds([_sweep_node(ratios, ns)])
+    assert seeds
+    g = KnowledgeGraph()
+    g.store_numerical_seeds("math_combinatorics", "camp-1", seeds)
+    loaded = g.get_numerical_seeds("math_combinatorics")
+    assert loaded
+    text = format_seeds_for_question(loaded)
+    assert "prior campaigns" in text.lower()

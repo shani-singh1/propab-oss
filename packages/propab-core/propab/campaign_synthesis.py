@@ -103,6 +103,8 @@ def apply_synthesis_to_frontier(
     generation: int,
     relevance_threshold: float = 0.35,
     prior_snippets: list[str] | None = None,
+    domain_id: str | None = None,
+    synthesis_history_buckets: list[dict[str, str]] | None = None,
 ) -> tuple[list[HypothesisNode], dict[str, Any]]:
     """
     Apply synthesis JSON to belief state and tree frontier.
@@ -113,6 +115,8 @@ def apply_synthesis_to_frontier(
         "n_added": 0,
         "n_rejected_duplicate": 0,
         "n_rejected_off_topic": 0,
+        "n_rejected_unimplementable": 0,
+        "beliefs_promoted_by_trend": 0,
         "binding_rejected_count": 0,
         "binding_accepted_count": 0,
         "falsifiability_rejected_count": 0,
@@ -137,6 +141,18 @@ def apply_synthesis_to_frontier(
         metrics=binding_metrics,
     )
     metrics.update(binding_metrics.to_dict())
+
+    from propab.domain_modules.registry import get_domain_plugin
+    from propab.belief_promotion import apply_trend_promotion_to_beliefs
+
+    plugin = get_domain_plugin(domain_id) if domain_id else None
+    if plugin is not None:
+        promoted = apply_trend_promotion_to_beliefs(
+            belief_state,
+            node_dicts,
+            plugin.belief_promotion_threshold(),
+        )
+        metrics["beliefs_promoted_by_trend"] = promoted
     for item in parsed.get("closed_beliefs_append") or []:
         if isinstance(item, dict) and item.get("statement"):
             belief_state.closed_beliefs.append(ClosedBelief(
@@ -152,12 +168,43 @@ def apply_synthesis_to_frontier(
 
     # Frontier candidates — dedup before add_seeds (fixes.md P2)
     from propab.domain_modules.registry import hypothesis_is_on_topic
+    from propab.numerical_seeds import classify_hypothesis_bucket
+    from propab.synthesis_diversity import (
+        forced_problem_type,
+        methodology_implementable,
+    )
+
+    implementable: list[str] = []
+    if plugin is not None:
+        implementable = plugin.implementable_methodologies()
+    forced_type = forced_problem_type(synthesis_history_buckets or [], streak=5)
 
     seed_dicts: list[dict[str, Any]] = []
     same_round_texts: list[str] = []
     for item in _candidate_dicts(parsed):
         raw_text = str(item.get("text") or "")
-        if not hypothesis_is_on_topic(raw_text, question=question):
+        methodology = str(item.get("test_methodology") or "")
+        if implementable and not methodology_implementable(raw_text, methodology, implementable):
+            metrics["n_rejected_unimplementable"] = int(metrics.get("n_rejected_unimplementable") or 0) + 1
+            logger.debug("Rejected unimplementable methodology: %s", raw_text[:80])
+            continue
+        bucket = classify_hypothesis_bucket(raw_text, methodology)
+        if forced_type and bucket.get("problem_type") == forced_type:
+            pass  # preferred when diversity forcing active
+        elif forced_type and bucket.get("problem_type") != forced_type and metrics["n_candidates_raw"] > 3:
+            # Soft skip dominant repeat type when forcing another (keep some if only option)
+            dominant_count = sum(
+                1 for t in same_round_texts
+                if classify_hypothesis_bucket(t).get("problem_type") != forced_type
+            )
+            if dominant_count >= 2 and bucket.get("problem_type") != forced_type:
+                metrics["n_rejected_unimplementable"] = int(metrics.get("n_rejected_unimplementable") or 0) + 1
+                continue
+        if not hypothesis_is_on_topic(
+            raw_text,
+            question=question,
+            test_methodology=str(item.get("test_methodology") or ""),
+        ):
             metrics["n_rejected_off_topic"] = int(metrics.get("n_rejected_off_topic") or 0) + 1
             logger.debug("Rejected off-topic frontier candidate: %s", raw_text[:80])
             continue
@@ -234,6 +281,9 @@ async def run_campaign_synthesis_pass(
     prior_snippets: list[str] | None = None,
     emitter: Any | None = None,
     session_factory: Any | None = None,
+    domain_id: str | None = None,
+    synthesis_history_buckets: list[dict[str, str]] | None = None,
+    diversity_reset_instruction: str | None = None,
 ) -> tuple[list[HypothesisNode], dict[str, Any]]:
     """Tier-2 batched synthesis: one LLM call per trigger."""
     completed_ids = {
@@ -247,6 +297,8 @@ async def run_campaign_synthesis_pass(
         tree=tree,
         since_node_ids=new_since if new_since else None,
     )
+    if diversity_reset_instruction:
+        prompt = f"{prompt}\n\n{diversity_reset_instruction}"
 
     raw = await llm.call(
         prompt=prompt,
@@ -261,6 +313,8 @@ async def run_campaign_synthesis_pass(
         question=question,
         generation=generation,
         prior_snippets=prior_snippets,
+        domain_id=domain_id,
+        synthesis_history_buckets=synthesis_history_buckets,
     )
 
     belief_state.results_since_last_synthesis = 0

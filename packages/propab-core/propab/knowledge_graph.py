@@ -106,6 +106,34 @@ class KnowledgeGraph:
     questions: dict[str, ResearchQuestion] = field(default_factory=dict)
     links: list[dict[str, str]] = field(default_factory=list)
     campaign_ids: list[str] = field(default_factory=list)
+    numerical_seeds: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    diversity_by_domain: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
+
+    def store_numerical_seeds(
+        self,
+        domain: str,
+        campaign_id: str,
+        seeds: list[dict[str, Any]],
+    ) -> None:
+        bucket = list(self.numerical_seeds.get(domain) or [])
+        for seed in seeds:
+            entry = dict(seed)
+            entry["campaign_id"] = campaign_id
+            bucket.append(entry)
+        self.numerical_seeds[domain] = bucket[-200:]
+
+    def get_numerical_seeds(self, domain: str, *, limit: int = 30) -> list[dict[str, Any]]:
+        return list((self.numerical_seeds.get(domain) or [])[-limit:])
+
+    def store_diversity_distribution(
+        self,
+        domain: str,
+        distribution: dict[str, dict[str, int]],
+    ) -> None:
+        self.diversity_by_domain[domain] = distribution
+
+    def get_diversity_distribution(self, domain: str) -> dict[str, dict[str, int]]:
+        return dict(self.diversity_by_domain.get(domain) or {})
 
     def add_claim(self, claim: Claim) -> None:
         self.claims[claim.id] = claim
@@ -174,6 +202,8 @@ class KnowledgeGraph:
             "questions": {k: v.to_dict() for k, v in self.questions.items()},
             "links": self.links,
             "campaign_ids": self.campaign_ids,
+            "numerical_seeds": self.numerical_seeds,
+            "diversity_by_domain": self.diversity_by_domain,
         }
 
     @classmethod
@@ -191,6 +221,8 @@ class KnowledgeGraph:
             g.questions[k] = ResearchQuestion(**v)
         g.links = list(data.get("links") or [])
         g.campaign_ids = list(data.get("campaign_ids") or [])
+        g.numerical_seeds = dict(data.get("numerical_seeds") or {})
+        g.diversity_by_domain = dict(data.get("diversity_by_domain") or {})
         return g
 
     def save(self, path: Path | None = None) -> Path:
