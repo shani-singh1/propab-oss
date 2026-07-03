@@ -86,6 +86,7 @@ class BindingMetrics:
     binding_accepted_count: int = 0
     falsifiability_rejected_count: int = 0
     belief_cap_rejected_count: int = 0
+    ungrounded_belief_count: int = 0
     rejection_reasons: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -94,6 +95,7 @@ class BindingMetrics:
             "binding_accepted_count": self.binding_accepted_count,
             "falsifiability_rejected_count": self.falsifiability_rejected_count,
             "belief_cap_rejected_count": self.belief_cap_rejected_count,
+            "ungrounded_belief_count": self.ungrounded_belief_count,
             "rejection_reasons": list(self.rejection_reasons[-20:]),
         }
 

@@ -6,6 +6,7 @@ from propab.research_quality import (
     NODE_ROLE_CONTROL,
     NODE_ROLE_DISCOVERY,
     build_canonical_finding,
+    compute_claim_dedup_key,
     compute_evidence_hash,
     extract_theme_vector,
     infer_node_role,
@@ -37,6 +38,15 @@ def test_evidence_hash_dedup():
     tree = HypothesisTree()
     assert tree.register_evidence_hash(h) is True
     assert tree.register_evidence_hash(h) is False
+
+
+def test_confirmed_claim_dedup_independent_of_evidence():
+    tree = HypothesisTree()
+    key = compute_claim_dedup_key("Greedy Sidon ratio below 0.90 at n=1000")
+    assert tree.register_confirmed_claim(key) is True
+    assert tree.register_confirmed_claim(key) is False
+    other = compute_claim_dedup_key("Greedy Sidon ratio below 0.80 at n=2000")
+    assert tree.register_confirmed_claim(other) is True
 
 
 def test_control_confirm_becomes_inconclusive():

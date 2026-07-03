@@ -60,7 +60,7 @@ def belief_state_from_synthesis_events(events: list[dict[str, Any]]) -> Campaign
         p = _payload(ev)
         raw_beliefs = p.get("active_beliefs") or []
         if raw_beliefs:
-            state.apply_synthesis_beliefs(raw_beliefs)
+            state.apply_synthesis_beliefs(raw_beliefs, allow_ungrounded=True)
         if p.get("branch_exhausted") is not None:
             state.branch_exhausted = bool(p.get("branch_exhausted"))
         if p.get("exhaustion_rounds") is not None:
@@ -124,7 +124,7 @@ def apply_contrarian_belief_reset(
             "supporting_nodes": [],
             "contradicting_nodes": [],
         },
-    ])
+    ], allow_ungrounded=True)
     belief_state.exhaustion_rounds = 0
     belief_state.branch_exhausted = False
     belief_state.rival_exhaustion_mode = True

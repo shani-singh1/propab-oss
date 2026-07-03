@@ -52,24 +52,25 @@ _QUESTIONS: dict[str, str] = {
     ),
     "math_combinatorics": (
         "[domain_profile:math_combinatorics] "
-        "Investigate the following open questions in additive combinatorics through "
-        "systematic computational search: "
-        "(1) SIDON DENSITY: For n in {100, 200, 500, 1000, 2000, 5000, 10000}, compute "
-        "the ratio F(n)/sqrt(n) where F(n) is the maximum Sidon set size. The known bound "
-        "is F(n) <= sqrt(n) + O(n^{1/4}). Does the ratio converge? If so, to what constant? "
-        "Is the constant below 1.0, suggesting the upper bound is not tight? "
-        "(2) CAP SET GAP: For F_3^n with n in {3,4,5,6,7}, find the largest cap set "
-        "achievable by any construction. The CLP upper bound is 2.756^n. The best known "
-        "construction achieves 2.217^n. For each n, what is the actual maximum found, "
-        "and does it suggest a tighter upper bound or better construction? "
-        "(3) SIDON STRUCTURE: Among all maximum or near-maximum Sidon sets found for "
-        "a given n, what structural properties do they share? Are they concentrated in "
-        "intervals or spread? Is there a pattern in gaps between consecutive elements? "
-        "Do NOT confirm a hypothesis if it merely recomputes a known result. A finding "
-        "is only interesting if it reveals asymptotic behavior, the gap between bounds "
-        "and constructions, or structural properties not characterized in the literature. "
-        "Every experiment must use combinatorics verification only. Do NOT perform file "
-        "system searches, PATH lookups, or OS interactions."
+        "Answer these tractable questions using ONLY greedy Sidon search, Bose-Chowla "
+        "construction, cap-set best-known table lookup, and band/threshold claim "
+        "verification. Do NOT propose Ruzsa, Singer, Poisson gap tests, Fourier analysis, "
+        "SAT solvers, stochastic optimizers, or structural statistics the verifier cannot "
+        "compute. "
+        "ESTABLISHED BASELINE (from prior campaigns, do not re-test as novel): "
+        "(A) Greedy Sidon: for n in {500,1000,2000,5000,10000}, F(n)/sqrt(n) is strictly "
+        "below 0.95 (observed max 0.939 at n=500, descending to 0.67 at n=10000). "
+        "(B) Cap sets F_3^n dims 3-7: CLP ratios decrease monotonically and stay well "
+        "below 2.25. "
+        "OPEN QUESTIONS TO TEST NOW: "
+        "(1) For greedy Sidon in {1,...,n}, at what n does F(n)/sqrt(n) first fall below "
+        "0.90? Below 0.80? Below 0.70? Is the descent monotone at all tested scales or "
+        "are there local reversals? "
+        "(2) Does Bose-Chowla at matched n always underperform greedy, and by what ratio "
+        "F_BC(n)/sqrt(n) vs F_greedy(n)/sqrt(n) across n in {100,500,1000,5000,10000}? "
+        "Every hypothesis must state a falsifiable numeric band, threshold, or comparison "
+        "claim that the combinatorics verifier can check. Do NOT confirm without matching "
+        "computed results to the stated claim. Do NOT perform file system or OS operations."
     ),
 }
 
@@ -213,9 +214,12 @@ def main() -> int:
     }
     if domain == "math_combinatorics":
         payload["orchestrator_directive"] = (
-            "Target open problems only. Do not treat single-point greedy computations "
-            "at small n as discoveries. Hypotheses must involve multi-n sweeps (n≥500), "
-            "asymptotic ratio F(n)/sqrt(n), cap-set CLP gap trends, or Sidon structure."
+            "Narrow scope: greedy Sidon sweeps, Bose-Chowla vs greedy ratio comparison, "
+            "cap-set table lookup only. Reject Ruzsa/Singer/Poisson/Fourier/stochastic/SAT "
+            "hypotheses at synthesis. Baseline established: greedy F(n)/sqrt(n) < 0.95 for "
+            "n>=500; cap-set CLP ratios decrease below 2.25 for dims 3-7. Generate only "
+            "falsifiable band/threshold/monotonicity claims the verifier can check. Do not "
+            "confirm without claim_checked matching computed results."
         )
 
     body = json.dumps(payload).encode("utf-8")

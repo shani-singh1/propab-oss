@@ -170,7 +170,15 @@ def infer_domain_scope_template(question: str) -> ScopedClaim:
     """
     ql = (question or "").lower()
     # Lazy import avoids a module-load import cycle (domain plugins import core).
-    from propab.domain_modules.registry import all_plugins
+    from propab.domain_modules.registry import all_plugins, get_domain_plugin
+
+    tag = re.search(r"\[domain_profile:([a-z0-9_]+)\]", question or "", re.I)
+    if tag:
+        tagged = get_domain_plugin(tag.group(1).lower())
+        if tagged is not None:
+            tmpl = tagged.scope_template()
+            if tmpl:
+                return ScopedClaim(text="", **tmpl)
 
     for plugin in all_plugins():
         tmpl = plugin.scope_template()

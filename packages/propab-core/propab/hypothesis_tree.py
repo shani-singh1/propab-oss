@@ -244,6 +244,7 @@ class HypothesisTree:
     _generation: int = field(default=0, repr=False)        # current campaign generation
     _scoring_context: FrontierScoringContext = field(default_factory=FrontierScoringContext, repr=False)
     _used_evidence_hashes: set[str] = field(default_factory=set, repr=False)
+    _used_confirmed_claim_keys: set[str] = field(default_factory=set, repr=False)
     finding_ledger: list[dict[str, Any]] = field(default_factory=list, repr=False)
 
     # ── Mutation ─────────────────────────────────────────────────────────────
@@ -276,6 +277,15 @@ class HypothesisTree:
         if h in self._used_evidence_hashes:
             return False
         self._used_evidence_hashes.add(h)
+        return True
+
+    def register_confirmed_claim(self, claim_key: str) -> bool:
+        """Return True if this claim text is new among confirmations; False if duplicate claim."""
+        if not claim_key:
+            return True
+        if claim_key in self._used_confirmed_claim_keys:
+            return False
+        self._used_confirmed_claim_keys.add(claim_key)
         return True
 
     def add_seeds(self, hypotheses: list[dict[str, Any]], generation: int = 0) -> list[HypothesisNode]:

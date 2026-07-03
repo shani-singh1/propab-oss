@@ -64,6 +64,7 @@ class CampaignBeliefState:
     """Pinned belief context for a campaign branch (never summarized away)."""
 
     active_beliefs: list[BeliefObject] = field(default_factory=list)
+    proposed_ungrounded_beliefs: list[BeliefObject] = field(default_factory=list)
     closed_beliefs: list[ClosedBelief] = field(default_factory=list)
     human_messages: list[str] = field(default_factory=list)
     recent_activity_summary: str = ""
@@ -76,6 +77,9 @@ class CampaignBeliefState:
     def to_dict(self) -> dict[str, Any]:
         return {
             "active_beliefs": [b.to_dict() for b in self.active_beliefs],
+            "proposed_ungrounded_beliefs": [
+                b.to_dict() for b in self.proposed_ungrounded_beliefs
+            ],
             "closed_beliefs": [c.to_dict() for c in self.closed_beliefs],
             "human_messages": list(self.human_messages[-10:]),
             "recent_activity_summary": self.recent_activity_summary,
@@ -92,6 +96,10 @@ class CampaignBeliefState:
             return cls()
         return cls(
             active_beliefs=[BeliefObject.from_dict(b) for b in (data.get("active_beliefs") or [])],
+            proposed_ungrounded_beliefs=[
+                BeliefObject.from_dict(b)
+                for b in (data.get("proposed_ungrounded_beliefs") or [])
+            ],
             closed_beliefs=[ClosedBelief.from_dict(c) for c in (data.get("closed_beliefs") or [])],
             human_messages=list(data.get("human_messages") or [])[-10:],
             recent_activity_summary=str(data.get("recent_activity_summary") or ""),
@@ -123,6 +131,7 @@ class CampaignBeliefState:
         dataset_feature_count: int = 0,
         dataset_n_samples: int = 0,
         metrics: Any | None = None,
+        allow_ungrounded: bool = False,
     ) -> None:
         """Merge synthesis output into active beliefs, with Evidence Binding + admission gates."""
         from propab.evidence_binding import (
@@ -182,6 +191,30 @@ class CampaignBeliefState:
             else:
                 supporting = raw_sup
                 contradicting = raw_con
+
+            if not supporting:
+                if allow_ungrounded:
+                    updated.append(BeliefObject(
+                        statement=stmt,
+                        confidence=conf,  # type: ignore[arg-type]
+                        supporting_nodes=[],
+                        contradicting_nodes=contradicting,
+                        status=status,  # type: ignore[arg-type]
+                    ))
+                    continue
+                if metrics is not None:
+                    metrics.ungrounded_belief_count = int(
+                        getattr(metrics, "ungrounded_belief_count", 0) or 0,
+                    ) + 1
+                    metrics.rejection_reasons.append(f"ungrounded:{stmt[:80]}")
+                self.proposed_ungrounded_beliefs.append(BeliefObject(
+                    statement=stmt,
+                    confidence=conf,  # type: ignore[arg-type]
+                    supporting_nodes=[],
+                    contradicting_nodes=contradicting,
+                    status="active",  # type: ignore[arg-type]
+                ))
+                continue
 
             updated.append(BeliefObject(
                 statement=stmt,

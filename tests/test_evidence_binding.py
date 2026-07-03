@@ -94,9 +94,9 @@ def test_rival_mode_hard_cap_two_beliefs() -> None:
     metrics = BindingMetrics()
     state.apply_synthesis_beliefs(
         [
-            {"statement": "Rival A within-family signal exists under clustered split.", "status": "active"},
-            {"statement": "Rival B redundancy artifact collapses under low identity holdout.", "status": "active"},
-            {"statement": "Rival C should be rejected by cap.", "status": "active"},
+            {"statement": "Rival A within-family signal exists under clustered split.", "status": "active", "supporting_nodes": ["n1"]},
+            {"statement": "Rival B redundancy artifact collapses under low identity holdout.", "status": "active", "supporting_nodes": ["n1"]},
+            {"statement": "Rival C should be rejected by cap.", "status": "active", "supporting_nodes": ["n1"]},
         ],
         metrics=metrics,
     )
@@ -194,3 +194,17 @@ def test_synthesis_pass_rejects_fabricated_citation_before_persist() -> None:
     assert WITHIN_FAMILY_NODE["id"] in belief.supporting_nodes
     assert FABRICATED_UNRELATED_NODE["id"] not in belief.supporting_nodes
     assert int(metrics.get("binding_rejected_count") or 0) >= 1
+
+
+def test_ungrounded_belief_goes_to_proposed_list() -> None:
+    """Beliefs with zero supporting nodes cannot enter active_beliefs."""
+    state = CampaignBeliefState()
+    metrics = BindingMetrics()
+    state.apply_synthesis_beliefs(
+        [{"statement": "Phase transition between n=20000 and n=50000", "confidence": "weak", "status": "active"}],
+        tree_nodes={LOFO_NODE["id"]: LOFO_NODE},
+        metrics=metrics,
+    )
+    assert len(state.active_beliefs) == 0
+    assert len(state.proposed_ungrounded_beliefs) == 1
+    assert metrics.ungrounded_belief_count == 1

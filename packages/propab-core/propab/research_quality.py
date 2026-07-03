@@ -172,6 +172,15 @@ def is_valid_evidence_for_hash(evidence: dict[str, Any]) -> bool:
     return False
 
 
+def compute_claim_dedup_key(text: str) -> str:
+    """Stable key for confirmed-claim dedup (first claim line, normalized)."""
+    import re as _re
+
+    line = next((ln.strip() for ln in (text or "").splitlines() if ln.strip()), "")
+    core = _re.sub(r"\s+", " ", (line or text or "").lower().strip())
+    return core[:500]
+
+
 def compute_evidence_hash(evidence: dict[str, Any]) -> str | None:
     """P0.2/P0.3 — stable hash; None when evidence is empty/invalid."""
     if not is_valid_evidence_for_hash(evidence):

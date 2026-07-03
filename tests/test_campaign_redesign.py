@@ -42,10 +42,10 @@ def test_prompts_directory_exists() -> None:
 def test_belief_cap_and_abandonment() -> None:
     state = CampaignBeliefState()
     state.apply_synthesis_beliefs([
-        {"statement": "A", "confidence": "weak", "status": "active"},
-        {"statement": "B", "confidence": "unclear", "status": "active"},
-        {"statement": "C", "confidence": "strong", "status": "active"},
-        {"statement": "D", "confidence": "weak", "status": "active"},
+        {"statement": "A", "confidence": "weak", "status": "active", "supporting_nodes": ["n1"]},
+        {"statement": "B", "confidence": "unclear", "status": "active", "supporting_nodes": ["n1"]},
+        {"statement": "C", "confidence": "strong", "status": "active", "supporting_nodes": ["n1"]},
+        {"statement": "D", "confidence": "weak", "status": "active", "supporting_nodes": ["n1"]},
     ])
     assert len(state.active_beliefs) == MAX_ACTIVE_BELIEFS
     assert state.active_beliefs[0].statement == "A"
@@ -59,7 +59,7 @@ def test_belief_cap_and_abandonment() -> None:
 def test_exhaustion_requires_three_rounds() -> None:
     state = CampaignBeliefState()
     state.apply_synthesis_beliefs([
-        {"statement": "only unclear", "confidence": "unclear", "status": "active"},
+        {"statement": "only unclear", "confidence": "unclear", "status": "active", "supporting_nodes": ["n1"]},
     ])
     for _ in range(EXHAUSTION_ROUNDS_REQUIRED - 1):
         state.record_exhaustion_round(True)
@@ -72,7 +72,7 @@ def test_exhaustion_resets_on_new_strong_belief() -> None:
     state = CampaignBeliefState()
     state.exhaustion_rounds = 2
     state.apply_synthesis_beliefs([
-        {"statement": "revived", "confidence": "strong", "status": "strengthened"},
+        {"statement": "revived", "confidence": "strong", "status": "strengthened", "supporting_nodes": ["n1"]},
     ])
     state.record_exhaustion_round(False)
     assert state.exhaustion_rounds == 0
@@ -317,9 +317,9 @@ def test_contrarian_belief_reset_closes_prior_and_seeds_two_rivals() -> None:
 
     state = CampaignBeliefState()
     state.apply_synthesis_beliefs([
-        {"statement": "old belief A", "confidence": "strong", "status": "active"},
-        {"statement": "old belief B", "confidence": "weak", "status": "active"},
-        {"statement": "old belief C", "confidence": "unclear", "status": "active"},
+        {"statement": "old belief A", "confidence": "strong", "status": "active", "supporting_nodes": ["n1"]},
+        {"statement": "old belief B", "confidence": "weak", "status": "active", "supporting_nodes": ["n1"]},
+        {"statement": "old belief C", "confidence": "unclear", "status": "active", "supporting_nodes": ["n1"]},
     ])
     apply_contrarian_belief_reset(state)
     assert len(state.active_beliefs) == 2
@@ -335,8 +335,8 @@ def test_rival_exhaustion_requires_both_beliefs_three_rounds() -> None:
     state = CampaignBeliefState()
     state.rival_exhaustion_mode = True
     state.apply_synthesis_beliefs([
-        {"statement": "rival A", "confidence": "unclear", "status": "active"},
-        {"statement": "rival B", "confidence": "unclear", "status": "active"},
+        {"statement": "rival A", "confidence": "unclear", "status": "active", "supporting_nodes": ["n1"]},
+        {"statement": "rival B", "confidence": "unclear", "status": "active", "supporting_nodes": ["n1"]},
     ])
     for _ in range(EXHAUSTION_ROUNDS_REQUIRED - 1):
         state.record_synthesis_exhaustion(True)
@@ -349,8 +349,8 @@ def test_rival_exhaustion_does_not_stop_when_one_belief_progresses() -> None:
     state = CampaignBeliefState()
     state.rival_exhaustion_mode = True
     state.apply_synthesis_beliefs([
-        {"statement": "rival A", "confidence": "unclear", "status": "active"},
-        {"statement": "rival B", "confidence": "unclear", "status": "active"},
+        {"statement": "rival A", "confidence": "unclear", "status": "active", "supporting_nodes": ["n1"]},
+        {"statement": "rival B", "confidence": "unclear", "status": "active", "supporting_nodes": ["n1"]},
     ])
     for _ in range(EXHAUSTION_ROUNDS_REQUIRED):
         state.record_synthesis_exhaustion(True)
@@ -359,8 +359,8 @@ def test_rival_exhaustion_does_not_stop_when_one_belief_progresses() -> None:
     state = CampaignBeliefState()
     state.rival_exhaustion_mode = True
     state.apply_synthesis_beliefs([
-        {"statement": "rival A", "confidence": "strong", "status": "strengthened"},
-        {"statement": "rival B", "confidence": "unclear", "status": "active"},
+        {"statement": "rival A", "confidence": "strong", "status": "strengthened", "supporting_nodes": ["n1"]},
+        {"statement": "rival B", "confidence": "unclear", "status": "active", "supporting_nodes": ["n1"]},
     ])
     for _ in range(EXHAUSTION_ROUNDS_REQUIRED):
         state.record_synthesis_exhaustion(True)

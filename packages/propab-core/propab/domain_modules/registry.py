@@ -112,9 +112,10 @@ def hypothesis_is_on_topic(
     *,
     question: str = "",
     domain_id: str | None = None,
+    test_methodology: str | None = None,
 ) -> bool:
     """Return False when a domain plugin rejects hypothesis text as off-topic."""
     plugin = get_domain_plugin(domain_id) if domain_id else resolve_domain_plugin(question=question)
     if plugin is None:
         return True
-    return plugin.hypothesis_on_topic(text)
+    return plugin.hypothesis_on_topic(text, methodology=test_methodology)

@@ -40,6 +40,17 @@ def test_parse_scope_from_text():
     assert "WS" in s.claimed_generalization
 
 
+def test_domain_profile_tag_wins_over_network_marker():
+    """Combinatorics campaigns must not inherit network-diffusion scope text."""
+    q = (
+        "[domain_profile:math_combinatorics] Investigate Sidon density and cap sets "
+        "in additive combinatorics."
+    )
+    scope = infer_domain_scope_template(q)
+    assert "F_3" in scope.population or "Integers" in scope.population
+    assert "node graphs" not in scope.population
+
+
 def test_enrich_entry_fills_contagion_template():
     entry = enrich_entry_with_scope(
         {"text": "Hub removal slows SIS outbreaks.", "id": "h1"},
