@@ -7,7 +7,6 @@ __pycache__/
 # Agent/editor worktrees and scratch
 .claude/
 data/
-!data/propab-banner.png
 frontend/node_modules/
 frontend/dist/
 test_que.md

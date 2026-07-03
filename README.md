@@ -1,7 +1,5 @@
 <div align="center">
 
-![Propab banner](./data/propab-banner.png)
-
 # Propab
 
 **An autonomous, literature-grounded research campaign engine.**
