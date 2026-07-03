@@ -146,19 +146,31 @@ class MathCombinatoricsPlugin(DomainPlugin):
         self, hypothesis_text: str, result: dict[str, Any]
     ) -> tuple[str, str, float]:
         _ = hypothesis_text
-        vt = int(result.get("verified_true_steps") or 0)
+        if result.get("trivial_rediscovery"):
+            return (
+                "inconclusive",
+                result.get("notes") or "recomputes known result; not open-problem evidence",
+                0.40,
+            )
         vf = int(result.get("verified_false_steps") or 0)
+        vt = int(result.get("verified_true_steps") or 0)
         if vf > 0:
             return (
                 "refuted",
                 result.get("notes") or "counterexample found",
                 0.95,
             )
-        if vt > 0:
+        if vt > 0 and result.get("discovery_worthy"):
             return (
                 "confirmed",
-                result.get("notes") or "combinatorial pattern verified",
-                0.95,
+                result.get("notes") or "open-problem computational evidence",
+                0.92,
+            )
+        if vt > 0:
+            return (
+                "inconclusive",
+                result.get("notes") or "computation succeeded but insufficient for open problem",
+                0.50,
             )
         return "inconclusive", "no definitive combinatorial result", 0.5
 

@@ -52,17 +52,24 @@ _QUESTIONS: dict[str, str] = {
     ),
     "math_combinatorics": (
         "[domain_profile:math_combinatorics] "
-        "You are investigating specific mathematical properties of additive "
-        "combinatorial structures. Every hypothesis must be a specific, falsifiable "
-        "claim about one of: (1) Sidon sets in {1,...,n} for specific values of n, "
-        "(2) cap sets in F_3^n for specific dimensions n, (3) AP-free sets in {1,...,n}, "
-        "(4) sumset growth |A+A|/|A| for structured sets A. "
-        "Every experiment must use combinatorics verification (Sidon, cap-set, AP-free, "
-        "or sumset computation) only. Do NOT perform file system searches, PATH lookups, "
-        "binary searches, or any action unrelated to combinatorial mathematics. "
-        "Do NOT write code that interacts with the operating system. "
-        "Focus on: extremal Sidon density vs sqrt(n), cap-set gap to CLP bound (2.756^n), "
-        "and AP-free density structure in {1,...,n}."
+        "Investigate the following open questions in additive combinatorics through "
+        "systematic computational search: "
+        "(1) SIDON DENSITY: For n in {100, 200, 500, 1000, 2000, 5000, 10000}, compute "
+        "the ratio F(n)/sqrt(n) where F(n) is the maximum Sidon set size. The known bound "
+        "is F(n) <= sqrt(n) + O(n^{1/4}). Does the ratio converge? If so, to what constant? "
+        "Is the constant below 1.0, suggesting the upper bound is not tight? "
+        "(2) CAP SET GAP: For F_3^n with n in {3,4,5,6,7}, find the largest cap set "
+        "achievable by any construction. The CLP upper bound is 2.756^n. The best known "
+        "construction achieves 2.217^n. For each n, what is the actual maximum found, "
+        "and does it suggest a tighter upper bound or better construction? "
+        "(3) SIDON STRUCTURE: Among all maximum or near-maximum Sidon sets found for "
+        "a given n, what structural properties do they share? Are they concentrated in "
+        "intervals or spread? Is there a pattern in gaps between consecutive elements? "
+        "Do NOT confirm a hypothesis if it merely recomputes a known result. A finding "
+        "is only interesting if it reveals asymptotic behavior, the gap between bounds "
+        "and constructions, or structural properties not characterized in the literature. "
+        "Every experiment must use combinatorics verification only. Do NOT perform file "
+        "system searches, PATH lookups, or OS interactions."
     ),
 }
 
@@ -121,6 +128,25 @@ def main() -> int:
         action="store_true",
         help="Launch even if power analysis did not pass (not recommended)",
     )
+    parser.add_argument(
+        "--no-hypothesis-cap",
+        action="store_true",
+        help="Do not cap total hypotheses (discovery campaigns)",
+    )
+    parser.add_argument(
+        "--min-confirmed-findings",
+        type=int,
+        default=None,
+        help=(
+            "Breakthrough threshold on confirmed count (default: 1 for verification, "
+            "999 for math_combinatorics discovery mode)"
+        ),
+    )
+    parser.add_argument(
+        "--discovery-mode",
+        action="store_true",
+        help="Run until time budget or belief exhaustion only (no early breakthrough stop)",
+    )
     parser.add_argument("--out", default=str(DEFAULT_OUT))
     args = parser.parse_args()
 
@@ -150,32 +176,49 @@ def main() -> int:
     question = _QUESTIONS.get(domain, f"[domain_profile:{domain}] Open discovery campaign.")
     api = args.api.rstrip("/")
 
+    discovery_mode = args.discovery_mode or domain == "math_combinatorics"
+    min_confirmed = args.min_confirmed_findings
+    if min_confirmed is None:
+        min_confirmed = 999 if discovery_mode else 1
+
     breakthrough = {
         "metric_name": "lofo_r2",
         "improvement_threshold": 0.05,
         "direction": "higher_is_better",
         "min_confidence": 0.85,
         "min_replications": 2,
-        "min_confirmed_findings": 1,
+        "min_confirmed_findings": min_confirmed,
     }
     if domain == "math_combinatorics":
+        # Baseline stays 0 for verification campaigns. Use API-max thresholds so
+        # is_breakthrough() never fires before time budget (conf=1.0, reps=20).
         breakthrough = {
-            "metric_name": "verified_true_steps",
-            "improvement_threshold": 0.001,
+            "metric_name": "sidon_ratio_to_sqrt_n",
+            "improvement_threshold": 1.0,
             "direction": "higher_is_better",
-            "min_confidence": 0.90,
-            "min_replications": 1,
-            "min_confirmed_findings": 1,
+            "min_confidence": 1.0,
+            "min_replications": 20 if discovery_mode else 2,
+            "min_confirmed_findings": None if discovery_mode else min_confirmed,
         }
 
-    body = json.dumps({
+    max_hypotheses = None if (args.no_hypothesis_cap or discovery_mode) else None
+
+    payload: dict[str, object] = {
         "question": question,
         "compute_budget_hours": args.hours,
-        "max_hypotheses": None,
+        "max_hypotheses": max_hypotheses,
         "domain_profile": domain,
         "policy_mode": "accepted",
         "breakthrough_criteria": breakthrough,
-    }).encode("utf-8")
+    }
+    if domain == "math_combinatorics":
+        payload["orchestrator_directive"] = (
+            "Target open problems only. Do not treat single-point greedy computations "
+            "at small n as discoveries. Hypotheses must involve multi-n sweeps (n≥500), "
+            "asymptotic ratio F(n)/sqrt(n), cap-set CLP gap trends, or Sidon structure."
+        )
+
+    body = json.dumps(payload).encode("utf-8")
 
     req = Request(
         f"{api}/campaigns",
@@ -200,8 +243,14 @@ def main() -> int:
         "domain_profile_meta": profile_meta,
         "question": question,
         "compute_budget_hours": args.hours,
-        "max_hypotheses": None,
-        "stopping_condition": "three_consecutive_exhaustion_rounds (belief_state)",
+        "max_hypotheses": max_hypotheses,
+        "discovery_mode": discovery_mode,
+        "min_confirmed_findings": min_confirmed,
+        "stopping_condition": (
+            "time_budget_or_belief_exhaustion"
+            if discovery_mode
+            else "three_consecutive_exhaustion_rounds (belief_state)"
+        ),
         "api": api,
         "stream_url": f"{api}/stream/{cid}",
         "state_url": f"{api}/campaigns/{cid}",

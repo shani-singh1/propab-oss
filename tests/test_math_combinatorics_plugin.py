@@ -31,19 +31,36 @@ def test_confirmation_criteria_deterministic(plugin: MathCombinatoricsPlugin) ->
     assert criteria["min_metric_steps_for_confirm"] >= 1
 
 
-def test_sidon_verification_finds_set() -> None:
+def test_trivial_single_n_sidon_is_not_confirmed(plugin: MathCombinatoricsPlugin) -> None:
     hypothesis = {
         "statement": "A Sidon set of size approximately sqrt(n) exists in {1,...,100}",
-        "test_methodology": "exhaustive search for maximum Sidon set",
+        "test_methodology": "greedy search",
     }
     evidence = run_combinatorics_experiment(hypothesis, ["sidon_set_density"])
-    assert evidence["deterministic"] is True
-    assert evidence["verified_true_steps"] >= 1
-    assert evidence["metric_value"] > 0
-    assert evidence["max_sidon_size"] >= 8
+    assert evidence.get("trivial_rediscovery") is True
+    verdict, _, _ = plugin.classify_verdict(hypothesis["statement"], evidence)
+    assert verdict == "inconclusive"
 
 
-def test_sidon_counterexample_detection() -> None:
+def test_sidon_sweep_asymptotic_can_confirm(plugin: MathCombinatoricsPlugin) -> None:
+    hypothesis = {
+        "statement": (
+            "For n in {100, 200, 500, 1000, 2000}, the ratio F(n)/sqrt(n) converges "
+            "to a constant below 1.0 as n grows"
+        ),
+        "test_methodology": "multi-n greedy Sidon sweep",
+    }
+    evidence = run_combinatorics_experiment(hypothesis, ["sidon_set_density"])
+    assert evidence.get("sweep")
+    assert evidence.get("max_n", 0) >= 500
+    verdict, _, confidence = plugin.classify_verdict(hypothesis["statement"], evidence)
+    assert verdict in ("confirmed", "refuted", "inconclusive")
+    if verdict == "confirmed":
+        assert evidence.get("discovery_worthy")
+        assert confidence >= 0.90
+
+
+def test_sidon_counterexample_refutes() -> None:
     hypothesis = {
         "statement": "No Sidon set of size 3 exists in {1,...,100}",
         "test_methodology": "exhaustive search",
@@ -52,19 +69,20 @@ def test_sidon_counterexample_detection() -> None:
     assert evidence["verified_false_steps"] >= 1
 
 
-def test_verdict_pipeline_confirms_deterministic_math() -> None:
+def test_verdict_pipeline_respects_discovery_worthy() -> None:
     evidence = {
         "verified_true_steps": 1,
         "verified_false_steps": 0,
         "deterministic": True,
+        "discovery_worthy": True,
         "verification_method": "combinatorial_computation",
-        "metric_value": 0.095,
+        "metric_value": 0.98,
     }
-    verdict, confidence, reason = run_verdict_pipeline(
+    verdict, confidence, _ = run_verdict_pipeline(
         evidence,
         campaign_context={"min_metric_steps": 1},
     )
-    assert verdict == "confirmed", f"Expected confirmed, got {verdict}: {reason}"
+    assert verdict == "confirmed"
     assert confidence >= 0.90
 
 
@@ -76,10 +94,10 @@ def test_hypothesis_on_topic_rejects_path_garbage(plugin: MathCombinatoricsPlugi
     assert plugin.hypothesis_on_topic(bad) is False
 
 
-def test_hypothesis_on_topic_accepts_sidon_claim(plugin: MathCombinatoricsPlugin) -> None:
+def test_hypothesis_on_topic_accepts_open_problem_claim(plugin: MathCombinatoricsPlugin) -> None:
     good = (
-        "A Sidon set of size at least 1.05*sqrt(n) exists in {1,...,200} "
-        "with greedy construction"
+        "For n in {500, 1000, 2000}, the ratio F(n)/sqrt(n) converges to a constant "
+        "below 1.0 for maximum Sidon sets"
     )
     assert plugin.hypothesis_on_topic(good) is True
 

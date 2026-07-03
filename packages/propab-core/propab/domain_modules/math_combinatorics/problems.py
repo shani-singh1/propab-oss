@@ -80,5 +80,12 @@ def get_literature_prior(question: str) -> dict[str, Any]:
         "dead_ends": [
             "Simple greedy constructions do not achieve optimal Sidon set density",
             "Random sets achieve Omega(sqrt(n)) Sidon size but not the extremal constant",
+            "Single-point greedy AP-free density at n≤200 is textbook, not a discovery",
+            "Confirming existence of Sidon sets without asymptotic sweep is not open-problem evidence",
+        ],
+        "required_evidence": [
+            "Multi-n sweep with n_max >= 500 for Sidon asymptotic claims",
+            "Multi-dimension sweep for cap-set CLP gap claims",
+            "Structural statistics across near-extremal sets, not one greedy construction",
         ],
     }
