@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -89,7 +89,18 @@ class ResearchConfig(BaseModel):
 
 
 class ResearchRequest(BaseModel):
-    question: str = Field(min_length=8)
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "question": "What molecular descriptors best predict dielectric constant in perovskites?",
+                    "config": {"max_hypotheses": 5, "paper_ttl_days": 30, "llm_model": "gpt-4o"},
+                }
+            ]
+        }
+    )
+
+    question: str = Field(min_length=8, description="Research question for a short hypothesis session")
     config: ResearchConfig = Field(default_factory=ResearchConfig)
 
 
@@ -99,7 +110,18 @@ class ResearchResponse(BaseModel):
     status: str
 
 
-@router.post("/research", response_model=ResearchResponse)
+@router.post(
+    "/research",
+    response_model=ResearchResponse,
+    summary="Start a short research session",
+    description=(
+        "Runs a bounded hypothesis session (not a full campaign). "
+        "Use `POST /campaigns` for long-running tree growth with beliefs and checkpoints."
+    ),
+    responses={
+        502: {"description": "Orchestrator unreachable when ORCHESTRATOR_URL is set"},
+    },
+)
 async def create_research_session(
     request: ResearchRequest,
     background_tasks: BackgroundTasks,
@@ -188,7 +210,33 @@ class BreakthroughCriteriaRequest(BaseModel):
 
 
 class CampaignRequest(BaseModel):
-    question: str = Field(min_length=8)
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "question": (
+                        "Which additive combinatorics constructions maximize Sidon density "
+                        "under greedy search? [domain_profile:math_combinatorics]"
+                    ),
+                    "compute_budget_hours": 3.0,
+                    "policy_mode": "accepted",
+                    "max_hypotheses": 120,
+                },
+                {
+                    "question": (
+                        "Do housekeeping genes show cross-tissue expression conservation "
+                        "under leave-one-tissue-out holdout? [domain_profile:genomics]"
+                    ),
+                    "compute_budget_hours": 2.0,
+                },
+            ]
+        }
+    )
+
+    question: str = Field(
+        min_length=8,
+        description="Campaign question; include `[domain_profile:<id>]` for explicit domain routing",
+    )
     compute_budget_hours: float = Field(default=4.0, ge=0.1, le=168.0)
     breakthrough_criteria: BreakthroughCriteriaRequest = Field(
         default_factory=BreakthroughCriteriaRequest
@@ -220,6 +268,15 @@ class CampaignResponse(BaseModel):
 
 
 class CampaignResumeRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {"compute_budget_hours": 4.0, "clear_hypothesis_cap": True},
+                {"belief_reset": "contrarian", "orchestrator_directive": "Test the opposite direction."},
+            ]
+        }
+    )
+
     max_hypotheses_cap: int | None = Field(default=None, ge=1, le=500)
     compute_budget_hours: float | None = Field(default=None, ge=0.1, le=168.0)
     clear_hypothesis_cap: bool = False
@@ -232,7 +289,14 @@ class CampaignResumeRequest(BaseModel):
     orchestrator_directive: str | None = None
 
 
-@router.post("/campaigns", response_model=CampaignResponse)
+@router.post(
+    "/campaigns",
+    response_model=CampaignResponse,
+    summary="Launch a research campaign",
+    responses={
+        502: {"description": "Orchestrator unreachable when ORCHESTRATOR_URL is set"},
+    },
+)
 async def create_campaign(
     request: CampaignRequest,
     background_tasks: BackgroundTasks,
@@ -337,11 +401,14 @@ async def create_campaign(
     )
 
 
-@router.get("/campaigns")
+@router.get(
+    "/campaigns",
+    summary="List campaigns",
+    description="Newest-first summary rows from `research_campaigns` for dashboards.",
+)
 async def list_campaigns(
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> dict:
-    """List all campaigns (newest first) with the headline fields the dashboard needs."""
     async with session_factory() as db:
         rows = (
             await db.execute(
@@ -359,12 +426,16 @@ async def list_campaigns(
     return {"campaigns": [dict(r) for r in rows]}
 
 
-@router.get("/campaigns/{campaign_id}")
+@router.get(
+    "/campaigns/{campaign_id}",
+    summary="Get campaign snapshot",
+    description="Full campaign state: hypothesis tree, belief state, budget, and event counts.",
+    responses={404: {"description": "Campaign not found"}},
+)
 async def get_campaign_state(
     campaign_id: str,
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> dict:
-    """Live campaign snapshot from Postgres (tree, metrics, budget)."""
     campaign = await db_load_campaign(campaign_id, session_factory)
     if campaign is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -409,7 +480,20 @@ async def get_campaign_state(
     }
 
 
-@router.post("/campaigns/{campaign_id}/resume", response_model=CampaignResponse)
+@router.post(
+    "/campaigns/{campaign_id}/resume",
+    response_model=CampaignResponse,
+    summary="Resume a stopped campaign",
+    description=(
+        "Warm-starts from Postgres checkpoint. Tree and beliefs are preserved unless "
+        "`belief_reset=contrarian` is requested."
+    ),
+    responses={
+        404: {"description": "Campaign not found"},
+        409: {"description": "Campaign is already active"},
+        502: {"description": "Orchestrator unreachable"},
+    },
+)
 async def resume_campaign(
     campaign_id: str,
     background_tasks: BackgroundTasks,
@@ -417,7 +501,6 @@ async def resume_campaign(
     emitter: EventEmitter = Depends(get_emitter),
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> CampaignResponse:
-    """Resume a checkpointed campaign (warm start — tree + belief state preserved)."""
     req = request
 
     launch_meta: dict | None = None
@@ -517,7 +600,12 @@ async def resume_campaign(
     )
 
 
-@router.get("/campaigns/{campaign_id}/resume-readiness")
+@router.get(
+    "/campaigns/{campaign_id}/resume-readiness",
+    summary="Pre-resume validation",
+    description="Checks belief backfill, cap persistence, and stale status before calling resume.",
+    responses={404: {"description": "Campaign not found"}},
+)
 async def get_resume_readiness(
     campaign_id: str,
     session_factory: async_sessionmaker = Depends(get_session_factory),

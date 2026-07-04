@@ -31,7 +31,15 @@ async def lifespan(app: FastAPI):
     await engine.dispose()
 
 
-app = FastAPI(title="Propab API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(
+    title="Propab API",
+    version="0.1.0",
+    description=(
+        "HTTP entrypoint for research sessions and long-running campaigns. "
+        "Interactive OpenAPI docs at `/docs`; workflow guide in `docs/api_reference.md`."
+    ),
+    lifespan=lifespan,
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

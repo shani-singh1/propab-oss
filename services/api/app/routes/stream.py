@@ -26,6 +26,16 @@ async def event_stream(redis: Redis, session_id: str) -> AsyncGenerator[str, Non
         await pubsub.close()
 
 
-@router.get("/stream/{session_id}")
+@router.get(
+    "/stream/{session_id}",
+    summary="Live campaign event stream (SSE)",
+    description=(
+        "Server-sent events for a session or campaign. `session_id` is the campaign UUID "
+        "returned by `POST /campaigns`. Each event is a JSON payload on a `data:` line."
+    ),
+    responses={
+        200: {"description": "text/event-stream of JSON event payloads"},
+    },
+)
 async def stream_session_events(session_id: str, redis: Redis = Depends(get_redis)) -> StreamingResponse:
     return StreamingResponse(event_stream(redis, session_id), media_type="text/event-stream")

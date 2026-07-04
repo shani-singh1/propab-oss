@@ -10,11 +10,11 @@ paper grounded in the actual experiment trace — while reporting a health metri
 for every part of itself so you always know *which* component is working.
 
 [![CI](https://github.com/shani-singh1/propab-oss/actions/workflows/ci.yml/badge.svg)](https://github.com/shani-singh1/propab-oss/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-467%20passing-brightgreen)](./tests)
+[![Tests](https://img.shields.io/badge/tests-530%20passing-brightgreen)](./tests)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](./pyproject.toml)
 
-[Quickstart](#quickstart) · [How it works](#how-it-works) · [Observability](#observability-the-differentiator) · [Extending](#extending-propab-to-a-new-domain) · [Architecture](./ARCHITECTURE.md)
+[Quickstart](#quickstart) · [How it works](#how-it-works) · [Current results](#current-results) · [Observability](#observability-the-differentiator) · [Adding a domain](#adding-a-domain) · [Architecture](./ARCHITECTURE.md)
 
 </div>
 
@@ -38,8 +38,19 @@ make it debuggable and trustworthy:
   time*, so a fabricated or irrelevant citation is rejected before it is ever
   persisted.
 
+**Evidence binding fix:** An early audit found that **94.5% of belief citations
+were irrelevant** to the claim they supposedly supported — convenient nodes
+attached after the fact. Propab now runs `evidence_binding` at belief write time;
+citations that do not bear on the claim are dropped before persistence. Target:
+≥95% citation integrity (see ownership contracts).
+
 And it fails fast: a **domain preflight gate** refuses to launch a campaign on
 data that is underpowered, instead of burning hours to discover it.
+
+**Current state (honest):** Propab is research-grade infrastructure, not a
+turnkey product. Math combinatorics and genomics domains are the most exercised;
+materials and network diffusion have run real campaigns; enzyme kinetics and
+graph invariants are stubs. The frontend is evolving separately (Agent 3).
 
 ---
 
@@ -51,7 +62,7 @@ data that is underpowered, instead of burning hours to discover it.
 | **Rival-belief campaigns** | Maintains ≤3 competing beliefs, runs the most discriminating experiment next, and detects when a direction is exhausted. |
 | **Honest verification** | Composed verdict pipeline: classify → artifact gate → OOD gate → scope integrity. Confirmed means it generalized. |
 | **Evidence binding at write time** | Citations that don't bear on a claim are removed before persistence — no convenient-but-fabricated support. |
-| **Domain plugins** | Core is domain-agnostic; each science domain implements one `DomainPlugin`. Materials, enzyme kinetics, graph invariants, network diffusion, and more. |
+| **Domain plugins** | Core is domain-agnostic; each science implements one `DomainPlugin`. Active: `math_combinatorics`, `genomics`, `materials`, `network_diffusion`, `mandrake`. Stubs: `enzyme_kinetics`, `graph_invariants`. |
 | **Preflight power gate** | `DOMAIN_PREFLIGHT_FAILED` in seconds beats "8 hours, 0 confirmed, underpowered all along." |
 | **Full observability** | Eight health metrics logged to Postgres; every campaign ends with a non-null enum stop reason. |
 | **Resumable & resilient** | State checkpointed to Postgres each round; API restarts don't kill campaigns; crashed workers requeue their hypothesis. |
@@ -78,12 +89,18 @@ Postgres, Redis, Qdrant, MinIO — and runs database migrations automatically
 - Dashboard → http://localhost:3000
 - API health → http://localhost:8000/health
 
-Launch a campaign from the dashboard, or via the API:
+Launch a campaign from the dashboard, via the API ([docs](./docs/api_reference.md)), or:
 
 ```bash
 curl -X POST http://localhost:8000/campaigns \
   -H 'Content-Type: application/json' \
-  -d '{"question": "Does the descriptor→dielectric relationship hold on held-out crystal systems? [domain_profile:materials]"}'
+  -d '{"question": "Does the descriptor→dielectric relationship hold on held-out crystal systems? [domain_profile:materials]", "compute_budget_hours": 3.0}'
+```
+
+Production-style deploy (built images, no source mounts):
+
+```bash
+docker compose -f docker-compose.prod.yml up -d
 ```
 
 Then watch it live at `http://localhost:8000/stream/{campaign_id}` (SSE) or in
@@ -131,6 +148,26 @@ Postgres after every round, so it survives restarts. Full design in
 
 ---
 
+## Current results
+
+Propab has produced **reproducible, verifier-checked findings** in math
+combinatorics — notably greedy Sidon set density trends and cap-set ratio bands
+at large `n`. These are **computational confirmations under stated scopes**, not
+claims of new theorems; replay through fixed verifiers is the acceptance bar
+(false confirm rate target < 10%).
+
+The **genomics** plugin validates cross-tissue expression claims with
+leave-one-tissue-out ridge regression and tissue-label shuffle nulls on a GTEx
+subset (synthetic fallback when no local data is mounted).
+
+Compare campaigns quantitatively:
+
+```bash
+python scripts/compare_campaigns.py --campaign-a <id> --campaign-b <id>
+```
+
+---
+
 ## Observability (the differentiator)
 
 Propab logs one health metric per component to Postgres. A campaign dashboard can
@@ -153,10 +190,13 @@ its metric means): [`propab_ownership_contracts.md`](./propab_ownership_contract
 
 ---
 
-## Extending Propab to a new domain
+## Adding a domain
 
 Core never imports a dataset, feature, or threshold directly — it asks a
-`DomainPlugin`. Adding a domain is implementing one class:
+`DomainPlugin`. **Full walkthrough:** [`docs/adding_a_domain.md`](./docs/adding_a_domain.md)
+(genomics as the worked example).
+
+Minimal sketch:
 
 ```python
 from propab.domain_modules.base import DomainPlugin, PreflightResult
@@ -172,24 +212,22 @@ class MyDomainPlugin(DomainPlugin):
         return ["feature_a", "feature_b"]
 
     def preflight(self) -> PreflightResult:
-        # fail fast if the data can't support the campaign
         n = load_my_dataset_size()
         if n < 500:
             return PreflightResult(False, f"underpowered: {n} rows", {"n": n})
         return PreflightResult(True, "ok", {"n": n})
 
     def run_verification(self, hypothesis, evidence=None, features=None) -> dict:
-        ...  # run the domain experiment, return an evidence dict
+        ...  # return evidence dict with verified_true_steps, metric_name, ...
 
     def confirmation_criteria(self) -> dict:
-        ...  # thresholds core uses to decide "confirmed"
+        ...
 ```
 
-Register it in `propab/domain_modules/registry.py` and it is resolved
-automatically by explicit tag, payload, or its own `matches`. Write the
-contract entry in `propab_ownership_contracts.md` *before* the code.
+Register in `propab/domain_modules/registry.py`, add a routing corpus (≥20 entries),
+and run the [validation checklist](./docs/adding_a_domain.md#step-5--validation-checklist).
 
-Adding a **tool** is even lighter — a plain function plus a `TOOL_SPEC` dict; the
+Adding a **tool** is lighter — a plain function plus a `TOOL_SPEC` dict; the
 registry discovers it. See [TOOLS.md](./TOOLS.md).
 
 ---
@@ -210,7 +248,8 @@ Defaults work for a local run.
 | `ORCHESTRATOR_INTERNAL_TOKEN` | — | Shared secret for the internal campaign endpoint |
 | `QDRANT_URL` / `MINIO_ENDPOINT` | — | Vector search / object storage |
 | `SANDBOX_TIMEOUT_SEC` | `60` | Max CPU time for sandboxed code |
-| `PROPAB_DATA_DIR` | `./data` | Lifetime-learning + snapshot storage |
+| `LIFETIME_STORE_BACKEND` | `json` | `json` (tests) or `postgres` (production upserts) |
+| `PROPAB_DATA_DIR` | `./data` | Lifetime store, genomics cache, snapshots |
 
 ---
 
@@ -219,7 +258,7 @@ Defaults work for a local run.
 ```bash
 pip install -e ".[dev]"          # editable install + Alembic, psycopg, pytest
 
-python -m pytest tests -q        # the project suite (467 passing)
+python -m pytest tests -q        # project suite (530+ passing)
 alembic upgrade head             # apply migrations locally (uses DATABASE_URL_SYNC)
 ```
 
@@ -254,8 +293,8 @@ services/orchestrator/         run_campaign_loop, literature, events, paper
 services/worker/               Celery worker + think-act sub-agent loop
 alembic/                       migrations (single schema source of truth)
 frontend/                      Vite/React campaign dashboard
-docs/component_map.md          per-symbol map: callers, callees, status
-tests/                         467-test suite
+docs/                          adding_a_domain, api_reference, operator_runbook
+tests/                         pytest suite (530+)
 ```
 
 ---
@@ -263,9 +302,13 @@ tests/                         467-test suite
 ## Documentation
 
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — services, campaign path, verification, domains, persistence
+- [docs/adding_a_domain.md](./docs/adding_a_domain.md) — add a domain (genomics worked example)
+- [docs/api_reference.md](./docs/api_reference.md) — launch, monitor, resume campaigns
+- [docs/operator_runbook.md](./docs/operator_runbook.md) — production troubleshooting
 - [propab_ownership_contracts.md](./propab_ownership_contracts.md) — component contracts + health metrics
 - [docs/component_map.md](./docs/component_map.md) — per-symbol wiring map
 - [TOOLS.md](./TOOLS.md) — the sub-agent tool surface
+- Interactive API — http://localhost:8000/docs (Swagger UI when API is running)
 
 ---
 

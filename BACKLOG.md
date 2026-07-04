@@ -34,7 +34,7 @@ Status legend: `[ ]` not started · `[~]` in progress · `[✓]` complete
 
 | ID | Task | Status | Commit |
 |---|---|---|---|
-| T4-001 | API documentation (OpenAPI spec) | `[ ]` not started | — |
+| T4-001 | API documentation (OpenAPI spec) | `[✓]` complete | — |
 | T4-002 | Domain developer guide | `[✓]` complete | — |
-| T4-003 | README for external audience | `[ ]` not started | — |
-| T4-004 | Operator runbook | `[ ]` not started | — |
+| T4-003 | README for external audience | `[✓]` complete | — |
+| T4-004 | Operator runbook | `[✓]` complete | — |
