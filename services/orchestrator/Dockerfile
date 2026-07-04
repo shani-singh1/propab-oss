@@ -17,6 +17,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY packages ./packages
 COPY services ./services
 COPY migrations ./migrations
+COPY prompts ./prompts
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -e . --no-deps

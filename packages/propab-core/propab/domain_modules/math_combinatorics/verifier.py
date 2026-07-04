@@ -131,9 +131,16 @@ def _parse_n_range_bounds(statement: str) -> tuple[int, int]:
 
 
 def _wants_bc_matched_comparison(statement: str) -> bool:
+    """Route to matched n=q^2+q BC vs greedy — not generic 'prime power q' peak sweeps."""
     s = statement.lower()
-    return any(k in s for k in ("matched", "prime power", "prime q", "q²+q", "q^2+q")) or (
-        _wants_bose_chowla(s) and "prime" in s
+    if "matched" not in s:
+        return False
+    return (
+        _wants_bose_chowla(s)
+        or "bc " in s
+        or "bose" in s
+        or "greedy" in s
+        or "compare" in s
     )
 
 

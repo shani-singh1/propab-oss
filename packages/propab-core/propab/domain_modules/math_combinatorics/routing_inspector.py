@@ -16,9 +16,12 @@ from propab.domain_modules.math_combinatorics.constructors import (
 from propab.domain_modules.math_combinatorics.verifier import (
     _extract_cap_dims,
     _extract_n_list,
+    _parse_threshold_target,
     _wants_asymptotic_analysis,
+    _wants_bc_matched_comparison,
     _wants_bose_chowla,
     _wants_greedy_vs_algebraic,
+    _wants_threshold_finding,
     run_combinatorics_experiment,
 )
 
@@ -39,6 +42,10 @@ def _resolve_verifier(claim: str, methodology: str, full_text: str) -> str:
     if is_cap_set_hypothesis(full_text, methodology, full_text=full_text):
         return "cap_set_sweep"
     if is_sidon_hypothesis(full_text, methodology, full_text=full_text):
+        if _wants_bc_matched_comparison(full_text):
+            return "sidon_bc_matched_compare"
+        if _wants_threshold_finding(full_text) and _parse_threshold_target(full_text) is not None:
+            return "sidon_threshold_crossing"
         if _wants_greedy_vs_algebraic(claim):
             return "sidon_bc_vs_greedy_compare"
         if _wants_bose_chowla(claim) and not _wants_greedy_vs_algebraic(claim):
@@ -74,6 +81,8 @@ def _expected_metric(verifier: str) -> str:
     return {
         "cap_set_sweep": "cap_set_clp_ratio",
         "sidon_bc_vs_greedy_compare": "bose_chowla_vs_greedy_ratio",
+        "sidon_bc_matched_compare": "bc_matched_win_rate",
+        "sidon_threshold_crossing": "sidon_ratio_to_sqrt_n",
         "sidon_sweep_bose_chowla": "sidon_ratio_to_sqrt_n",
         "sidon_sweep_greedy": "sidon_ratio_to_sqrt_n",
         "sidon_single_point": "sidon_density",
@@ -84,6 +93,8 @@ def _expected_metric(verifier: str) -> str:
 
 def _routing_ok(verifier: str, claim: str) -> bool:
     sidon_verifiers = {
+        "sidon_bc_matched_compare",
+        "sidon_threshold_crossing",
         "sidon_bc_vs_greedy_compare",
         "sidon_sweep_bose_chowla",
         "sidon_sweep_greedy",
