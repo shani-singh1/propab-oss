@@ -860,6 +860,7 @@ async def _maybe_run_campaign_synthesis(
     inflight_ids: set[str],
     prior_snippets: list[str] | None,
     session_factory: async_sessionmaker | None = None,
+    lifetime_context: str = "",
 ) -> bool:
     """Tier-2 synthesis if triggered. Returns True if candidates were added."""
     if not bool(getattr(settings, "campaign_synthesis_enabled", True)):
@@ -886,6 +887,7 @@ async def _maybe_run_campaign_synthesis(
         emitter=emitter,
         session_factory=session_factory,
         domain_id=_resolve_synthesis_domain_id(campaign),
+        lifetime_context=lifetime_context,
     )
     return len(added) > 0
 
@@ -1126,6 +1128,7 @@ async def _iter_campaign_pipelined_results(
     llm: LLMClient | None = None,
     generation: int = 0,
     prior_snippets: list[str] | None = None,
+    lifetime_context: str = "",
 ) -> AsyncIterator[dict]:
     """
     Pipelined dispatch: keep up to ``max_concurrent`` Celery sub-agents running.
@@ -1174,6 +1177,7 @@ async def _iter_campaign_pipelined_results(
                     inflight_ids=inflight,
                     prior_snippets=prior_snippets,
                     session_factory=session_factory,
+                    lifetime_context=lifetime_context,
                 )
             node = campaign.hypothesis_tree.next_dispatch_candidate(inflight)
             if node is None:
@@ -1865,17 +1869,30 @@ async def run_campaign_loop(
                             domain_id=domain_profile_id,
                             synthesis_history_buckets=synthesis_history_buckets,
                             diversity_reset_instruction=reset_prompt,
+                            lifetime_context=lifetime_seed_context,
                         )
                         from propab.numerical_seeds import classify_hypothesis_bucket
-                        from propab.synthesis_diversity import resolve_forced_problem_type
+                        from propab.synthesis_diversity import (
+                            bootstrap_forced_problem_type,
+                            resolve_forced_problem_type,
+                            tree_problem_counts_from_nodes,
+                        )
                         from propab.campaign_synthesis import apply_diversity_fallback_seeds
 
                         if not added:
+                            node_dicts = {
+                                nid: (n.to_dict() if hasattr(n, "to_dict") else n)
+                                for nid, n in campaign.hypothesis_tree.nodes.items()
+                            }
+                            tree_counts = tree_problem_counts_from_nodes(node_dicts)
                             forced = resolve_forced_problem_type(
                                 synthesis_history_buckets,
                                 [b.statement for b in campaign.belief_state.active_beliefs],
                                 streak=3,
+                                tree_problem_counts=tree_counts,
                             )
+                            if forced is None:
+                                forced = bootstrap_forced_problem_type(campaign.question)
                             if forced:
                                 added = apply_diversity_fallback_seeds(
                                     campaign.hypothesis_tree,
@@ -1991,6 +2008,7 @@ async def run_campaign_loop(
                 llm=llm,
                 generation=generation,
                 prior_snippets=prior_snippets,
+                lifetime_context=lifetime_seed_context,
             ):
                 node_id = str(result.get("campaign_node_id") or "")
                 verdict = result.get("verdict", "inconclusive")

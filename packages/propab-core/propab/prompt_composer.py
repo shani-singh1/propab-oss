@@ -127,6 +127,7 @@ def compose_synthesis_prompt(
     since_node_ids: set[str] | None = None,
     role_addendum: str | None = None,
     role_text: str | None = None,
+    lifetime_context: str = "",
 ) -> str:
     """Assemble 4-part synthesis prompt (fixes.md §5.2)."""
     role = role_text if role_text is not None else load_prompt("orchestrator_role.md")
@@ -155,5 +156,7 @@ def compose_synthesis_prompt(
         f"{compress_node_history(tree, since_node_ids=since_node_ids)}",
         recent_block,
     ])
+    if lifetime_context and lifetime_context.strip():
+        pinned = f"{pinned}\n\n## Cross-campaign numerical baseline (use for Q1 threshold sweeps)\n{lifetime_context.strip()}"
 
     return f"{role.strip()}\n\n{pinned.strip()}\n\n{task.strip()}\n"

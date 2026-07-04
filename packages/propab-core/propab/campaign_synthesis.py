@@ -177,7 +177,7 @@ def apply_synthesis_to_frontier(
 
     # Frontier candidates — dedup before add_seeds (fixes.md P2)
     from propab.domain_modules.registry import hypothesis_is_on_topic
-    from propab.numerical_seeds import classify_hypothesis_bucket
+    from propab.numerical_seeds import classify_hypothesis_bucket, claim_has_numeric_falsifier
     from propab.synthesis_diversity import (
         diversity_requirement_prompt,
         methodology_implementable,
@@ -205,6 +205,10 @@ def apply_synthesis_to_frontier(
         if implementable and not methodology_implementable(raw_text, methodology, implementable):
             metrics["n_rejected_unimplementable"] = int(metrics.get("n_rejected_unimplementable") or 0) + 1
             logger.debug("Rejected unimplementable methodology: %s", raw_text[:80])
+            continue
+        if domain_id == "math_combinatorics" and not claim_has_numeric_falsifier(raw_text, methodology):
+            metrics["n_rejected_unimplementable"] = int(metrics.get("n_rejected_unimplementable") or 0) + 1
+            logger.debug("Rejected non-numeric structural claim: %s", raw_text[:80])
             continue
         bucket = classify_hypothesis_bucket(raw_text, methodology)
         problem_type = bucket.get("problem_type")
@@ -256,6 +260,12 @@ def apply_synthesis_to_frontier(
             "expansion_type": item.get("expansion_type") or "diagnostic",
             "expansion_reason": item.get("why_follows_from_beliefs") or "campaign_synthesis",
         })
+
+    if not seed_dicts and forced_type:
+        from propab.synthesis_diversity import fallback_synthesis_seeds
+
+        seed_dicts = fallback_synthesis_seeds(forced_type, generation=generation)
+        metrics["diversity_fallback_injected"] = len(seed_dicts)
 
     if not seed_dicts:
         return [], metrics
@@ -331,6 +341,7 @@ async def run_campaign_synthesis_pass(
     domain_id: str | None = None,
     synthesis_history_buckets: list[dict[str, str]] | None = None,
     diversity_reset_instruction: str | None = None,
+    lifetime_context: str = "",
 ) -> tuple[list[HypothesisNode], dict[str, Any]]:
     """Tier-2 batched synthesis: one LLM call per trigger."""
     completed_ids = {
@@ -363,6 +374,7 @@ async def run_campaign_synthesis_pass(
         belief_state=belief_state,
         tree=tree,
         since_node_ids=new_since if new_since else None,
+        lifetime_context=lifetime_context,
     )
     if forced_type:
         dominant = None

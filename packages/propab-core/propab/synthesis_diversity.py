@@ -19,6 +19,10 @@ explicitly break out of that bucket.
 
 PROBLEM_TYPES = ("sidon", "cap_set", "ap_free", "sumset", "bc_comparison")
 
+# Tree monoculture forcing applies once the tree has enough nodes to measure skew
+# but before NO_DISPATCHABLE (typically ~15-20 nodes in math_combinatorics).
+MIN_TREE_NODES_FOR_MONOCULTURE = 8
+
 _SUBJECT_TO_PROBLEM = {
     "cap_set": "cap_set",
     "sidon": "sidon",
@@ -48,12 +52,13 @@ def filter_seed_dicts_for_diversity(
     from propab.numerical_seeds import classify_hypothesis_bucket
 
     tree_counts = tree_problem_counts_from_nodes(tree_nodes)
+    n_typed = sum(tree_counts.values())
     forced = resolve_forced_problem_type(
         [],
         active_belief_statements,
-        tree_problem_counts=tree_counts if sum(tree_counts.values()) >= 20 else None,
+        tree_problem_counts=tree_counts if n_typed >= MIN_TREE_NODES_FOR_MONOCULTURE else None,
     )
-    if forced is None and sum(tree_counts.values()) < 20:
+    if forced is None and n_typed < MIN_TREE_NODES_FOR_MONOCULTURE:
         forced = bootstrap_forced_problem_type(question)
     if not forced:
         return seed_dicts
@@ -73,7 +78,7 @@ def forced_from_tree_monoculture(
     tree_counts: dict[str, int],
     *,
     max_fraction: float = 0.40,
-    min_nodes: int = 20,
+    min_nodes: int = MIN_TREE_NODES_FOR_MONOCULTURE,
 ) -> str | None:
     """When one problem type dominates the tree, force the least-explored type."""
     total = sum(tree_counts.values())

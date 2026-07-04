@@ -15,13 +15,17 @@ BC_METRICS = frozenset({"bose_chowla_vs_greedy_ratio", "bc_matched_win_rate"})
 
 
 def _belief_subject(text: str) -> str:
-    t = text.lower()
-    if any(k in t for k in ("cap set", "cap-set", "f_3", "clp")):
+    from propab.numerical_seeds import claim_core_for_bucket
+
+    t = claim_core_for_bucket(text).lower()
+    if any(k in t for k in ("sidon", "f(n)/sqrt", "f(n)/√n", "greedy sidon")):
+        return "sidon"
+    if any(k in t for k in ("cap set", "cap-set", "clp")) or (
+        "f_3" in t and "sidon" not in t
+    ):
         return "cap_set"
     if any(k in t for k in ("bose-chowla", "bose chowla", "bc ")):
         return "bc"
-    if any(k in t for k in ("sidon", "f(n)", "sqrt")):
-        return "sidon"
     return "other"
 
 

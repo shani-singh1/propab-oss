@@ -6,6 +6,53 @@ from typing import Any
 
 THRESHOLDS = (0.95, 0.90, 0.80, 0.70, 0.60)
 
+# Scoped-claim template lines appended to every hypothesis — must not drive diversity buckets.
+_SCOPE_BOILERPLATE_MARKERS = (
+    "vector space f_3",
+    "admissible combinatorial structures",
+    "claimed generalization: structural/density",
+    "expected failure modes: greedy",
+)
+
+
+def claim_core_for_bucket(text: str) -> str:
+    """First falsifiable claim lines only — strip enrich_entry_with_scope boilerplate."""
+    lines: list[str] = []
+    for raw in (text or "").splitlines():
+        ln = raw.strip()
+        if not ln:
+            continue
+        low = ln.lower()
+        if ln.startswith("Population:") and any(m in low for m in _SCOPE_BOILERPLATE_MARKERS):
+            continue
+        if ln.startswith("Distribution:") and "admissible combinatorial" in low:
+            continue
+        if ln.startswith("Claimed generalization:") or ln.startswith("Expected failure modes:"):
+            continue
+        lines.append(ln)
+    core = "\n".join(lines).strip()
+    return core or (text or "")
+
+
+def claim_has_numeric_falsifier(text: str, methodology: str = "") -> bool:
+    """Reject structural/monotonic claims with no numeric band, threshold, or n-scale (B2)."""
+    core = claim_core_for_bucket(text)
+    t = f"{core}\n{methodology}".lower()
+    if re.search(r"\d\.\d{2,4}", t):
+        return True
+    if re.search(r"\bn\s*[=:]\s*\d{3,6}\b", t):
+        return True
+    if re.search(r"n\s+in\s+\[\s*\d", t):
+        return True
+    if re.search(r"below\s+0\.\d+|above\s+0\.\d+|band\s*\[|threshold|first\s+n\s+where", t):
+        return True
+    if re.search(r"f_\d+\^?\d+|dim(?:ension)?\s*[=:]?\s*\d", t):
+        return True
+    structural_only = any(
+        k in t for k in ("monoton", "structural", "variance", "distribution", "geometric")
+    )
+    return not structural_only
+
 
 def _node_evidence(node: dict[str, Any]) -> dict[str, Any]:
     finding = node.get("finding") or {}
@@ -150,11 +197,16 @@ def format_seeds_for_question(seeds: list[dict[str, Any]], *, max_items: int = 1
 
 def classify_hypothesis_bucket(text: str, methodology: str = "") -> dict[str, str]:
     """Diversity buckets for synthesis tracking (fixes.md D2)."""
-    t = f"{text}\n{methodology}".lower()
-    if any(k in t for k in ("cap set", "cap-set", "f_3", "clp")):
-        problem = "cap_set"
-    elif "ap-free" in t or "arithmetic progression" in t:
+    core = claim_core_for_bucket(text)
+    t = f"{core}\n{methodology}".lower()
+    if any(k in t for k in ("sidon", "f(n)/sqrt", "f(n)/√n", "greedy sidon")):
+        problem = "sidon"
+    elif "ap-free" in t or "arithmetic progression" in t or "ap free" in t:
         problem = "ap_free"
+    elif any(k in t for k in ("cap set", "cap-set", "clp")) or (
+        "f_3" in t and "sidon" not in t and "ap-free" not in t
+    ):
+        problem = "cap_set"
     elif "sumset" in t or "|a+a|" in t:
         problem = "sumset"
     elif "bose" in t or "chowla" in t:

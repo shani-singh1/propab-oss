@@ -71,6 +71,12 @@ def test_tree_monoculture_forces_least_explored() -> None:
     assert forced == "sidon"
 
 
+def test_tree_monoculture_forces_at_8_nodes() -> None:
+    tree = {"cap_set": 14, "sidon": 3}
+    forced = resolve_forced_problem_type([], [], tree_problem_counts=tree)
+    assert forced == "sidon"
+
+
 def test_resolve_forced_prefers_tree_monoculture() -> None:
     tree = {"cap_set": 160, "sidon": 20, "ap_free": 2}
     forced = resolve_forced_problem_type([], [], tree_problem_counts=tree)

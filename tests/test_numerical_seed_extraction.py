@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from propab.knowledge_graph import KnowledgeGraph
-from propab.numerical_seeds import extract_math_combinatorics_seeds, format_seeds_for_question
+from propab.numerical_seeds import extract_math_combinatorics_seeds, format_seeds_for_question, classify_hypothesis_bucket
 from propab.domain_modules.math_combinatorics.plugin import MathCombinatoricsPlugin
 
 
@@ -51,6 +51,29 @@ def test_extract_from_hypothesis_text_when_evidence_empty() -> None:
     seeds = extract_math_combinatorics_seeds([node, node2])
     assert seeds
     assert any(s["finding_type"] == "threshold_crossing" for s in seeds)
+
+
+def test_classify_sidon_not_cap_set_when_scope_boilerplate_present() -> None:
+    text = (
+        "Population: Greedy Sidon for n in {10000, 20000}. Claim: F(n)/sqrt(n) falls below 0.65\n"
+        "Population: Integers {1,...,n} or vector space F_3^n\n"
+        "Distribution: All admissible combinatorial structures in the domain"
+    )
+    bucket = classify_hypothesis_bucket(text, "greedy Sidon threshold sweep")
+    assert bucket["problem_type"] == "sidon"
+
+
+def test_claim_has_numeric_falsifier_rejects_pure_structural() -> None:
+    from propab.numerical_seeds import claim_has_numeric_falsifier
+
+    assert not claim_has_numeric_falsifier(
+        "Population: Greedy Sidon sets. Claim: The ratio is strictly monotonic decreasing",
+        "structural variance analysis",
+    )
+    assert claim_has_numeric_falsifier(
+        "For n=50000, greedy Sidon F(n)/sqrt(n) falls below 0.60",
+        "threshold sweep",
+    )
 
 
 def test_plugin_and_knowledge_graph_storage() -> None:

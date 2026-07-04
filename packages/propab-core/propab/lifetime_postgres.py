@@ -116,23 +116,30 @@ def upsert_numerical_seed(
     seed: dict[str, Any],
 ) -> None:
     eng = get_engine()
+    claim = str(seed.get("claim") or seed.get("text") or "")
     with eng.begin() as conn:
         conn.execute(
             text("""
                 INSERT INTO lifetime_numerical_seeds (
                     domain, campaign_id, finding_type, claim, parameters,
                     source_node_ids, next_hypotheses, seed_payload
-                ) VALUES (
+                )
+                SELECT
                     :domain, CAST(:campaign_id AS uuid), :finding_type, :claim,
                     CAST(:parameters AS jsonb), CAST(:source_node_ids AS uuid[]),
                     CAST(:next_hypotheses AS jsonb), CAST(:seed_payload AS jsonb)
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM lifetime_numerical_seeds
+                    WHERE domain = :domain
+                      AND campaign_id = CAST(:campaign_id AS uuid)
+                      AND claim = :claim
                 )
             """),
             {
                 "domain": domain,
                 "campaign_id": campaign_id,
                 "finding_type": seed.get("finding_type"),
-                "claim": str(seed.get("claim") or seed.get("text") or ""),
+                "claim": claim,
                 "parameters": _json(seed.get("parameters") or {}),
                 "source_node_ids": "{}",
                 "next_hypotheses": _json(seed.get("next_hypotheses") or []),
