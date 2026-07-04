@@ -1848,6 +1848,30 @@ async def run_campaign_loop(
                             diversity_reset_instruction=reset_prompt,
                         )
                         from propab.numerical_seeds import classify_hypothesis_bucket
+                        from propab.synthesis_diversity import resolve_forced_problem_type
+                        from propab.campaign_synthesis import apply_diversity_fallback_seeds
+
+                        if not added and diversity_reset_attempts > 0:
+                            forced = resolve_forced_problem_type(
+                                synthesis_history_buckets,
+                                [b.statement for b in campaign.belief_state.active_beliefs],
+                                streak=3,
+                            )
+                            if forced:
+                                added = apply_diversity_fallback_seeds(
+                                    campaign.hypothesis_tree,
+                                    forced_type=forced,
+                                    generation=generation,
+                                    question=campaign.question,
+                                    prior_snippets=prior_snippets,
+                                )
+                                if added:
+                                    logger.info(
+                                        "[campaign %s] Diversity fallback injected %s %s seed(s).",
+                                        campaign.id,
+                                        len(added),
+                                        forced,
+                                    )
 
                         for node in added:
                             synthesis_history_buckets.append(

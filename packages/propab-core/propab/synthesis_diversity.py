@@ -19,6 +19,97 @@ explicitly break out of that bucket.
 
 PROBLEM_TYPES = ("sidon", "cap_set", "ap_free", "sumset", "bc_comparison")
 
+_SUBJECT_TO_PROBLEM = {
+    "cap_set": "cap_set",
+    "sidon": "sidon",
+    "bc": "bc_comparison",
+}
+
+
+def resolve_forced_problem_type(
+    recent_buckets: list[dict[str, str]],
+    active_belief_statements: list[str] | None = None,
+    *,
+    streak: int = 3,
+) -> str | None:
+    """Force a new problem type when history or active beliefs are monoculture."""
+    from propab.belief_promotion import _belief_subject
+
+    if active_belief_statements:
+        subjects = [_belief_subject(s) for s in active_belief_statements if s.strip()]
+        if subjects and len(set(subjects)) == 1:
+            dominant = _SUBJECT_TO_PROBLEM.get(subjects[0], subjects[0])
+            for alt in PROBLEM_TYPES:
+                if alt != dominant:
+                    return alt
+    return forced_problem_type(recent_buckets, streak=streak)
+
+
+def diversity_requirement_prompt(forced_type: str, *, avoid_type: str | None = None) -> str:
+    avoid = (
+        f" Do NOT propose '{avoid_type}' hypotheses — that bucket is exhausted."
+        if avoid_type
+        else ""
+    )
+    return (
+        f"MANDATORY DIVERSITY: This round MUST propose at least 2 frontier hypotheses "
+        f"focused on problem type '{forced_type}' with falsifiable numeric claims.{avoid}"
+    )
+
+
+FALLBACK_SEED_TEMPLATES: dict[str, dict[str, str]] = {
+    "sidon": {
+        "text": (
+            "Population: Greedy Sidon in {1,...,n} for n in [2000, 5000, 10000]. "
+            "Claim: F(n)/sqrt(n) is strictly monotonically decreasing across this sweep "
+            "and falls below 0.80 at some n in the range."
+        ),
+        "test_methodology": "greedy Sidon sweep with ratio band claim",
+    },
+    "ap_free": {
+        "text": (
+            "Population: AP-free greedy sets in {1,...,n} for n in [500, 1000, 2000, 5000]. "
+            "Claim: AP-free density decreases monotonically across the sweep."
+        ),
+        "test_methodology": "greedy AP-free density sweep",
+    },
+    "bc_comparison": {
+        "text": (
+            "Population: Greedy Sidon vs Bose-Chowla at matched n=q^2+q for prime q in [50, 200]. "
+            "Claim: Greedy ratio exceeds Bose-Chowla ratio at every matched n in the range."
+        ),
+        "test_methodology": "matched BC vs greedy comparison",
+    },
+    "sumset": {
+        "text": (
+            "Population: Random vs Sidon-like sets in {1,...,n} for n=500. "
+            "Claim: Sidon-like construction yields strictly smaller |A+A|/|A| than random."
+        ),
+        "test_methodology": "structured sumset growth comparison",
+    },
+    "cap_set": {
+        "text": (
+            "Population: Best-known cap sets in F_3^n for n in [8, 10]. "
+            "Claim: CLP ratio size/3^n decreases from n=8 to n=10."
+        ),
+        "test_methodology": "cap-set CLP table lookup",
+    },
+}
+
+
+def fallback_synthesis_seeds(forced_type: str, *, generation: int) -> list[dict[str, Any]]:
+    """Deterministic seeds when LLM synthesis ignores diversity reset (B3 fallback)."""
+    tpl = FALLBACK_SEED_TEMPLATES.get(forced_type)
+    if not tpl:
+        return []
+    return [{
+        "id": f"fallback_{forced_type}_{generation}",
+        "text": tpl["text"],
+        "test_methodology": tpl["test_methodology"],
+        "expansion_type": "diagnostic",
+        "expansion_reason": f"diversity_fallback_{forced_type}",
+    }]
+
 
 def history_problem_counts(recent_buckets: list[dict[str, str]]) -> Counter[str]:
     return Counter(b.get("problem_type", "sidon") for b in recent_buckets)

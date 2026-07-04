@@ -206,3 +206,20 @@ def apply_trend_promotion_to_beliefs(
     if len(belief_state.active_beliefs) > cap:
         belief_state.active_beliefs = belief_state.active_beliefs[:cap]
     return promoted
+
+
+def refresh_active_belief_trend_support(
+    belief_state: Any,
+    tree_nodes: dict[str, Any],
+    threshold: dict[str, Any],
+) -> int:
+    """Grow supporting_nodes on active beliefs as more confirmed evidence arrives."""
+    if not threshold.get("allow_trend_promotion"):
+        return 0
+    refreshed = 0
+    for belief in belief_state.active_beliefs:
+        node_ids = try_trend_promotion(belief.statement, tree_nodes, threshold)
+        if node_ids and len(node_ids) > len(belief.supporting_nodes or []):
+            belief.supporting_nodes = node_ids
+            refreshed += 1
+    return refreshed

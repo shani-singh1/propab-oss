@@ -116,6 +116,7 @@ def apply_synthesis_to_frontier(
         "n_rejected_duplicate": 0,
         "n_rejected_off_topic": 0,
         "n_rejected_unimplementable": 0,
+        "n_rejected_diversity": 0,
         "beliefs_promoted_by_trend": 0,
         "binding_rejected_count": 0,
         "binding_accepted_count": 0,
@@ -153,6 +154,14 @@ def apply_synthesis_to_frontier(
             plugin.belief_promotion_threshold(),
         )
         metrics["beliefs_promoted_by_trend"] = promoted
+    if plugin is not None:
+        from propab.belief_promotion import refresh_active_belief_trend_support
+
+        refresh_active_belief_trend_support(
+            belief_state,
+            node_dicts,
+            plugin.belief_promotion_threshold(),
+        )
     for item in parsed.get("closed_beliefs_append") or []:
         if isinstance(item, dict) and item.get("statement"):
             belief_state.closed_beliefs.append(ClosedBelief(
@@ -170,14 +179,19 @@ def apply_synthesis_to_frontier(
     from propab.domain_modules.registry import hypothesis_is_on_topic
     from propab.numerical_seeds import classify_hypothesis_bucket
     from propab.synthesis_diversity import (
-        forced_problem_type,
+        diversity_requirement_prompt,
         methodology_implementable,
+        resolve_forced_problem_type,
     )
 
     implementable: list[str] = []
     if plugin is not None:
         implementable = plugin.implementable_methodologies()
-    forced_type = forced_problem_type(synthesis_history_buckets or [], streak=5)
+    forced_type = resolve_forced_problem_type(
+        synthesis_history_buckets or [],
+        [b.statement for b in belief_state.active_beliefs],
+        streak=3,
+    )
 
     seed_dicts: list[dict[str, Any]] = []
     same_round_texts: list[str] = []
@@ -189,17 +203,16 @@ def apply_synthesis_to_frontier(
             logger.debug("Rejected unimplementable methodology: %s", raw_text[:80])
             continue
         bucket = classify_hypothesis_bucket(raw_text, methodology)
-        if forced_type and bucket.get("problem_type") == forced_type:
-            pass  # preferred when diversity forcing active
-        elif forced_type and bucket.get("problem_type") != forced_type and metrics["n_candidates_raw"] > 3:
-            # Soft skip dominant repeat type when forcing another (keep some if only option)
-            dominant_count = sum(
-                1 for t in same_round_texts
-                if classify_hypothesis_bucket(t).get("problem_type") != forced_type
+        problem_type = bucket.get("problem_type")
+        if forced_type and problem_type != forced_type:
+            metrics["n_rejected_diversity"] = int(metrics.get("n_rejected_diversity") or 0) + 1
+            logger.debug(
+                "Rejected non-forced problem type %s (need %s): %s",
+                problem_type,
+                forced_type,
+                raw_text[:80],
             )
-            if dominant_count >= 2 and bucket.get("problem_type") != forced_type:
-                metrics["n_rejected_unimplementable"] = int(metrics.get("n_rejected_unimplementable") or 0) + 1
-                continue
+            continue
         if not hypothesis_is_on_topic(
             raw_text,
             question=question,
@@ -270,6 +283,44 @@ def apply_synthesis_to_frontier(
     return filtered, metrics
 
 
+def apply_diversity_fallback_seeds(
+    tree: HypothesisTree,
+    *,
+    forced_type: str,
+    generation: int,
+    question: str,
+    prior_snippets: list[str] | None = None,
+    relevance_threshold: float = 0.35,
+) -> list[HypothesisNode]:
+    """Inject deterministic seeds when LLM synthesis ignores diversity reset."""
+    from propab.synthesis_diversity import fallback_synthesis_seeds
+
+    seed_dicts = fallback_synthesis_seeds(forced_type, generation=generation)
+    if not seed_dicts:
+        return []
+    added = tree.add_seeds(seed_dicts, generation=generation)
+    snippets = list(prior_snippets or [])
+    filtered: list[HypothesisNode] = []
+    for node in added:
+        primary, secondary, theme_conf = extract_theme_vector(node.text)
+        node.primary_theme = primary
+        node.secondary_themes = secondary
+        node.theme_id = primary
+        node.theme_confidence = theme_conf
+        node.node_role = infer_node_role(node.text)
+        try:
+            from services.orchestrator.hypothesis_ranking import strip_question_suffix  # noqa: WPS433
+        except ImportError:
+            strip_question_suffix = lambda t: t  # type: ignore[misc, assignment]
+        core = strip_question_suffix(node.text)
+        node.question_relevance_score = _question_relevance(question, snippets, core)
+        if (node.question_relevance_score or 0) >= relevance_threshold:
+            filtered.append(node)
+    if filtered:
+        tree.add_to_frontier(filtered)
+    return filtered
+
+
 async def run_campaign_synthesis_pass(
     *,
     campaign_id: str,
@@ -291,12 +342,31 @@ async def run_campaign_synthesis_pass(
     }
     new_since = completed_ids - set(belief_state.last_synthesis_node_ids)
 
+    from propab.synthesis_diversity import (
+        diversity_requirement_prompt,
+        history_problem_counts,
+        methodology_implementable,
+        resolve_forced_problem_type,
+    )
+
+    forced_type = resolve_forced_problem_type(
+        synthesis_history_buckets or [],
+        [b.statement for b in belief_state.active_beliefs],
+        streak=3,
+    )
     prompt = compose_synthesis_prompt(
         question=question,
         belief_state=belief_state,
         tree=tree,
         since_node_ids=new_since if new_since else None,
     )
+    if forced_type:
+        dominant = None
+        if synthesis_history_buckets:
+            counts = history_problem_counts(synthesis_history_buckets[-5:])
+            if counts:
+                dominant = counts.most_common(1)[0][0]
+        prompt = f"{prompt}\n\n{diversity_requirement_prompt(forced_type, avoid_type=dominant)}"
     if diversity_reset_instruction:
         prompt = f"{prompt}\n\n{diversity_reset_instruction}"
 
@@ -349,6 +419,7 @@ async def run_campaign_synthesis_pass(
                 "binding_accepted_count": metrics.get("binding_accepted_count", 0),
                 "falsifiability_rejected_count": metrics.get("falsifiability_rejected_count", 0),
                 "belief_cap_rejected_count": metrics.get("belief_cap_rejected_count", 0),
+                "n_rejected_diversity": metrics.get("n_rejected_diversity", 0),
                 "beliefs_promoted_by_trend": metrics.get("beliefs_promoted_by_trend", 0),
                 "active_beliefs": [b.to_dict() for b in belief_state.active_beliefs],
                 "branch_exhausted": belief_state.branch_exhausted,

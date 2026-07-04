@@ -5,6 +5,7 @@ from propab.domain_modules.math_combinatorics.plugin import MathCombinatoricsPlu
 from propab.synthesis_diversity import (
     forced_problem_type,
     methodology_implementable,
+    resolve_forced_problem_type,
 )
 
 
@@ -24,6 +25,24 @@ def test_methodology_accepts_greedy() -> None:
         "greedy construction",
         kw,
     )
+
+
+def test_forced_from_active_cap_set_beliefs() -> None:
+    beliefs = [
+        "Cap-set CLP ratios decrease monotonically in F_3^n",
+        "Cap-set plateau between n=8 and n=10",
+    ]
+    forced = resolve_forced_problem_type([], beliefs, streak=3)
+    assert forced is not None
+    assert forced != "cap_set"
+
+
+def test_fallback_synthesis_seeds_sidon() -> None:
+    from propab.synthesis_diversity import fallback_synthesis_seeds
+
+    seeds = fallback_synthesis_seeds("sidon", generation=1)
+    assert len(seeds) == 1
+    assert "Sidon" in seeds[0]["text"]
 
 
 def test_forced_problem_type_after_sidon_streak() -> None:
