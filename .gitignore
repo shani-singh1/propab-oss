@@ -34,6 +34,10 @@ mandrake-data/
 
 # Local run outputs (campaign JSON, benches, poll logs)
 artifacts/
+!artifacts/engineering_log.md
+!artifacts/routing_corpus_status.json
+!artifacts/ap_free_preflight_n50000.json
+!artifacts/econometrics_discoverybench_hms.json
 
 # AstaBench eval logs and cached solutions
 logs/
@@ -51,3 +55,6 @@ demo/mandrake/
 agent1.md
 agent2.md
 agent3.md
+
+#propab design ref v1
+propab-design-ref-v1.html
