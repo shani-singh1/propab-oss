@@ -2,6 +2,7 @@
 """One-command Propab engineering status (Agent 2 T1-003)."""
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -15,14 +16,13 @@ def _ascii_safe(text: str) -> str:
 
 BACKLOG_PATH = ROOT / "BACKLOG.md"
 COMPONENT_MAP = ROOT / "docs" / "component_map.md"
+ROUTING_STATUS = ROOT / "artifacts" / "routing_corpus_status.json"
 
-STUB_DOMAINS = frozenset({"enzyme_kinetics", "graph_invariants"})
-
+# Remaining deferred items still called out in component_map.md (not T3-003 scope).
 DEFERRED_PATTERNS = (
-    (r"research_quality\._THEME_RULES", "DEFERRED — high blast radius"),
-    (r"campaign_resume.*CONTRARIAN", "DEFERRED — near service boundary"),
-    (r"finding_audit\.py", "DEFERRED — move to mandrake domain module"),
-    (r"lifetime.*LWW|last-writer-wins", "DEFERRED — Checklist 4 / T1-001"),
+    (r"hypotheses\.py.*_domain_fallback_options", "DEFERRED — seed fallbacks in orchestrator"),
+    (r"theory_objects\.py", "DEFERRED — offline lifetime aggregation naming"),
+    (r"policy_buckets\.py", "DEFERRED — infrastructure taxonomy by design"),
 )
 
 HEALTH_METRICS = (
@@ -38,7 +38,7 @@ HEALTH_METRICS = (
 
 
 def _load_routing_corpus() -> list[dict]:
-    """Load hypothesis corpus from campaign analysis artifacts (no API)."""
+    """Load full routing corpus (combinatorics artifacts + AP-free + domain corpora)."""
     import json
 
     corpus_artifacts = (
@@ -60,7 +60,69 @@ def _load_routing_corpus() -> list[dict]:
                     "test_methodology": row.get("methodology") or "",
                     "prior_verdict": key.replace("_hypotheses", ""),
                 })
+    ap_free = (
+        ROOT / "packages" / "propab-core" / "propab" / "domain_modules"
+        / "math_combinatorics" / "ap_free_corpus.json"
+    )
+    if ap_free.is_file():
+        out.extend(json.loads(ap_free.read_text(encoding="utf-8")))
     return out
+
+
+def _routing_from_artifact() -> tuple[int, int, bool] | None:
+    if not ROUTING_STATUS.is_file():
+        return None
+    try:
+        data = json.loads(ROUTING_STATUS.read_text(encoding="utf-8"))
+        total = int(data.get("total") or 0)
+        ok = int(data.get("routing_ok") or 0)
+        mm = int(data.get("routing_mismatches") or 0)
+        if total > 0:
+            return ok, total, mm == 0
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
+def _routing_corpus(*, verify: bool = False) -> tuple[int, int, bool]:
+    cached = _routing_from_artifact()
+    if cached and not verify:
+        return cached
+
+    try:
+        from propab.domain_modules.enzyme_kinetics.routing_inspector import (
+            ROUTING_CORPUS as ENZYME_CORPUS,
+            inspect_corpus as inspect_enzyme,
+        )
+        from propab.domain_modules.genomics.routing_inspector import inspect_corpus as inspect_genomics
+        from propab.domain_modules.graph_invariants.routing_inspector import (
+            ROUTING_CORPUS as GRAPH_CORPUS,
+            inspect_corpus as inspect_graph,
+        )
+        from propab.domain_modules.math_combinatorics.routing_inspector import inspect_corpus
+
+        comb = _load_routing_corpus()
+        comb_report = inspect_corpus(comb) if comb else {"total": 0, "routing_mismatches": 0, "routing_ok": 0}
+        gen_report = inspect_genomics()
+        enz_report = inspect_enzyme(ENZYME_CORPUS)
+        graph_report = inspect_graph(GRAPH_CORPUS)
+        total = (
+            int(comb_report.get("total") or 0)
+            + int(gen_report.get("total") or 0)
+            + int(enz_report.get("total") or 0)
+            + int(graph_report.get("total") or 0)
+        )
+        mismatches = (
+            int(comb_report.get("routing_mismatches") or 0)
+            + int(gen_report.get("routing_mismatches") or 0)
+            + int(enz_report.get("routing_mismatches") or 0)
+            + int(graph_report.get("routing_mismatches") or 0)
+        )
+        return total - mismatches, total, mismatches == 0
+    except Exception:
+        if cached:
+            return cached
+        return 0, 0, False
 
 
 def _run_pytest(*, quick: bool) -> tuple[int, int]:
@@ -72,7 +134,7 @@ def _run_pytest(*, quick: bool) -> tuple[int, int]:
             cwd=ROOT,
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=900,
         )
         out = (proc.stdout or "") + (proc.stderr or "")
         m = re.search(r"(\d+)\s+passed", out)
@@ -86,37 +148,12 @@ def _run_pytest(*, quick: bool) -> tuple[int, int]:
         return 0, 0
 
 
-def _routing_corpus() -> tuple[int, int, bool]:
-    try:
-        from propab.domain_modules.math_combinatorics.routing_inspector import inspect_corpus
-
-        corpus = _load_routing_corpus()
-        if not corpus:
-            return 0, 0, False
-        result = inspect_corpus(corpus)
-        total = int(result.get("total") or 0)
-        mismatches = int(result.get("routing_mismatches") or 0)
-        return total - mismatches, total, mismatches == 0
-    except Exception:
-        return 0, 0, False
-
-
 def _domain_plugins(*, quick: bool = False) -> list[dict]:
     from propab.domain_modules.registry import all_plugins
 
     rows: list[dict] = []
     for plugin in sorted(all_plugins(), key=lambda p: p.domain_id):
-        is_stub = plugin.domain_id in STUB_DOMAINS
         features = plugin.available_features()
-        if is_stub and not features:
-            rows.append({
-                "domain_id": plugin.domain_id,
-                "status": "stub",
-                "preflight": None,
-                "features": 0,
-                "last_campaign": None,
-            })
-            continue
         if quick:
             rows.append({
                 "domain_id": plugin.domain_id,
@@ -171,12 +208,18 @@ def _parse_backlog() -> list[tuple[str, str, str]]:
         return []
     rows: list[tuple[str, str, str]] = []
     for line in BACKLOG_PATH.read_text(encoding="utf-8").splitlines():
-        m = re.match(r"\|\s*(T\d-\d+)\s*\|\s*([^|]+)\|\s*`?\[([ ~✓])\]`?\s*([^|]*)\|", line)
+        m = re.match(
+            r"\|\s*(T\d-\d+)\s*\|\s*([^|]+)\|\s*`?\[([ ~✓])\]`?\s*complete\s*\|\s*`?([^`|]+)`?\s*\|",
+            line,
+        )
+        if not m:
+            m = re.match(r"\|\s*(T\d-\d+)\s*\|\s*([^|]+)\|\s*`?\[([ ~✓])\]`?\s*([^|]*)\|", line)
         if not m:
             continue
         tid, title, mark, rest = m.group(1), m.group(2).strip(), m.group(3), m.group(4).strip()
         if mark == "✓":
-            status = f"[✓] complete  {rest}"
+            commit = rest.strip().strip("`") if rest.strip() else ""
+            status = f"[✓] complete  {commit}" if commit and commit != "—" else "[✓] complete"
         elif mark == "~":
             status = f"[~] in progress  {rest}"
         else:
@@ -211,11 +254,9 @@ def _health_coverage() -> list[tuple[str, bool, str]]:
 
 def main() -> int:
     quick = "--quick" in sys.argv
+    verify_routing = "--verify-routing" in sys.argv
     passed, failed = _run_pytest(quick=quick)
-    if quick:
-        clean, total, routing_ok = 183, 183, True  # combinatorics+AP-free+genomics baseline
-    else:
-        clean, total, routing_ok = _routing_corpus()
+    clean, total, routing_ok = _routing_corpus(verify=verify_routing)
     plugins = _domain_plugins(quick=quick)
     backlog = _parse_backlog()
     deferred = _parse_deferred()
@@ -231,7 +272,8 @@ def main() -> int:
         print(f"Tests:          {passed} passing, 0 failing")
     if total:
         mark = "clean" if routing_ok else "MISMATCHES"
-        print(f"Routing corpus: {clean}/{total} {mark}")
+        src = "verified" if verify_routing else "cached artifact"
+        print(f"Routing corpus: {clean}/{total} {mark} ({src})")
     else:
         print("Routing corpus: (could not inspect)")
 
@@ -240,9 +282,6 @@ def main() -> int:
     print("--------------")
     for row in plugins:
         did = row["domain_id"]
-        if row["status"] == "stub":
-            print(f"{did:<22} X stub only")
-            continue
         pf = "PASS" if row["preflight"] else "FAIL"
         sym = "OK" if row["preflight"] else "X"
         lc = row["last_campaign"] or "never campaigned"

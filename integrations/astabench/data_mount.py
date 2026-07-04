@@ -46,11 +46,13 @@ def build_campaign_question(
     formatted_input: str,
     mounted_paths: dict[str, str],
     query: str,
+    domain_profile: str | None = None,
 ) -> str:
     """Pin AstaBench problem as Propab campaign question (cold start, no seeded beliefs)."""
+    profile_prefix = f"[domain_profile:{domain_profile}] " if domain_profile else ""
     paths_block = "\n".join(f"- {p}" for p in mounted_paths.values()) or "(no files staged)"
     return (
-        f"{formatted_input.strip()}\n\n"
+        f"{profile_prefix}{formatted_input.strip()}\n\n"
         "── AstaBench / Propab execution context ──\n"
         "Work cold from the dataset — do not assume any hypothesis before analyzing data.\n"
         "Load and analyze the dataset files from these absolute paths inside the experiment sandbox:\n"

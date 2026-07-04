@@ -92,6 +92,7 @@ def solve_discoverybench_sample(
     poll_sec: float = 15.0,
     abstain_if_not_strong: bool = True,
     dest_root: Path | None = None,
+    domain_profile: str | None = None,
 ) -> dict[str, Any]:
     """Launch Propab, wait for terminal status, return answer + audit metadata."""
     api = api_base.rstrip("/")
@@ -108,6 +109,7 @@ def solve_discoverybench_sample(
         formatted_input=formatted_input,
         mounted_paths=mounted,
         query=query,
+        domain_profile=domain_profile,
     )
 
     budget_hours = max(0.1, float(budget_hours))

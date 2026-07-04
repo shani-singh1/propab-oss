@@ -199,12 +199,13 @@ Two structural facts that Checklists 2 and 4 target:
 |---|---|---|---|
 | `base.py` | `DomainProfile` dataclass + `run_artifact_gate` delegate | — | — |
 | `registry.py` | `resolve_domain_profile` (tag → payload → bucket → question markers) | called at `artifact_verification.py:489` | — |
-| `enzyme_kinetics.py` | Enzyme family LOFO profile | yes (via tag) | **no dedicated fast path** |
+| `enzyme_kinetics.py` | Enzyme family LOFO profile | yes (via tag) | yes (`EnzymeKineticsPlugin` LOFO verifier) |
 | `materials.py` | Crystal-system profile + materials artifact models | yes | yes (via `_materials_verification_path`) |
-| `graph_invariants.py` | SNAP graph-family profile | yes (via tag) | **no dedicated fast path** |
-- **Test:** `tests/test_domain_profiles.py` (synthetic `EvidenceContext` — mock data only, flagged).
-- **Status:** materials **active**; enzyme/graph **partially-wired** (artifact gate only, no verification tool cluster).
-- **Relationship (CL2 update):** `domain_profiles` configure the **artifact gate** (grouping + artifact models); `domain_adapters` run the **experiment**. Both are now fronted by the `DomainPlugin` layer (`propab/domain_modules/`): `DomainPlugin.domain_profile()` links to the profile, `confirmation_criteria()` reads thresholds from it, and `artifact_models()` delegates to `profile.generate_artifact_models`. Plugins: `MaterialsPlugin`, `MandrakePlugin`, `EnzymeKineticsPlugin`, `GraphInvariantsPlugin`, `NetworkDiffusionPlugin` (scope-only). **Deferred to CL4/follow-up:** enzyme/graph still lack a dedicated worker verification path (they run the generic path, now with per-domain `min_metric_steps` from `confirmation_criteria()`).
+| `graph_invariants.py` | SNAP graph-family profile | yes (via tag) | yes (`GraphInvariantsPlugin` cross-family verifier) |
+| `econometrics.py` | Panel FE / within-group R² profile (DiscoveryBench) | yes (via tag) | yes (artifact gate for panel FE evidence) |
+- **Test:** `tests/test_domain_profiles.py`, `tests/test_econometrics_profile.py`, `tests/test_enzyme_kinetics_plugin.py`, `tests/test_graph_invariants_plugin.py`.
+- **Status:** materials **active**; enzyme/graph/econometrics **active** (full `DomainPlugin` + preflight + routing corpus as of `614d258`).
+- **Relationship (CL2 update):** `domain_profiles` configure the **artifact gate** (grouping + artifact models); `domain_adapters` run the **experiment**. Both are fronted by the `DomainPlugin` layer (`propab/domain_modules/`): `DomainPlugin.domain_profile()` links to the profile, `confirmation_criteria()` reads thresholds from it, and `artifact_models()` delegates to `profile.generate_artifact_models`. Plugins: `MaterialsPlugin`, `MandrakePlugin`, `EnzymeKineticsPlugin`, `GraphInvariantsPlugin`, `GenomicsPlugin`, `NetworkDiffusionPlugin` (scope-only), `MathCombinatoricsPlugin`.
 
 ### `run_artifact_gate` dispatch
 - **File:** `artifact_verification.py:480-516`
@@ -341,13 +342,14 @@ When `lifetime_store_backend=postgres`, `propab/lifetime_postgres.py` upserts pe
 | `operator_credit/` | 20 files | none | **not-yet-wired** (script/test only) |
 | `benchmarks/graph_contagion_benchmark.py` | 1 | none | script/test only |
 
-**Domain-string decoupling status for these subsystems (CL2 — DEFERRED):**
-- `anomaly_engine/` (`competing_mechanisms.py`, `mechanism_inducer.py`) contains biology/RT-specific themes and a `mandrake_verification` tool reference. Because it is opt-in (`seed_source == "anomaly"`) and single-domain (Mandrake), its domain strings were **not** relocated. It already calls `filter_mechanism_anomalies` (Evidence Binding) at write time (`mechanism_inducer.py:374`).
-- `finding_audit.py` — **off the live campaign path** (only `scripts/inspect_confirmed_findings.py` + `tests/test_finding_audit.py`). It is a self-contained Mandrake finding-audit utility (`FEATURE_FAMILIES`, `resolve_mandrake_features`). Deferred: belongs in the Mandrake domain module, best moved once the Mandrake plugin is fully settled post-CL4.
-- `theory_objects.py` (`_contagion_theory` naming, "diffusion models apply" assumption) is network-specific and used only by offline `lifetime_knowledge` aggregation. Deferred.
-- `campaign_resume.py` `CONTRARIAN_*` — Mandrake-specific contrarian-reset seeds. Behavior-controlling, but relocating touches a `services/api` route import (near the service boundary CL4 restructures) → **deferred to avoid doing it twice**.
-- `research_quality._THEME_RULES` — mixed-domain theme vocabulary driving `extract_theme_vector`/`infer_node_role`, wired into ~10 live-path callers (theming/diversity metrics, not verification correctness). High blast radius, order-sensitive → deferred to a dedicated, separately-validated change.
-- `policy_buckets.py` / `services/orchestrator/question_domain.py` — coarse bandit-policy buckets (`graphs/algorithms/math/biology/general`) and a session-domain hint. Treated as **deliberate infrastructure taxonomies** (not 1:1 with scientific-domain plugins), left in place by design.
+**Domain-string decoupling status (CL2 — updated 2026-07-05, T3-003 complete in `614d258`):**
+- `finding_audit.py` — **relocated** to `domain_modules/mandrake/finding_audit.py`; `propab/finding_audit.py` is a re-export shim. Used by `scripts/inspect_confirmed_findings.py` + `tests/test_finding_audit.py`.
+- `campaign_resume.py` `CONTRARIAN_*` — **relocated** to `MandrakePlugin.apply_contrarian_belief_reset()`; `campaign_resume.py` re-exports constants for API compatibility.
+- `research_quality._THEME_RULES` — **relocated** to per-domain `theme_rules` on `DomainPlugin`; core merges via `all_theme_rules()` / `all_theme_fallbacks()`.
+- `anomaly_engine/` (`competing_mechanisms.py`, `mechanism_inducer.py`) — opt-in Mandrake seed path; domain strings not relocated (single-domain, opt-in).
+- `theory_objects.py` (`_contagion_theory` naming) — offline lifetime aggregation only; deferred.
+- `services/orchestrator/hypotheses.py` `_domain_fallback_options` — hardcoded fallback seeds; deferred (low risk).
+- `policy_buckets.py` / `services/orchestrator/question_domain.py` — infrastructure taxonomies by design.
 
 ---
 
@@ -372,5 +374,5 @@ When `lifetime_store_backend=postgres`, `propab/lifetime_postgres.py` upserts pe
 - No end-to-end `run_campaign_loop` test (loop is only exercised piecemeal).
 - No dedicated `test_belief_state.py`.
 - No `db_save_campaign`/`db_load_campaign` round-trip persistence test.
-- `domain_profiles` tested with synthetic `EvidenceContext` only (no real enzyme/graph data).
+- `domain_profiles` covered by plugin tests with synthetic adapters (enzyme/graph use BRENDA/SNAP-style synthetic subsets).
 - `stop_reason` values are meaningful enums already (`campaign.py:169-180`) but `budget_exhausted` remains the `status` string — Observability item.
