@@ -1,6 +1,8 @@
 """Belief trend promotion for math_combinatorics (fixes.md A1)."""
 from __future__ import annotations
 
+import json
+
 from propab.belief_promotion import (
     apply_trend_promotion_to_beliefs,
     is_consistent_trend,
@@ -24,7 +26,57 @@ def _confirmed_node(nid: str, n: int, ratio: float) -> dict:
     }
 
 
-def test_trend_promotion_three_monotone_nodes() -> None:
+def test_trend_promotion_from_json_evidence_summary() -> None:
+    """Live campaigns store metrics in evidence_summary JSON string, not finding."""
+    nodes = {
+        "a": {
+            "id": "a",
+            "verdict": "confirmed",
+            "text": "Greedy Sidon sweep",
+            "finding": {"claim": "D(n) decreases"},
+            "evidence_summary": json.dumps({
+                "metric_name": "sidon_ratio_to_sqrt_n",
+                "metric_value": 0.939,
+                "max_n": 500,
+                "sweep": [{"n": 500, "ratio_to_sqrt_n": 0.939}],
+            }),
+        },
+        "b": {
+            "id": "b",
+            "verdict": "confirmed",
+            "text": "Greedy Sidon sweep",
+            "finding": {"claim": "D(n) decreases"},
+            "evidence_summary": json.dumps({
+                "metric_name": "sidon_ratio_to_sqrt_n",
+                "metric_value": 0.885,
+                "max_n": 1000,
+                "sweep": [{"n": 1000, "ratio_to_sqrt_n": 0.885}],
+            }),
+        },
+        "c": {
+            "id": "c",
+            "verdict": "confirmed",
+            "text": "Greedy Sidon sweep",
+            "finding": {"claim": "D(n) decreases"},
+            "evidence_summary": json.dumps({
+                "metric_name": "sidon_ratio_to_sqrt_n",
+                "metric_value": 0.900,
+                "max_n": 10000,
+                "sweep": [
+                    {"n": 100, "ratio_to_sqrt_n": 1.0},
+                    {"n": 10000, "ratio_to_sqrt_n": 0.827},
+                ],
+            }),
+        },
+    }
+    threshold = MathCombinatoricsPlugin().belief_promotion_threshold()
+    ids = try_trend_promotion(
+        "greedy F(n)/sqrt(n) is monotonically decreasing for n in [500, 10000]",
+        nodes,
+        threshold,
+    )
+    assert ids is not None
+    assert len(ids) >= 3
     nodes = {
         "a": _confirmed_node("a", 500, 0.939),
         "b": _confirmed_node("b", 1000, 0.885),
@@ -40,7 +92,7 @@ def test_trend_promotion_three_monotone_nodes() -> None:
     assert len(ids) >= 3
 
 
-def test_trend_promotion_two_nodes_insufficient() -> None:
+def test_trend_promotion_three_monotone_nodes() -> None:
     nodes = {
         "a": _confirmed_node("a", 500, 0.939),
         "b": _confirmed_node("b", 1000, 0.885),

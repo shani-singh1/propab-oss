@@ -1,6 +1,7 @@
 """Domain-specific belief promotion (fixes.md Track A1)."""
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -24,14 +25,62 @@ def _belief_subject(text: str) -> str:
     return "other"
 
 
+def _parse_evidence_summary(raw: Any) -> dict[str, Any]:
+    if not raw:
+        return {}
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
+
 def _node_evidence(node: dict[str, Any]) -> dict[str, Any]:
-    finding = node.get("finding") or {}
-    evs = node.get("evidence_summary") or {}
+    evidence_summary = _parse_evidence_summary(node.get("evidence_summary"))
+    if evidence_summary.get("metric_name"):
+        return evidence_summary
+    finding = node.get("finding")
+    if isinstance(finding, dict) and finding.get("metric_name"):
+        return finding
     if isinstance(finding, dict) and finding:
         return finding
-    if isinstance(evs, dict):
-        return evs
-    return {}
+    evidence = node.get("evidence")
+    if isinstance(evidence, dict):
+        return evidence
+    return evidence_summary
+
+
+def _metric_at_scale(ev: dict[str, Any]) -> tuple[float | None, int | None]:
+    """Prefer ratio at max_n from sweep points, not mean across the sweep."""
+    max_n = ev.get("max_n")
+    sweep = ev.get("sweep") or ev.get("comparison_sweep")
+    if isinstance(sweep, list) and sweep:
+        if max_n is not None:
+            for pt in sweep:
+                if isinstance(pt, dict) and pt.get("n") == max_n:
+                    val = pt.get("ratio_to_sqrt_n")
+                    if val is not None:
+                        return float(val), int(max_n)
+        last = sweep[-1]
+        if isinstance(last, dict):
+            val = last.get("ratio_to_sqrt_n") or last.get("metric_value")
+            n = last.get("n")
+            if val is not None and n is not None:
+                return float(val), int(n)
+    if ev.get("n") is not None:
+        val = ev.get("ratio_to_sqrt_n") or ev.get("metric_value")
+        if val is not None:
+            return float(val), int(ev["n"])
+    if max_n is not None:
+        val = ev.get("metric_value") or ev.get("mean_ratio_to_sqrt_n")
+        if val is not None:
+            return float(val), int(max_n)
+    val = ev.get("metric_value") or ev.get("mean_ratio_to_sqrt_n")
+    return (float(val), None) if val is not None else (None, None)
 
 
 def _extract_n_from_node(node: dict[str, Any]) -> int | None:
@@ -44,6 +93,8 @@ def _extract_n_from_node(node: dict[str, Any]) -> int | None:
     ev = _node_evidence(node)
     if ev.get("n") is not None:
         return int(ev["n"])
+    if ev.get("max_n") is not None:
+        return int(ev["max_n"])
     sweep = ev.get("sweep") or ev.get("comparison_sweep")
     if isinstance(sweep, list) and sweep:
         first = sweep[0]
@@ -80,16 +131,10 @@ def collect_confirmed_metric_nodes(
         metric = ev.get("metric_name")
         if not _metric_matches_subject(metric, subject):
             continue
-        val = ev.get("metric_value")
-        if val is None:
-            val = ev.get("mean_ratio_to_sqrt_n")
-        if val is None:
+        fval, n_scale = _metric_at_scale(ev)
+        if fval is None:
             continue
-        try:
-            fval = float(val)
-        except (TypeError, ValueError):
-            continue
-        rows.append((str(nid), fval, _extract_n_from_node(node)))
+        rows.append((str(nid), fval, n_scale or _extract_n_from_node(node)))
     if len(rows) < min_count:
         return []
     rows.sort(key=lambda r: (r[2] if r[2] is not None else 10**9, r[0]))
