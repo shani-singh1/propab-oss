@@ -1006,6 +1006,21 @@ async def generate_seed_hypotheses(
                 "question_relevance_score": (h.scores or {}).get("question_relevance"),
             })
             break
+    from propab.synthesis_diversity import filter_seed_dicts_for_diversity
+
+    node_dicts = {
+        nid: (n.to_dict() if hasattr(n, "to_dict") else n)
+        for nid, n in campaign.hypothesis_tree.nodes.items()
+    }
+    seed_dicts = filter_seed_dicts_for_diversity(
+        seed_dicts,
+        tree_nodes=node_dicts,
+        active_belief_statements=[
+            b.statement for b in campaign.belief_state.active_beliefs
+        ],
+        question=campaign.question,
+        generation=generation,
+    )
     return campaign.hypothesis_tree.add_seeds(seed_dicts, generation=generation)
 
 
@@ -1677,6 +1692,9 @@ async def run_campaign_loop(
         seed_block = format_seeds_for_question(
             knowledge_graph.get_numerical_seeds(domain_profile_id or "math_combinatorics"),
         )
+        numerical_seeds_loaded = len(
+            knowledge_graph.get_numerical_seeds(domain_profile_id or "math_combinatorics")
+        )
         if seed_block:
             lifetime_seed_context = f"{lifetime_seed_context}\n\n{seed_block}".strip()
         synthesis_history_buckets: list[dict[str, str]] = []
@@ -1716,6 +1734,7 @@ async def run_campaign_loop(
                 "claims_in_store": len(knowledge_graph.claims),
                 "failures_in_store": len(knowledge_graph.failures),
                 "theories_in_store": len(knowledge_graph.theories),
+                "numerical_seeds_loaded": numerical_seeds_loaded,
                 "theme_boost": search_policy.theme_boost,
                 "theme_penalty": search_policy.theme_penalty,
             },

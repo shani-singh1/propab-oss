@@ -168,11 +168,17 @@ def ingest_campaign(
     for c in claims:
         graph.add_claim(c)
 
-    from propab.domain_modules.registry import get_domain_plugin
+    from propab.domain_modules.registry import get_domain_plugin, resolve_domain_plugin
     from propab.numerical_seeds import classify_hypothesis_bucket
     from propab.synthesis_diversity import aggregate_diversity_distribution
 
-    plugin = get_domain_plugin(session_domain or db)
+    plugin = resolve_domain_plugin(
+        question=campaign.question,
+        payload={"domain_profile": getattr(campaign, "domain_profile", None)},
+    )
+    if plugin is None:
+        plugin = get_domain_plugin(session_domain or db)
+    seed_domain = plugin.domain_id if plugin is not None else (session_domain or db)
     confirmed_nodes = [
         nodes[nid] for nid, n in nodes.items()
         if isinstance(n, dict) and n.get("verdict") == "confirmed"
@@ -180,7 +186,7 @@ def ingest_campaign(
     if plugin is not None and confirmed_nodes:
         seeds = plugin.extract_numerical_seeds(confirmed_nodes)
         if seeds:
-            graph.store_numerical_seeds(session_domain or db, cid, seeds)
+            graph.store_numerical_seeds(seed_domain, cid, seeds)
     buckets = [
         classify_hypothesis_bucket(
             str(n.get("text") or ""),

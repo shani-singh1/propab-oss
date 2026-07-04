@@ -75,3 +75,27 @@ def test_resolve_forced_prefers_tree_monoculture() -> None:
     tree = {"cap_set": 160, "sidon": 20, "ap_free": 2}
     forced = resolve_forced_problem_type([], [], tree_problem_counts=tree)
     assert forced == "ap_free"
+
+
+def test_bootstrap_forced_sidon_on_q1_question() -> None:
+    from propab.synthesis_diversity import bootstrap_forced_problem_type
+
+    q = "where does it first fall below 0.60? Run threshold sweeps for n in [10000, 50000]"
+    assert bootstrap_forced_problem_type(q) == "sidon"
+
+
+def test_filter_seed_dicts_rejects_cap_set_when_forcing_sidon() -> None:
+    from propab.synthesis_diversity import filter_seed_dicts_for_diversity
+
+    caps = [{
+        "text": "Cap-set CLP ratio in F_3^8",
+        "test_methodology": "cap-set CLP table lookup",
+    }]
+    out = filter_seed_dicts_for_diversity(
+        caps,
+        tree_nodes={},
+        question="fall below 0.60 n in [10000, 50000]",
+        generation=1,
+    )
+    assert len(out) == 1
+    assert "Sidon" in out[0]["text"] or "sidon" in out[0]["text"].lower()

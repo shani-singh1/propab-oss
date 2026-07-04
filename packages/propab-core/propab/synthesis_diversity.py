@@ -26,6 +26,49 @@ _SUBJECT_TO_PROBLEM = {
 }
 
 
+def bootstrap_forced_problem_type(question: str) -> str | None:
+    """Before the tree is large enough for monoculture stats, bias away from cap_set."""
+    q = (question or "").lower()
+    if "cap-set table lookups are lower priority" in q or "0.60" in q or "10000" in q:
+        return "sidon"
+    if "ap-free" in q:
+        return "ap_free"
+    return None
+
+
+def filter_seed_dicts_for_diversity(
+    seed_dicts: list[dict[str, Any]],
+    *,
+    tree_nodes: dict[str, Any],
+    active_belief_statements: list[str] | None = None,
+    question: str = "",
+    generation: int = 0,
+) -> list[dict[str, Any]]:
+    """Apply the same forced-type rules as synthesis to bootstrap seeds."""
+    from propab.numerical_seeds import classify_hypothesis_bucket
+
+    tree_counts = tree_problem_counts_from_nodes(tree_nodes)
+    forced = resolve_forced_problem_type(
+        [],
+        active_belief_statements,
+        tree_problem_counts=tree_counts if sum(tree_counts.values()) >= 20 else None,
+    )
+    if forced is None and sum(tree_counts.values()) < 20:
+        forced = bootstrap_forced_problem_type(question)
+    if not forced:
+        return seed_dicts
+    filtered = [
+        sd for sd in seed_dicts
+        if classify_hypothesis_bucket(
+            str(sd.get("text") or ""),
+            str(sd.get("test_methodology") or ""),
+        ).get("problem_type") == forced
+    ]
+    if filtered:
+        return filtered
+    return fallback_synthesis_seeds(forced, generation=generation)
+
+
 def forced_from_tree_monoculture(
     tree_counts: dict[str, int],
     *,

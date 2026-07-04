@@ -41,12 +41,41 @@ def _parse_sweep_points(node: dict[str, Any]) -> list[tuple[int, float]]:
     return sorted(set(points))
 
 
+def _parse_text_sweep_points(node: dict[str, Any]) -> list[tuple[int, float]]:
+    """Fallback when verifier metrics were not persisted on the node dict."""
+    text = str(node.get("text") or "")
+    if "sidon" not in text.lower():
+        return []
+    points: list[tuple[int, float]] = []
+    for m in re.finditer(
+        r"F\((\d+)\)/sqrt\(\1\)[^\d]{0,48}(\d\.\d{2,4})",
+        text,
+        re.I,
+    ):
+        points.append((int(m.group(1)), float(m.group(2))))
+    for m in re.finditer(
+        r"For n=(\d{3,6})[^.]{0,120}?fall below (\d\.\d{2,4})",
+        text,
+        re.I,
+    ):
+        points.append((int(m.group(1)), float(m.group(2))))
+    for m in re.finditer(
+        r"(?:for|at)\s+n=(\d{4,6})[^\d]{0,40}(\d\.\d{2,4})",
+        text,
+        re.I,
+    ):
+        points.append((int(m.group(1)), float(m.group(2))))
+    return sorted(set(points))
+
+
 def extract_math_combinatorics_seeds(confirmed_nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Extract structured numerical seeds from confirmed hypothesis nodes."""
     all_points: list[tuple[int, float, str]] = []
     for node in confirmed_nodes:
         nid = str(node.get("id") or "")
         for n, ratio in _parse_sweep_points(node):
+            all_points.append((n, ratio, nid))
+        for n, ratio in _parse_text_sweep_points(node):
             all_points.append((n, ratio, nid))
 
     if not all_points:

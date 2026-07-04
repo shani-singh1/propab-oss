@@ -32,6 +32,27 @@ def test_extract_monotone_and_thresholds() -> None:
     assert crossing_70[0]["parameters"]["crossing_n"] == 10000
 
 
+def test_extract_from_hypothesis_text_when_evidence_empty() -> None:
+    node = {
+        "id": "text-1",
+        "verdict": "confirmed",
+        "text": (
+            "For n=50000, the greedy Sidon efficiency ratio F(n)/sqrt(n) will fall below 0.650"
+        ),
+    }
+    node2 = {
+        "id": "text-2",
+        "verdict": "confirmed",
+        "text": (
+            "In the greedy Sidon construction, the efficiency ratio F(20000)/sqrt(20000) "
+            "will be strictly greater than 0.661"
+        ),
+    }
+    seeds = extract_math_combinatorics_seeds([node, node2])
+    assert seeds
+    assert any(s["finding_type"] == "threshold_crossing" for s in seeds)
+
+
 def test_plugin_and_knowledge_graph_storage() -> None:
     plugin = MathCombinatoricsPlugin()
     ns = [500, 1000, 2000]
