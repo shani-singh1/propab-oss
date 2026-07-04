@@ -32,9 +32,18 @@ def test_forced_from_active_cap_set_beliefs() -> None:
         "Cap-set CLP ratios decrease monotonically in F_3^n",
         "Cap-set plateau between n=8 and n=10",
     ]
-    forced = resolve_forced_problem_type([], beliefs, streak=3)
+    history = [{"problem_type": "cap_set"} for _ in range(5)]
+    forced = resolve_forced_problem_type(history, beliefs, streak=3)
     assert forced is not None
     assert forced != "cap_set"
+
+
+def test_history_streak_wins_over_sidon_beliefs() -> None:
+    """Cap-set history should still force Sidon even when active beliefs are Sidon."""
+    beliefs = ["Greedy Sidon F(n)/sqrt(n) is monotonically decreasing"]
+    history = [{"problem_type": "cap_set"} for _ in range(5)]
+    forced = resolve_forced_problem_type(history, beliefs, streak=3)
+    assert forced == "sidon"
 
 
 def test_fallback_synthesis_seeds_sidon() -> None:

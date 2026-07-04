@@ -35,6 +35,10 @@ def resolve_forced_problem_type(
     """Force a new problem type when history or active beliefs are monoculture."""
     from propab.belief_promotion import _belief_subject
 
+    # History streak first — cap-set-heavy trees should force Sidon even if beliefs already shifted.
+    history_forced = forced_problem_type(recent_buckets, streak=streak)
+    if history_forced:
+        return history_forced
     if active_belief_statements:
         subjects = [_belief_subject(s) for s in active_belief_statements if s.strip()]
         if subjects and len(set(subjects)) == 1:
@@ -42,7 +46,7 @@ def resolve_forced_problem_type(
             for alt in PROBLEM_TYPES:
                 if alt != dominant:
                     return alt
-    return forced_problem_type(recent_buckets, streak=streak)
+    return None
 
 
 def diversity_requirement_prompt(forced_type: str, *, avoid_type: str | None = None) -> str:

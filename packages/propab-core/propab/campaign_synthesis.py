@@ -299,8 +299,7 @@ def apply_diversity_fallback_seeds(
     if not seed_dicts:
         return []
     added = tree.add_seeds(seed_dicts, generation=generation)
-    snippets = list(prior_snippets or [])
-    filtered: list[HypothesisNode] = []
+    # Fallback seeds are curated on-topic; do not drop them on relevance scoring.
     for node in added:
         primary, secondary, theme_conf = extract_theme_vector(node.text)
         node.primary_theme = primary
@@ -308,17 +307,10 @@ def apply_diversity_fallback_seeds(
         node.theme_id = primary
         node.theme_confidence = theme_conf
         node.node_role = infer_node_role(node.text)
-        try:
-            from services.orchestrator.hypothesis_ranking import strip_question_suffix  # noqa: WPS433
-        except ImportError:
-            strip_question_suffix = lambda t: t  # type: ignore[misc, assignment]
-        core = strip_question_suffix(node.text)
-        node.question_relevance_score = _question_relevance(question, snippets, core)
-        if (node.question_relevance_score or 0) >= relevance_threshold:
-            filtered.append(node)
-    if filtered:
-        tree.add_to_frontier(filtered)
-    return filtered
+        node.question_relevance_score = 1.0
+    if added:
+        tree.add_to_frontier(list(added))
+    return list(added)
 
 
 async def run_campaign_synthesis_pass(

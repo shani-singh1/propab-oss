@@ -1851,7 +1851,7 @@ async def run_campaign_loop(
                         from propab.synthesis_diversity import resolve_forced_problem_type
                         from propab.campaign_synthesis import apply_diversity_fallback_seeds
 
-                        if not added and diversity_reset_attempts > 0:
+                        if not added:
                             forced = resolve_forced_problem_type(
                                 synthesis_history_buckets,
                                 [b.statement for b in campaign.belief_state.active_beliefs],
@@ -1905,6 +1905,19 @@ async def run_campaign_loop(
                             stop_reason = STOP_REASON_NO_SEEDS_GENERATED
                             break
                 except Exception as seed_exc:  # noqa: BLE001 — degrade, don't crash the campaign
+                    err_msg = str(seed_exc)
+                    transient = any(
+                        tok in err_msg.lower()
+                        for tok in ("no address associated", "connection", "timeout", "temporarily unavailable")
+                    )
+                    if transient and diversity_reset_attempts < 5:
+                        logger.warning(
+                            "[campaign %s] Transient frontier refill error (%s); retrying.",
+                            campaign.id,
+                            err_msg[:120],
+                        )
+                        await asyncio.sleep(5)
+                        continue
                     logger.warning(
                         "[campaign %s] Frontier refill failed (%s); finalizing with results so far.",
                         campaign.id,
