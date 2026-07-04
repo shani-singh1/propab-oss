@@ -25,10 +25,10 @@ Status legend: `[ ]` not started · `[~]` in progress · `[✓]` complete
 | ID | Task | Status | Commit |
 |---|---|---|---|
 | T3-001 | AP-free corpus + standalone validation | `[✓]` complete | — |
-| T3-002 | AstaBench econometrics domain profile | `[ ]` not started | — |
-| T3-003 | Deferred CL2/CL3 refactor items | `[ ]` not started | — |
-| T3-004 | Enzyme kinetics domain plugin | `[ ]` stub only | — |
-| T3-005 | Graph invariants domain plugin | `[ ]` stub only | — |
+| T3-002 | AstaBench econometrics domain profile | `[✓]` complete | — |
+| T3-003 | Deferred CL2/CL3 refactor items | `[✓]` complete | — |
+| T3-004 | Enzyme kinetics domain plugin | `[✓]` complete | — |
+| T3-005 | Graph invariants domain plugin | `[✓]` complete | — |
 
 ## Tier 4 — External readiness
 

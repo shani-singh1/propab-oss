@@ -135,6 +135,17 @@ class MathCombinatoricsPlugin(DomainPlugin):
         "arithmetic progression",
         "ramsey",
     )
+    theme_rules = (
+        ("residue_class", (" mod ", " modulo ", "residue", "congruen")),
+        ("parametric_family", ("parametric", "family", "closed-form")),
+        ("finite_verification", ("exhaust", "scan", "up to n", "for all n", "counterexample")),
+        ("unit_fraction", ("unit fraction", "egyptian", "1/n")),
+        ("cache_policy", ("cache", "lru", "miss rate", "replacement policy", "belady")),
+        ("scheduling", ("scheduling", "waiting time", "round-robin", "srpt", "queueing", "m/m/1")),
+        ("auction", ("auction", "second-price", "bidder", "revenue equivalence")),
+        ("collatz", ("collatz", "3n+1", "stopping time")),
+        ("prime_gaps", ("prime gap", "cramér", "twin prime")),
+    )
 
     def hypothesis_on_topic(self, text: str, methodology: str | None = None) -> bool:
         """Reject OS/filesystem hypotheses and unimplemented test methodologies."""

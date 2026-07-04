@@ -76,42 +76,32 @@ _CONTROL_MARKERS = (
     "no effect beyond random",
 )
 
-_THEME_RULES: list[tuple[str, tuple[str, ...]]] = [
-    ("spectral", ("spectral gap", "eigenvalue", "laplacian", "adjacency matrix", "algebraic connectivity", "λ₂", "lambda_2", "spectral norm")),
-    ("diffusion_dynamics", ("contagion", "diffusion", " sis ", " sir ", "transmission", "outbreak", "epidemic", "spreading", "infection")),
-    ("normalization", ("pre-normalization", "post-normalization", "normalization", "k_source", "k_target")),
-    ("assortativity", ("assortativity", "degree correlation", "rich-club")),
-    ("clustering", ("clustering coefficient", "transitivity", "local clustering")),
-    ("centrality", ("betweenness", "centrality", "eigenvector centrality", "degree-based removal")),
-    ("degree_structure", ("gini", "degree distribution", "degree variance", "average degree", "k-core", "degree heterogeneity")),
-    ("scale_free", ("barab", "scale-free", "scale free", "preferential attachment")),
-    ("small_world", ("watts-strogatz", "watts strogatz", "small-world", "small world", "rewiring probability")),
-    ("random_graph", ("erdős", "erdos", "erdős-rényi", "g(n,p)", "random graph")),
-    ("percolation", ("percolation", "giant component", "critical threshold", "pc", "percolation threshold")),
-    ("targeted_removal", ("targeted removal", "targeted attack", "node removal", "immunization")),
-    ("sparse_regime", ("sparse graph", "average degree <", "fragmentation")),
-    ("residue_class", (" mod ", " modulo ", "residue", "congruen")),
-    ("parametric_family", ("parametric", "family", "closed-form")),
-    ("finite_verification", ("exhaust", "scan", "up to n", "for all n", "counterexample")),
-    ("unit_fraction", ("unit fraction", "egyptian", "1/n")),
-    ("cache_policy", ("cache", "lru", "miss rate", "replacement policy", "belady")),
-    ("scheduling", ("scheduling", "waiting time", "round-robin", "srpt", "queueing", "m/m/1")),
-    ("auction", ("auction", "second-price", "bidder", "revenue equivalence")),
-    ("collatz", ("collatz", "3n+1", "stopping time")),
-    ("prime_gaps", ("prime gap", "cramér", "twin prime")),
-    ("thermal_stability", ("t55_raw", "t70_raw", "t75_raw", "t80_raw", "thermal", "thermophilicity", "denaturation", "melting")),
-    ("catalytic_geometry", ("triad_best_rmsd", "d1_d2_dist", "d2_d3_dist", "ramachandran", "catalytic triad", "geometry", "yxdd")),
-    ("electrostatics", ("mean_pot", "net_charge", "isoelectric", "salt_bridge", "electrostatic", "pocket_hbond")),
-    ("fold_similarity", ("foldseek", "tm_score", "lddt", "structural similarity")),
-    ("surface_properties", ("camsol", "sasa", "hydrophobic", "surface area")),
-    ("motif_structure", ("dgr_motif", "qg_motif", "sp_motif", "motif", "yxdd")),
-]
+_THEME_RULES: list[tuple[str, tuple[str, ...]]] = []  # populated from DomainPlugin.theme_rules via registry
+_STRUCTURAL_FALLBACKS: list[tuple[str, tuple[str, ...], float]] = []
 
-_STRUCTURAL_FALLBACKS: list[tuple[str, tuple[str, ...], float]] = [
-    ("diffusion_dynamics", ("network", "graph", "node", "edge"), 0.45),
-    ("spectral", ("matrix", "rank", "eigen"), 0.40),
-    ("percolation", ("threshold", "component", "redundancy"), 0.38),
-]
+
+def _merged_theme_rules() -> list[tuple[str, tuple[str, ...]]]:
+    try:
+        from propab.domain_modules.registry import all_theme_rules
+
+        rules = all_theme_rules()
+        if rules:
+            return rules
+    except Exception:
+        pass
+    return _THEME_RULES
+
+
+def _merged_theme_fallbacks() -> list[tuple[str, tuple[str, ...], float]]:
+    try:
+        from propab.domain_modules.registry import all_theme_fallbacks
+
+        fallbacks = all_theme_fallbacks()
+        if fallbacks:
+            return fallbacks
+    except Exception:
+        pass
+    return _STRUCTURAL_FALLBACKS
 
 
 def normalize_claim_strength(claim_type: str | None) -> str | None:
@@ -133,14 +123,14 @@ def extract_theme_vector(text: str) -> tuple[str, list[str], float]:
     """P4.1 — primary + secondary themes with confidence; shrink general bucket."""
     t = (text or "").lower()
     matched: list[str] = []
-    for theme_id, keywords in _THEME_RULES:
+    for theme_id, keywords in _merged_theme_rules():
         if any(k in t for k in keywords):
             matched.append(theme_id)
     if matched:
         confidence = min(0.95, 0.55 + 0.08 * len(matched))
         return matched[0], matched[1:], round(confidence, 3)
 
-    for theme_id, keywords, conf in _STRUCTURAL_FALLBACKS:
+    for theme_id, keywords, conf in _merged_theme_fallbacks():
         hits = sum(1 for k in keywords if k in t)
         if hits >= 2:
             return theme_id, [], conf

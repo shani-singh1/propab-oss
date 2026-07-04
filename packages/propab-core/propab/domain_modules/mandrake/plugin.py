@@ -3,7 +3,38 @@ from __future__ import annotations
 
 from typing import Any
 
+from propab.belief_state import CampaignBeliefState
 from propab.domain_modules.base import DomainPlugin, PreflightResult
+
+CONTRARIAN_QUESTION = (
+    "Is RT activity, as measured across these 7 evolutionary families, one shared biophysical "
+    "mechanism currently confounded by family-correlated nuisance variables — or are there "
+    "genuinely distinct, family-specific activity mechanisms, such that no single feature set "
+    "could ever predict activity across families, because \"activity\" does not refer to the same "
+    "underlying physical process in each family?"
+)
+
+CONTRARIAN_BELIEF_FAMILY_SPECIFIC = (
+    "RT activity in each family is governed by mechanisms specific to that family's evolutionary "
+    "and structural context. Predictive signals exist within families even when sequence redundancy "
+    "(nearest-neighbor effects) is controlled via clustered splitting."
+)
+
+CONTRARIAN_BELIEF_REDUNDANCY_ARTIFACT = (
+    "Observed intra-family predictive signals are artifacts of sequence redundancy; model performance "
+    "will collapse (R2 < 0) when the test set is restricted to sequences with <50% identity to the "
+    "training set."
+)
+
+CONTRARIAN_ORCHESTRATOR_DIRECTIVE = (
+    "Primary critical-experiment criterion: choose the next test because its result would move "
+    "Belief 1 (family-specific signal under clustered split) and Belief 2 (sequence-redundancy "
+    "artifact under low-identity holdout) in opposite directions — not because it refines either belief in isolation. "
+    "Prioritize within-family models that discriminate between these rivals over further "
+    "cross-family LOFO feature-combination searches, which have already run exhaustively under "
+    "the prior framing. Do not silently revert to cross-family LOFO search as a fallback. "
+    "Belief 2 must clear the same artifact-verification bar as Belief 1."
+)
 
 
 class MandrakePlugin(DomainPlugin):
@@ -16,6 +47,14 @@ class MandrakePlugin(DomainPlugin):
         "biophysical",
         "evolutionary family",
         "mandrake",
+    )
+    theme_rules = (
+        ("thermal_stability", ("t55_raw", "t70_raw", "t75_raw", "t80_raw", "thermal", "thermophilicity", "denaturation", "melting")),
+        ("catalytic_geometry", ("triad_best_rmsd", "d1_d2_dist", "d2_d3_dist", "ramachandran", "catalytic triad", "geometry", "yxdd")),
+        ("electrostatics", ("mean_pot", "net_charge", "isoelectric", "salt_bridge", "electrostatic", "pocket_hbond")),
+        ("fold_similarity", ("foldseek", "tm_score", "lddt", "structural similarity")),
+        ("surface_properties", ("camsol", "sasa", "hydrophobic", "surface area")),
+        ("motif_structure", ("dgr_motif", "qg_motif", "sp_motif", "motif", "yxdd")),
     )
 
     def scope_template(self) -> dict[str, str]:
@@ -81,3 +120,42 @@ class MandrakePlugin(DomainPlugin):
         # the enzyme-kinetics profile is the closest family-LOFO analogue but the
         # adapter historically applies the generic gate override, so keep None.
         return None
+
+    def apply_contrarian_belief_reset(
+        self,
+        belief_state: CampaignBeliefState,
+        *,
+        orchestrator_directive: str | None = None,
+        close_prior_reason: str = "superseded by contrarian reframing (fixes.md)",
+    ) -> CampaignBeliefState:
+        """Data-preserving resume: close prior active beliefs, seed two rival beliefs."""
+        for belief in list(belief_state.active_beliefs):
+            belief_state.abandon_belief(belief, close_prior_reason)
+
+        belief_state.apply_synthesis_beliefs([
+            {
+                "statement": CONTRARIAN_BELIEF_FAMILY_SPECIFIC,
+                "confidence": "weak",
+                "status": "active",
+                "supporting_nodes": [],
+                "contradicting_nodes": [],
+            },
+            {
+                "statement": CONTRARIAN_BELIEF_REDUNDANCY_ARTIFACT,
+                "confidence": "weak",
+                "status": "active",
+                "supporting_nodes": [],
+                "contradicting_nodes": [],
+            },
+        ], allow_ungrounded=True)
+        belief_state.exhaustion_rounds = 0
+        belief_state.branch_exhausted = False
+        belief_state.rival_exhaustion_mode = True
+        belief_state.results_since_last_synthesis = 0
+        belief_state.recent_activity_summary = (
+            "Contrarian reframing: discriminate unified-mechanism vs family-specific-mechanism rivals."
+        )
+        directive = (orchestrator_directive or CONTRARIAN_ORCHESTRATOR_DIRECTIVE).strip()
+        if directive:
+            belief_state.add_human_message(directive)
+        return belief_state

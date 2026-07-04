@@ -121,3 +121,25 @@ def hypothesis_is_on_topic(
     if plugin is None:
         return True
     return plugin.hypothesis_on_topic(text, methodology=test_methodology)
+
+
+def all_theme_rules() -> list[tuple[str, tuple[str, ...]]]:
+    """Merged theme taxonomy from all registered plugins (first match wins in extract_theme_vector)."""
+    _ensure_loaded()
+    out: list[tuple[str, tuple[str, ...]]] = []
+    seen: set[str] = set()
+    for plugin in _PLUGINS:
+        for theme_id, keywords in getattr(plugin, "theme_rules", ()) or ():
+            if theme_id in seen:
+                continue
+            out.append((theme_id, keywords))
+            seen.add(theme_id)
+    return out
+
+
+def all_theme_fallbacks() -> list[tuple[str, tuple[str, ...], float]]:
+    _ensure_loaded()
+    out: list[tuple[str, tuple[str, ...], float]] = []
+    for plugin in _PLUGINS:
+        out.extend(list(getattr(plugin, "theme_fallbacks", ()) or ()))
+    return out

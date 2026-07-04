@@ -47,6 +47,26 @@ class NetworkDiffusionPlugin(DomainPlugin):
         "k-core",
         "diffusion",
     )
+    theme_rules = (
+        ("spectral", ("spectral gap", "eigenvalue", "laplacian", "adjacency matrix", "algebraic connectivity", "λ₂", "lambda_2", "spectral norm")),
+        ("diffusion_dynamics", ("contagion", "diffusion", " sis ", " sir ", "transmission", "outbreak", "epidemic", "spreading", "infection")),
+        ("normalization", ("pre-normalization", "post-normalization", "normalization", "k_source", "k_target")),
+        ("assortativity", ("assortativity", "degree correlation", "rich-club")),
+        ("clustering", ("clustering coefficient", "transitivity", "local clustering")),
+        ("centrality", ("betweenness", "centrality", "eigenvector centrality", "degree-based removal")),
+        ("degree_structure", ("gini", "degree distribution", "degree variance", "average degree", "k-core", "degree heterogeneity")),
+        ("scale_free", ("barab", "scale-free", "scale free", "preferential attachment")),
+        ("small_world", ("watts-strogatz", "watts strogatz", "small-world", "small world", "rewiring probability")),
+        ("random_graph", ("erdős", "erdos", "erdős-rényi", "g(n,p)", "random graph")),
+        ("percolation", ("percolation", "giant component", "critical threshold", "pc", "percolation threshold")),
+        ("targeted_removal", ("targeted removal", "targeted attack", "node removal", "immunization")),
+        ("sparse_regime", ("sparse graph", "average degree <", "fragmentation")),
+    )
+    theme_fallbacks = (
+        ("diffusion_dynamics", ("network", "graph", "node", "edge"), 0.45),
+        ("spectral", ("matrix", "rank", "eigen"), 0.40),
+        ("percolation", ("threshold", "component", "redundancy"), 0.38),
+    )
 
     def matches(self, *, question: str = "", payload: dict[str, Any] | None = None) -> bool:
         # No dedicated worker verification path — do not claim campaign routing.

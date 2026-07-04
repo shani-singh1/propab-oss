@@ -59,6 +59,10 @@ class DomainPlugin(ABC):
     # registry for these markers instead of hardcoding them.
     artifact_question_markers: tuple[str, ...] = ()
 
+    # Theme taxonomy for hypothesis classification (P4.1). Each domain owns its vocabulary.
+    theme_rules: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    theme_fallbacks: tuple[tuple[str, tuple[str, ...], float], ...] = ()
+
     def scope_template(self) -> dict[str, str] | None:
         """
         Default scoped-claim fields (population, distribution,

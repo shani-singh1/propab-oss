@@ -19,6 +19,14 @@ from propab.domain_modules.genomics.routing_inspector import (  # noqa: E402
     ROUTING_CORPUS as GENOMICS_CORPUS,
     inspect_corpus as inspect_genomics_corpus,
 )
+from propab.domain_modules.enzyme_kinetics.routing_inspector import (  # noqa: E402
+    ROUTING_CORPUS as ENZYME_CORPUS,
+    inspect_corpus as inspect_enzyme_corpus,
+)
+from propab.domain_modules.graph_invariants.routing_inspector import (  # noqa: E402
+    ROUTING_CORPUS as GRAPH_CORPUS,
+    inspect_corpus as inspect_graph_corpus,
+)
 
 DEFAULT_EXAMPLE = {
     "statement": "F(n)/sqrt(n) is below 0.90 for all n >= 1000",
@@ -111,22 +119,36 @@ def main() -> int:
             else _load_full_corpus()
         )
         genomics_report = inspect_genomics_corpus(GENOMICS_CORPUS)
+        enzyme_report = inspect_enzyme_corpus(ENZYME_CORPUS)
+        graph_report = inspect_graph_corpus(GRAPH_CORPUS)
         if not comb_corpus and genomics_report["total"] == 0:
             print("No corpus hypotheses found.", file=sys.stderr)
             return 1
         comb_report = inspect_combinatorics_corpus(comb_corpus) if comb_corpus else {
             "total": 0, "routing_ok": 0, "routing_mismatches": 0, "mismatch_rate": 0.0, "mismatches": [],
         }
+        extra_total = genomics_report["total"] + enzyme_report["total"] + graph_report["total"]
+        extra_ok = genomics_report["routing_ok"] + enzyme_report["routing_ok"] + graph_report["routing_ok"]
+        extra_mm = (
+            genomics_report["routing_mismatches"]
+            + enzyme_report["routing_mismatches"]
+            + graph_report["routing_mismatches"]
+        )
         report = {
-            "total": comb_report["total"] + genomics_report["total"],
-            "routing_ok": comb_report["routing_ok"] + genomics_report["routing_ok"],
-            "routing_mismatches": comb_report["routing_mismatches"] + genomics_report["routing_mismatches"],
+            "total": comb_report["total"] + extra_total,
+            "routing_ok": comb_report["routing_ok"] + extra_ok,
+            "routing_mismatches": comb_report["routing_mismatches"] + extra_mm,
             "mismatch_rate": round(
-                (comb_report["routing_mismatches"] + genomics_report["routing_mismatches"])
-                / max(comb_report["total"] + genomics_report["total"], 1),
+                (comb_report["routing_mismatches"] + extra_mm)
+                / max(comb_report["total"] + extra_total, 1),
                 3,
             ),
-            "mismatches": comb_report.get("mismatches", []) + genomics_report.get("mismatches", []),
+            "mismatches": (
+                comb_report.get("mismatches", [])
+                + genomics_report.get("mismatches", [])
+                + enzyme_report.get("mismatches", [])
+                + graph_report.get("mismatches", [])
+            ),
         }
         text = json.dumps(
             {

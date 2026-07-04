@@ -30,10 +30,7 @@ jobs:
         run: |
           python -c "
           from propab.domain_modules.registry import all_plugins
-          stubs = {'enzyme_kinetics', 'graph_invariants'}
           for p in all_plugins():
-              if p.domain_id in stubs:
-                  continue
               r = p.preflight()
               assert r.passed, f'{p.domain_id}: {r.reason}'
           print('all preflights passed')

@@ -29,6 +29,7 @@ TEST_BOOTSTRAP_STABILITY = "bootstrap_stability"
 TEST_HELD_OUT_GROUP = "held_out_group"
 TEST_ALTERNATE_SIMULATOR = "alternate_simulator"
 TEST_ROBUSTNESS = "robustness_analysis"
+TEST_PANEL_WITHIN_FE = "panel_within_fe"
 
 def _network_markers() -> tuple[str, ...]:
     """Network/graph artifact vocabulary, owned by the network-diffusion plugin.
@@ -356,6 +357,48 @@ def _survives_permutation(ctx: EvidenceContext, exp: dict[str, Any]) -> Artifact
     )
 
 
+def _survives_panel_within_fe(ctx: EvidenceContext, exp: dict[str, Any]) -> ArtifactVerification:
+    """Panel FE path: within-group R² beats baseline at standard p<0.05 (not p95 shuffle)."""
+    wg = _float_or_none(
+        exp.get("within_group_r2") or exp.get("lofo_r2") or ctx.lofo_r2 or exp.get("mean_r2"),
+    )
+    baseline = _float_or_none(exp.get("baseline_r2")) or 0.0
+    p = _float_or_none(
+        exp.get("permutation_p") or exp.get("permutation_p_value") or ctx.p_value or exp.get("p_value"),
+    )
+    has_coef = any(
+        exp.get(k) is not None
+        for k in ("fe_coefficient", "ols_coefficient", "coefficient", "fe_estimate")
+    )
+    survived = False
+    rationale = ""
+    if wg is not None and p is not None:
+        survived = float(wg) > float(baseline) + 0.01 and float(p) < 0.05
+        rationale = (
+            f"within_group_r2={float(wg):.3f} vs baseline={float(baseline):.3f}, "
+            f"perm p={float(p):.3f}"
+        )
+    elif wg is not None and has_coef:
+        survived = float(wg) > float(baseline)
+        rationale = f"within_group_r2={float(wg):.3f} with FE/OLS coefficient estimate"
+    else:
+        rationale = "missing within_group_r2 or permutation p for panel FE gate"
+
+    artifact = _base_artifact(
+        ARTIFACT_FAMILY_LEAKAGE, "Panel entity leakage", 0.88, "", [], TEST_PANEL_WITHIN_FE,
+    )
+    return ArtifactVerification(
+        artifact_model=artifact,
+        test_used=TEST_PANEL_WITHIN_FE,
+        survived=survived,
+        effect_size=float(wg) - float(baseline) if wg is not None else None,
+        confidence=0.88 if survived else 0.62,
+        observed_stat=wg,
+        empirical_p=p,
+        rationale=rationale,
+    )
+
+
 def run_adversarial_test(
     artifact: ArtifactModel,
     ctx: EvidenceContext,
@@ -367,6 +410,10 @@ def run_adversarial_test(
 
     if test == TEST_LABEL_SHUFFLE_LOFO:
         v = _survives_label_shuffle_lofo(exp)
+        v.artifact_model = artifact
+        return v
+    if test == TEST_PANEL_WITHIN_FE:
+        v = _survives_panel_within_fe(ctx, exp)
         v.artifact_model = artifact
         return v
     if test in (TEST_PERMUTATION_NULL, TEST_BOOTSTRAP_STABILITY):

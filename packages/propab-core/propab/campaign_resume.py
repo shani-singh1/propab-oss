@@ -4,37 +4,14 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from propab.belief_state import BeliefObject, CampaignBeliefState, ClosedBelief
+from propab.belief_state import CampaignBeliefState
 
-
-CONTRARIAN_QUESTION = (
-    "Is RT activity, as measured across these 7 evolutionary families, one shared biophysical "
-    "mechanism currently confounded by family-correlated nuisance variables — or are there "
-    "genuinely distinct, family-specific activity mechanisms, such that no single feature set "
-    "could ever predict activity across families, because \"activity\" does not refer to the same "
-    "underlying physical process in each family?"
-)
-
-CONTRARIAN_BELIEF_FAMILY_SPECIFIC = (
-    "RT activity in each family is governed by mechanisms specific to that family's evolutionary "
-    "and structural context. Predictive signals exist within families even when sequence redundancy "
-    "(nearest-neighbor effects) is controlled via clustered splitting."
-)
-
-CONTRARIAN_BELIEF_REDUNDANCY_ARTIFACT = (
-    "Observed intra-family predictive signals are artifacts of sequence redundancy; model performance "
-    "will collapse (R2 < 0) when the test set is restricted to sequences with <50% identity to the "
-    "training set."
-)
-
-CONTRARIAN_ORCHESTRATOR_DIRECTIVE = (
-    "Primary critical-experiment criterion: choose the next test because its result would move "
-    "Belief 1 (family-specific signal under clustered split) and Belief 2 (sequence-redundancy "
-    "artifact under low-identity holdout) in opposite directions — not because it refines either belief in isolation. "
-    "Prioritize within-family models that discriminate between these rivals over further "
-    "cross-family LOFO feature-combination searches, which have already run exhaustively under "
-    "the prior framing. Do not silently revert to cross-family LOFO search as a fallback. "
-    "Belief 2 must clear the same artifact-verification bar as Belief 1."
+# Re-export for API routes and tests (canonical definitions live on MandrakePlugin).
+from propab.domain_modules.mandrake.plugin import (  # noqa: F401
+    CONTRARIAN_BELIEF_FAMILY_SPECIFIC,
+    CONTRARIAN_BELIEF_REDUNDANCY_ARTIFACT,
+    CONTRARIAN_ORCHESTRATOR_DIRECTIVE,
+    CONTRARIAN_QUESTION,
 )
 
 
@@ -105,37 +82,17 @@ def apply_contrarian_belief_reset(
     orchestrator_directive: str | None = None,
     close_prior_reason: str = "superseded by contrarian reframing (fixes.md)",
 ) -> CampaignBeliefState:
-    """Data-preserving resume: close prior active beliefs, seed two rival beliefs."""
-    for belief in list(belief_state.active_beliefs):
-        belief_state.abandon_belief(belief, close_prior_reason)
+    """Delegate to MandrakePlugin — contrarian seeds are domain-owned."""
+    from propab.domain_modules.registry import get_domain_plugin
 
-    belief_state.apply_synthesis_beliefs([
-        {
-            "statement": CONTRARIAN_BELIEF_FAMILY_SPECIFIC,
-            "confidence": "weak",
-            "status": "active",
-            "supporting_nodes": [],
-            "contradicting_nodes": [],
-        },
-        {
-            "statement": CONTRARIAN_BELIEF_REDUNDANCY_ARTIFACT,
-            "confidence": "weak",
-            "status": "active",
-            "supporting_nodes": [],
-            "contradicting_nodes": [],
-        },
-    ], allow_ungrounded=True)
-    belief_state.exhaustion_rounds = 0
-    belief_state.branch_exhausted = False
-    belief_state.rival_exhaustion_mode = True
-    belief_state.results_since_last_synthesis = 0
-    belief_state.recent_activity_summary = (
-        "Contrarian reframing: discriminate unified-mechanism vs family-specific-mechanism rivals."
+    plugin = get_domain_plugin("mandrake")
+    if plugin is None:
+        raise RuntimeError("mandrake plugin not registered")
+    return plugin.apply_contrarian_belief_reset(
+        belief_state,
+        orchestrator_directive=orchestrator_directive,
+        close_prior_reason=close_prior_reason,
     )
-    directive = (orchestrator_directive or CONTRARIAN_ORCHESTRATOR_DIRECTIVE).strip()
-    if directive:
-        belief_state.add_human_message(directive)
-    return belief_state
 
 
 def validate_resume_readiness(

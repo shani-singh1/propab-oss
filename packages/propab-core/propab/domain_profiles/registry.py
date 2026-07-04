@@ -6,12 +6,14 @@ from typing import Any
 
 from propab.artifact_verification import EvidenceContext
 from propab.domain_profiles.base import DomainProfile
+from propab.domain_profiles.econometrics import ECONOMETRICS_PROFILE
 from propab.domain_profiles.enzyme_kinetics import ENZYME_KINETICS_PROFILE
 from propab.domain_profiles.graph_invariants import GRAPH_INVARIANTS_PROFILE
 from propab.domain_profiles.materials import MATERIALS_PROFILE
 from propab.domain_profiles.math_combinatorics import MATH_COMBINATORICS_PROFILE
 
 _PROFILES: tuple[DomainProfile, ...] = (
+    ECONOMETRICS_PROFILE,
     ENZYME_KINETICS_PROFILE,
     MATERIALS_PROFILE,
     GRAPH_INVARIANTS_PROFILE,
