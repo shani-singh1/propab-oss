@@ -1,0 +1,18 @@
+{
+  "task": "T3-001 AP-free preflight sweep",
+  "method": "greedy_ap_free_fast",
+  "verified_at": "2026-07-05",
+  "routing_corpus_entries": 20,
+  "sweep_points": [
+    {"n": 5000, "size": 256, "density": 0.0512},
+    {"n": 10000, "size": 512, "density": 0.0512},
+    {"n": 25000, "size": 768, "density": 0.03072},
+    {"n": 50000, "size": 1024, "density": 0.02048}
+  ],
+  "n50000": {
+    "size": 1024,
+    "density": 0.02048,
+    "elapsed_sec": 14.7,
+    "notes": "Greedy AP-free density at n=50000; monotonic decrease 0.0512 -> 0.02048 across sweep."
+  }
+}

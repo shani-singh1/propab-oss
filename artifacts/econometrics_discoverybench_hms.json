@@ -1,0 +1,133 @@
+{
+  "domain_profile": "econometrics",
+  "split": "validation",
+  "scorer_model": "google/gemini-3-flash-preview",
+  "n_samples": 3,
+  "hms_mean": 0.0,
+  "hms_max": 0.0,
+  "per_sample": {
+    "nls_bmi_raw|0|0": {
+      "hms": 0.0,
+      "context_score": 0.0,
+      "query": "Does increased time preference leads to higher BMI?",
+      "gen_hypothesis": "Insufficient evidence within the allocated time budget to state a confident hypothesis supported by verified experiments.",
+      "gold_hypothesis": "Higher time preference associated with higher BMI for 1989 data.",
+      "extract_audit": {
+        "strong_beliefs": 0,
+        "weak_beliefs": 0,
+        "confirmed_nodes": 0,
+        "stop_reason": "TIME_BUDGET_EXHAUSTED",
+        "status": "budget_exhausted",
+        "source": "abstain",
+        "artifact_gate_survivors": [],
+        "wait_timeout": false,
+        "non_terminal_at_timeout": false,
+        "belief_confidence": null,
+        "supporting_nodes": []
+      },
+      "campaign_status": "budget_exhausted",
+      "stop_reason": "TIME_BUDGET_EXHAUSTED"
+    },
+    "nls_bmi_raw|1|0": {
+      "hms": 0.0,
+      "context_score": 0.0,
+      "query": "Is time preference positively associated with obesity in black men?",
+      "gen_hypothesis": "Insufficient evidence within the allocated time budget to state a confident hypothesis supported by verified experiments.",
+      "gold_hypothesis": "Time preference positively associated with obesity in Black men.",
+      "extract_audit": {
+        "strong_beliefs": 0,
+        "weak_beliefs": 0,
+        "confirmed_nodes": 0,
+        "stop_reason": "TIME_BUDGET_EXHAUSTED",
+        "status": "budget_exhausted",
+        "source": "abstain",
+        "artifact_gate_survivors": [],
+        "wait_timeout": false,
+        "non_terminal_at_timeout": false,
+        "belief_confidence": null,
+        "supporting_nodes": []
+      },
+      "campaign_status": "budget_exhausted",
+      "stop_reason": "TIME_BUDGET_EXHAUSTED"
+    },
+    "immigration_offshoring_effect_on_employment|0|0": {
+      "hms": 0.0,
+      "context_score": 1.0,
+      "query": "Which variable per unit reduces 0.1059 unit of the share of offshore employment?",
+      "gen_hypothesis": "Insufficient evidence within the allocated time budget to state a confident hypothesis supported by verified experiments.",
+      "gold_hypothesis": "Per unit increased ease of immigration reduces 0.1059 unit of the share of offshore employment",
+      "extract_audit": {
+        "strong_beliefs": 0,
+        "weak_beliefs": 0,
+        "confirmed_nodes": 0,
+        "stop_reason": "TIME_BUDGET_EXHAUSTED",
+        "status": "budget_exhausted",
+        "source": "abstain",
+        "artifact_gate_survivors": [],
+        "wait_timeout": false,
+        "non_terminal_at_timeout": false,
+        "belief_confidence": null,
+        "supporting_nodes": []
+      },
+      "campaign_status": "budget_exhausted",
+      "stop_reason": "TIME_BUDGET_EXHAUSTED"
+    }
+  },
+  "evaluated_at": "2026-07-04T22:02:34.602838+00:00",
+  "solve_records": {
+    "nls_bmi_raw|0|0": {
+      "campaign_id": "fdacc4a9-8d17-49cb-9841-cf9217521435",
+      "campaign_status": "budget_exhausted",
+      "stop_reason": "TIME_BUDGET_EXHAUSTED",
+      "extract_audit": {
+        "strong_beliefs": 0,
+        "weak_beliefs": 0,
+        "confirmed_nodes": 0,
+        "stop_reason": "TIME_BUDGET_EXHAUSTED",
+        "status": "budget_exhausted",
+        "source": "abstain",
+        "artifact_gate_survivors": [],
+        "wait_timeout": false,
+        "non_terminal_at_timeout": false,
+        "belief_confidence": null,
+        "supporting_nodes": []
+      }
+    },
+    "nls_bmi_raw|1|0": {
+      "campaign_id": "36612dcc-f9cd-4282-bfcd-91b4b16f1904",
+      "campaign_status": "budget_exhausted",
+      "stop_reason": "TIME_BUDGET_EXHAUSTED",
+      "extract_audit": {
+        "strong_beliefs": 0,
+        "weak_beliefs": 0,
+        "confirmed_nodes": 0,
+        "stop_reason": "TIME_BUDGET_EXHAUSTED",
+        "status": "budget_exhausted",
+        "source": "abstain",
+        "artifact_gate_survivors": [],
+        "wait_timeout": false,
+        "non_terminal_at_timeout": false,
+        "belief_confidence": null,
+        "supporting_nodes": []
+      }
+    },
+    "immigration_offshoring_effect_on_employment|0|0": {
+      "campaign_id": "159080be-f65f-4c45-b429-9227f7c8519f",
+      "campaign_status": "budget_exhausted",
+      "stop_reason": "TIME_BUDGET_EXHAUSTED",
+      "extract_audit": {
+        "strong_beliefs": 0,
+        "weak_beliefs": 0,
+        "confirmed_nodes": 0,
+        "stop_reason": "TIME_BUDGET_EXHAUSTED",
+        "status": "budget_exhausted",
+        "source": "abstain",
+        "artifact_gate_survivors": [],
+        "wait_timeout": false,
+        "non_terminal_at_timeout": false,
+        "belief_confidence": null,
+        "supporting_nodes": []
+      }
+    }
+  }
+}

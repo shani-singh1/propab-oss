@@ -1,0 +1,14 @@
+{
+  "verified_at": "2026-07-05",
+  "total": 341,
+  "routing_ok": 341,
+  "routing_mismatches": 0,
+  "breakdown": {
+    "combinatorics_artifacts": 259,
+    "ap_free_corpus": 20,
+    "genomics_corpus": 22,
+    "enzyme_kinetics_corpus": 20,
+    "graph_invariants_corpus": 20
+  },
+  "command": "python scripts/inspect_hypothesis_routing.py --corpus --require-zero-mismatches"
+}
