@@ -1653,6 +1653,7 @@ async def run_campaign_loop(
         lifetime_seed_context = lifetime_context_for_seeds(lifetime.graph, lifetime.policy)
         from propab.numerical_seeds import format_seeds_for_question
 
+        knowledge_graph = lifetime.graph
         domain_profile_id = str(getattr(parsed, "domain_profile", None) or domain or "")
         seed_block = format_seeds_for_question(
             knowledge_graph.get_numerical_seeds(domain_profile_id or "math_combinatorics"),
@@ -1662,7 +1663,6 @@ async def run_campaign_loop(
         synthesis_history_buckets: list[dict[str, str]] = []
         diversity_reset_attempts = 0
         search_policy = lifetime.policy
-        knowledge_graph = lifetime.graph
         prior_snippets = _prior_snippets(prior_dict)
         if prior is None:
             prior = Prior(
