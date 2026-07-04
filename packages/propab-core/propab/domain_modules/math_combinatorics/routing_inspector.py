@@ -42,7 +42,7 @@ def _resolve_verifier(claim: str, methodology: str, full_text: str) -> str:
     if is_cap_set_hypothesis(full_text, methodology, full_text=full_text):
         return "cap_set_sweep"
     if "ap-free" in claim.lower() or "ap free" in claim.lower():
-        if _wants_asymptotic_analysis(claim) or len(_extract_n_list(claim)) >= 2:
+        if _wants_asymptotic_analysis(full_text) or len(_extract_n_list(full_text)) >= 2:
             return "ap_free_sweep"
         return "ap_free"
     if is_sidon_hypothesis(full_text, methodology, full_text=full_text):
