@@ -187,10 +187,14 @@ def apply_synthesis_to_frontier(
     implementable: list[str] = []
     if plugin is not None:
         implementable = plugin.implementable_methodologies()
+    from propab.synthesis_diversity import tree_problem_counts_from_nodes
+
+    tree_counts = tree_problem_counts_from_nodes(node_dicts)
     forced_type = resolve_forced_problem_type(
         synthesis_history_buckets or [],
         [b.statement for b in belief_state.active_beliefs],
         streak=3,
+        tree_problem_counts=tree_counts,
     )
 
     seed_dicts: list[dict[str, Any]] = []
@@ -341,10 +345,18 @@ async def run_campaign_synthesis_pass(
         resolve_forced_problem_type,
     )
 
+    from propab.synthesis_diversity import tree_problem_counts_from_nodes
+
+    node_dicts = {
+        nid: (n.to_dict() if hasattr(n, "to_dict") else n)
+        for nid, n in tree.nodes.items()
+    }
+    tree_counts = tree_problem_counts_from_nodes(node_dicts)
     forced_type = resolve_forced_problem_type(
         synthesis_history_buckets or [],
         [b.statement for b in belief_state.active_beliefs],
         streak=3,
+        tree_problem_counts=tree_counts,
     )
     prompt = compose_synthesis_prompt(
         question=question,

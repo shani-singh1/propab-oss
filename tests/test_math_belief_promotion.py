@@ -158,3 +158,21 @@ def test_apply_trend_promotion_moves_to_active() -> None:
     assert n == 1
     assert len(state.active_beliefs) == 1
     assert len(state.active_beliefs[0].supporting_nodes) >= 3
+
+
+def test_supporting_nodes_grow_beyond_five() -> None:
+    from propab.belief_promotion import refresh_active_belief_trend_support
+
+    state = CampaignBeliefState()
+    state.active_beliefs.append(BeliefObject(
+        statement="greedy F(n)/sqrt(n) is monotonically decreasing",
+        confidence="weak",
+        supporting_nodes=["a", "b", "c", "d", "e"],
+    ))
+    nodes = {nid: _confirmed_node(nid, n, 1.0 - n / 20000) for nid, n in zip(
+        ["a", "b", "c", "d", "e", "f", "g", "h"],
+        [500, 1000, 2000, 5000, 8000, 10000, 15000, 20000],
+    )}
+    thresh = MathCombinatoricsPlugin().belief_promotion_threshold()
+    refresh_active_belief_trend_support(state, nodes, thresh)
+    assert len(state.active_beliefs[0].supporting_nodes) > 5

@@ -226,6 +226,12 @@ class KnowledgeGraph:
         return g
 
     def save(self, path: Path | None = None) -> Path:
+        from propab.lifetime_postgres import lifetime_postgres_enabled, save_knowledge_graph
+
+        if lifetime_postgres_enabled():
+            save_knowledge_graph(self)
+            p = knowledge_store_path()
+            return p
         p = path or knowledge_store_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(self.to_dict(), indent=2, default=str), encoding="utf-8")
@@ -233,6 +239,13 @@ class KnowledgeGraph:
 
     @classmethod
     def load(cls, path: Path | None = None) -> KnowledgeGraph:
+        from propab.lifetime_postgres import lifetime_postgres_enabled, load_knowledge_graph
+
+        if lifetime_postgres_enabled():
+            try:
+                return load_knowledge_graph()
+            except Exception:
+                pass
         p = path or knowledge_store_path()
         if not p.is_file():
             return cls()

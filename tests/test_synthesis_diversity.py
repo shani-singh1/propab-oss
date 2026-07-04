@@ -59,3 +59,19 @@ def test_forced_problem_type_after_sidon_streak() -> None:
     forced = forced_problem_type(history, streak=5)
     assert forced is not None
     assert forced != "sidon"
+
+
+def test_tree_monoculture_forces_least_explored() -> None:
+    from propab.synthesis_diversity import forced_from_tree_monoculture
+
+    counts = {"cap_set": 166, "sidon": 22}
+    forced = forced_from_tree_monoculture(counts)
+    assert forced is not None
+    assert forced != "cap_set"
+    assert forced == "sidon"
+
+
+def test_resolve_forced_prefers_tree_monoculture() -> None:
+    tree = {"cap_set": 160, "sidon": 20, "ap_free": 2}
+    forced = resolve_forced_problem_type([], [], tree_problem_counts=tree)
+    assert forced == "ap_free"

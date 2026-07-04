@@ -50,6 +50,14 @@ _QUESTIONS: dict[str, str] = {
         "with natural category groups. Prefer exact combinatorial or spectral checks "
         "where possible; empirical claims require cross-category LOFO."
     ),
+    "genomics": (
+        "[domain_profile:genomics] "
+        "Discover which gene expression patterns generalize across tissue types in a "
+        "GTEx-style subset. Use leave-tissue-out holdout — within-tissue fit alone is "
+        "insufficient. Open question: which non-housekeeping genes show partial "
+        "cross-tissue conservation and what features (tau index, expression variance, "
+        "CV) predict it? Require tissue-label shuffle null p<0.05 before confirm."
+    ),
     "math_combinatorics": (
         "[domain_profile:math_combinatorics] "
         "Answer these tractable questions using ONLY greedy Sidon search, Bose-Chowla "
@@ -62,12 +70,16 @@ _QUESTIONS: dict[str, str] = {
         "below 0.95 (observed max 0.939 at n=500, descending to 0.67 at n=10000). "
         "(B) Cap sets F_3^n dims 3-7: CLP ratios decrease monotonically and stay well "
         "below 2.25. "
-        "OPEN QUESTIONS TO TEST NOW: "
-        "(1) For greedy Sidon in {1,...,n}, at what n does F(n)/sqrt(n) first fall below "
-        "0.90? Below 0.80? Below 0.70? Is the descent monotone at all tested scales or "
-        "are there local reversals? "
-        "(2) Does Bose-Chowla at matched n always underperform greedy, and by what ratio "
-        "F_BC(n)/sqrt(n) vs F_greedy(n)/sqrt(n) across n in {100,500,1000,5000,10000}? "
+        "OPEN QUESTIONS TO TEST NOW (Q1 priority — campaigns 3-4): "
+        "(1) Given F(n)/sqrt(n) crossed below 0.70 near n=8700 and reached 0.67 at n=10000, "
+        "where does it first fall below 0.60? Run threshold sweeps for n in [10000, 50000]. "
+        "Is the descent still strictly monotone at these scales? "
+        "(2) AP-free greedy density at n in [5000, 50000] — does it show the same monotonic "
+        "decrease pattern as Sidon? "
+        "(3) Bose-Chowla vs greedy at matched n for q giving n>10000 — does BC still "
+        "underperform by a measurable margin? "
+        "Cap-set table lookups are LOWER priority unless tree diversity requires them. "
+        "Prefer Sidon threshold and AP-free sweeps over cap-set CLP repeats. "
         "Every hypothesis must state a falsifiable numeric band, threshold, or comparison "
         "claim that the combinatorics verifier can check. Do NOT confirm without matching "
         "computed results to the stated claim. Do NOT perform file system or OS operations."
@@ -87,7 +99,7 @@ def _load_winner_domain() -> str | None:
 
 def _power_gate_ok(domain: str) -> tuple[bool, str]:
     # Deterministic math domains use plugin preflight at campaign launch, not LOFO power gate.
-    if domain == "math_combinatorics":
+    if domain in ("math_combinatorics", "genomics"):
         from propab.domain_modules.registry import get_domain_plugin
 
         plugin = get_domain_plugin(domain)
@@ -149,6 +161,11 @@ def main() -> int:
         help="Run until time budget or belief exhaustion only (no early breakthrough stop)",
     )
     parser.add_argument("--out", default=str(DEFAULT_OUT))
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preflight + routing check only; do not POST /campaigns",
+    )
     args = parser.parse_args()
 
     domain = args.domain or _load_winner_domain()
@@ -173,6 +190,40 @@ def main() -> int:
             print(f"Power gate blocked launch: {reason}", file=sys.stderr)
             print("Use --skip-power-check to override (fixes.md: not recommended).", file=sys.stderr)
             return 1
+
+    if args.dry_run:
+        from propab.domain_modules.registry import get_domain_plugin
+
+        plugin = get_domain_plugin(domain)
+        pf = plugin.preflight() if plugin else None
+        routing_rc = 0
+        routing_detail = "skipped"
+        if domain == "genomics":
+            from propab.domain_modules.genomics.routing_inspector import (
+                ROUTING_CORPUS,
+                inspect_corpus as inspect_genomics_corpus,
+            )
+
+            rep = inspect_genomics_corpus(ROUTING_CORPUS)
+            routing_rc = 0 if rep["routing_mismatches"] == 0 else 1
+            routing_detail = f"genomics {rep['routing_ok']}/{rep['total']}"
+        elif domain == "math_combinatorics":
+            routing_detail = "use full inspect_hypothesis_routing.py --corpus for combinatorics"
+        report = {
+            "dry_run": True,
+            "domain": domain,
+            "preflight_passed": bool(pf and pf.passed),
+            "preflight_reason": pf.reason if pf else "no plugin",
+            "preflight_details": pf.details if pf else {},
+            "routing_inspector_rc": routing_rc,
+            "routing_detail": routing_detail,
+            "would_launch_hours": args.hours,
+            "question_preview": _QUESTIONS.get(domain, "")[:200],
+        }
+        print(json.dumps(report, indent=2))
+        if not report["preflight_passed"] or routing_rc != 0:
+            return 1
+        return 0
 
     question = _QUESTIONS.get(domain, f"[domain_profile:{domain}] Open discovery campaign.")
     api = args.api.rstrip("/")
@@ -214,12 +265,12 @@ def main() -> int:
     }
     if domain == "math_combinatorics":
         payload["orchestrator_directive"] = (
-            "Narrow scope: greedy Sidon sweeps, Bose-Chowla vs greedy ratio comparison, "
-            "cap-set table lookup only. Reject Ruzsa/Singer/Poisson/Fourier/stochastic/SAT "
-            "hypotheses at synthesis. Baseline established: greedy F(n)/sqrt(n) < 0.95 for "
-            "n>=500; cap-set CLP ratios decrease below 2.25 for dims 3-7. Generate only "
-            "falsifiable band/threshold/monotonicity claims the verifier can check. Do not "
-            "confirm without claim_checked matching computed results."
+            "Q1 focus: greedy Sidon threshold sweeps n=10000..50000 (0.60 crossing), "
+            "AP-free density sweeps, Bose-Chowla vs greedy at large matched n. "
+            "Cap-set lookups secondary — avoid cap-set monoculture. "
+            "Reject Ruzsa/Singer/Poisson/Fourier/stochastic/SAT at synthesis. "
+            "Baseline: F(n)/sqrt(n) < 0.67 at n=10000; crossed 0.70 near n=8700. "
+            "Generate falsifiable band/threshold/monotonicity claims only."
         )
 
     body = json.dumps(payload).encode("utf-8")

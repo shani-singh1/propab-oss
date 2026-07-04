@@ -26,16 +26,61 @@ _SUBJECT_TO_PROBLEM = {
 }
 
 
+def forced_from_tree_monoculture(
+    tree_counts: dict[str, int],
+    *,
+    max_fraction: float = 0.40,
+    min_nodes: int = 20,
+) -> str | None:
+    """When one problem type dominates the tree, force the least-explored type."""
+    total = sum(tree_counts.values())
+    if total < min_nodes or not tree_counts:
+        return None
+    dominant, dom_count = max(tree_counts.items(), key=lambda kv: kv[1])
+    if dom_count / total <= max_fraction:
+        return None
+    non_dominant = [p for p in tree_counts if p != dominant]
+    if non_dominant:
+        return min(non_dominant, key=lambda p: tree_counts[p])
+    for alt in PROBLEM_TYPES:
+        if alt != dominant:
+            return alt
+    return None
+
+
+def tree_problem_counts_from_nodes(
+    nodes: dict[str, Any],
+) -> dict[str, int]:
+    from propab.numerical_seeds import classify_hypothesis_bucket
+
+    counts: Counter[str] = Counter()
+    for node in nodes.values():
+        if not isinstance(node, dict):
+            continue
+        text = node.get("text") or (getattr(node, "text", None) or "")
+        meth = node.get("test_methodology") or (getattr(node, "test_methodology", None) or "")
+        bucket = classify_hypothesis_bucket(str(text), str(meth))
+        pt = bucket.get("problem_type")
+        if pt and pt != "?":
+            counts[str(pt)] += 1
+    return dict(counts)
+
+
 def resolve_forced_problem_type(
     recent_buckets: list[dict[str, str]],
     active_belief_statements: list[str] | None = None,
     *,
     streak: int = 3,
+    tree_problem_counts: dict[str, int] | None = None,
 ) -> str | None:
     """Force a new problem type when history or active beliefs are monoculture."""
     from propab.belief_promotion import _belief_subject
 
-    # History streak first — cap-set-heavy trees should force Sidon even if beliefs already shifted.
+    if tree_problem_counts:
+        tree_forced = forced_from_tree_monoculture(tree_problem_counts)
+        if tree_forced:
+            return tree_forced
+    # History streak — cap-set-heavy recent rounds should force Sidon even if beliefs already shifted.
     history_forced = forced_problem_type(recent_buckets, streak=streak)
     if history_forced:
         return history_forced
@@ -64,11 +109,11 @@ def diversity_requirement_prompt(forced_type: str, *, avoid_type: str | None = N
 FALLBACK_SEED_TEMPLATES: dict[str, dict[str, str]] = {
     "sidon": {
         "text": (
-            "Population: Greedy Sidon in {1,...,n} for n in [2000, 5000, 10000]. "
-            "Claim: F(n)/sqrt(n) is strictly monotonically decreasing across this sweep "
-            "and falls below 0.80 at some n in the range."
+            "Population: Greedy Sidon in {1,...,n} for n in [10000, 20000, 30000, 50000]. "
+            "Claim: F(n)/sqrt(n) first falls below 0.60 somewhere in this range, "
+            "continuing the monotonic descent established below n=10000."
         ),
-        "test_methodology": "greedy Sidon sweep with ratio band claim",
+        "test_methodology": "greedy Sidon threshold crossing sweep",
     },
     "ap_free": {
         "text": (

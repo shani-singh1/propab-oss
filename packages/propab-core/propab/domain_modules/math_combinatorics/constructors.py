@@ -205,6 +205,8 @@ def is_sidon_hypothesis(
         full_text=full_text or statement,
     )
     s = claim.lower()
+    if "ap-free" in s or "ap free" in s or "arithmetic progression-free" in s:
+        return False
     if is_cap_set_hypothesis(statement, test_methodology, full_text=full_text):
         return False
     sidon_markers = (

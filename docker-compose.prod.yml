@@ -1,0 +1,198 @@
+# Production compose — built images only, no source mounts on app services.
+# Set secrets via .env (see .env.example). Run: docker compose -f docker-compose.prod.yml up -d
+services:
+  api:
+    image: ${PROPAB_API_IMAGE:-propab-oss-api:latest}
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - CELERY_BROKER_URL=${REDIS_URL}
+      - QDRANT_URL=${QDRANT_URL}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - MINIO_BUCKET=${MINIO_BUCKET:-propab}
+      - MINIO_SECURE=${MINIO_SECURE:-false}
+      - PROPAB_DATA_DIR=${PROPAB_DATA_DIR:-/data/propab}
+      - LIFETIME_STORE_BACKEND=${LIFETIME_STORE_BACKEND:-postgres}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o}
+      - EMBED_PROVIDER=${EMBED_PROVIDER:-openai}
+      - EMBED_MODEL=${EMBED_MODEL:-text-embedding-3-small}
+      - ORCHESTRATOR_URL=${ORCHESTRATOR_URL:-http://orchestrator:8010}
+      - ORCHESTRATOR_INTERNAL_TOKEN=${ORCHESTRATOR_INTERNAL_TOKEN}
+      - PROPAB_PROFILE=${PROPAB_PROFILE:-campaign}
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - propab_data:/data/propab
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      minio:
+        condition: service_started
+      orchestrator:
+        condition: service_healthy
+
+  orchestrator:
+    image: ${PROPAB_ORCHESTRATOR_IMAGE:-propab-oss-orchestrator:latest}
+    build:
+      context: .
+      dockerfile: services/orchestrator/Dockerfile
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - CELERY_BROKER_URL=${REDIS_URL}
+      - QDRANT_URL=${QDRANT_URL}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - MINIO_BUCKET=${MINIO_BUCKET:-propab}
+      - MINIO_SECURE=${MINIO_SECURE:-false}
+      - PROPAB_DATA_DIR=${PROPAB_DATA_DIR:-/data/propab}
+      - LIFETIME_STORE_BACKEND=${LIFETIME_STORE_BACKEND:-postgres}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o}
+      - ORCHESTRATOR_INTERNAL_TOKEN=${ORCHESTRATOR_INTERNAL_TOKEN}
+      - PROPAB_PROFILE=${PROPAB_PROFILE:-campaign}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      minio:
+        condition: service_started
+
+  worker:
+    image: ${PROPAB_WORKER_IMAGE:-propab-oss-worker:latest}
+    build:
+      context: .
+      dockerfile: services/worker/Dockerfile
+    command: ["celery", "-A", "services.worker.celery_app", "worker", "--loglevel=info", "--concurrency=16"]
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - CELERY_BROKER_URL=${REDIS_URL}
+      - QDRANT_URL=${QDRANT_URL}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - MINIO_BUCKET=${MINIO_BUCKET:-propab}
+      - MINIO_SECURE=${MINIO_SECURE:-false}
+      - PROPAB_DATA_DIR=${PROPAB_DATA_DIR:-/data/propab}
+      - LIFETIME_STORE_BACKEND=${LIFETIME_STORE_BACKEND:-postgres}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o}
+      - PROPAB_PROFILE=${PROPAB_PROFILE:-campaign}
+      - SANDBOX_IMAGE=${SANDBOX_IMAGE:-propab-oss-worker:latest}
+    restart: unless-stopped
+    volumes:
+      - propab_data:/data/propab
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      minio:
+        condition: service_started
+
+  migrate:
+    image: ${PROPAB_API_IMAGE:-propab-oss-api:latest}
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_URL_SYNC=${DATABASE_URL_SYNC}
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: propab
+      POSTGRES_USER: propab
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-propab}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U propab -d propab"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:v1.7.0
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:6333/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-propab}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-propab_secret}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  minio_data:
+  propab_data:

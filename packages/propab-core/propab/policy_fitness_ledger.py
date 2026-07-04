@@ -56,12 +56,24 @@ class PolicyFitnessLedger:
         return cls(records=recs)
 
     def save(self, path: Path | None = None) -> Path:
+        from propab.lifetime_postgres import lifetime_postgres_enabled, save_fitness_ledger
+
+        if lifetime_postgres_enabled():
+            save_fitness_ledger(self)
+            return fitness_ledger_path()
         p = path or fitness_ledger_path()
         p.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
         return p
 
     @classmethod
     def load(cls, path: Path | None = None) -> PolicyFitnessLedger:
+        from propab.lifetime_postgres import lifetime_postgres_enabled, load_fitness_ledger
+
+        if lifetime_postgres_enabled():
+            try:
+                return load_fitness_ledger()
+            except Exception:
+                pass
         p = path or fitness_ledger_path()
         if not p.is_file():
             return cls()

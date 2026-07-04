@@ -46,3 +46,8 @@ scripts/_*.py
 
 # Mandrake demo dataset wiring (requires private mandrake-data/)
 demo/mandrake/
+
+#agents file for cursor sessions
+agent1.md
+agent2.md
+agent3.md

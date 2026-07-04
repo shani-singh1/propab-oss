@@ -124,12 +124,24 @@ class MetaScienceLedger:
         return cls(observations=obs)
 
     def save(self, path: Path | None = None) -> Path:
+        from propab.lifetime_postgres import lifetime_postgres_enabled, save_meta_ledger
+
+        if lifetime_postgres_enabled():
+            save_meta_ledger(self)
+            return meta_store_path()
         p = path or meta_store_path()
         p.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
         return p
 
     @classmethod
     def load(cls, path: Path | None = None) -> MetaScienceLedger:
+        from propab.lifetime_postgres import lifetime_postgres_enabled, load_meta_ledger
+
+        if lifetime_postgres_enabled():
+            try:
+                return load_meta_ledger()
+            except Exception:
+                pass
         p = path or meta_store_path()
         if not p.is_file():
             return cls()

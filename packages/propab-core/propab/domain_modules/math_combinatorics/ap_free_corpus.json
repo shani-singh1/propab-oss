@@ -1,0 +1,22 @@
+[
+  {"id": "ap01", "statement": "Greedy AP-free density in {1,...,500} exceeds 0.35", "test_methodology": "greedy AP-free construction"},
+  {"id": "ap02", "statement": "AP-free greedy density at n=1000 is below 0.40", "test_methodology": "AP-free greedy search"},
+  {"id": "ap03", "statement": "Greedy AP-free set size at n=200 is at least 40", "test_methodology": "greedy AP-free"},
+  {"id": "ap04", "statement": "AP-free density decreases monotonically for n in {500,1000,2000}", "test_methodology": "AP-free density sweep"},
+  {"id": "ap05", "statement": "Greedy AP-free density at n=5000 is below 0.25", "test_methodology": "greedy AP-free optimized"},
+  {"id": "ap06", "statement": "Greedy AP-free density at n=1000 is below 0.45", "test_methodology": "AP-free greedy upper bound check"},
+  {"id": "ap07", "statement": "Greedy AP-free density at n=2000 is between 0.20 and 0.35", "test_methodology": "band validation AP-free"},
+  {"id": "ap08", "statement": "AP-free greedy construction at n=100 achieves density above 0.50", "test_methodology": "single-point AP-free"},
+  {"id": "ap09", "statement": "Greedy AP-free density at n=10000 is below 0.20", "test_methodology": "AP-free sweep n=10000"},
+  {"id": "ap10", "statement": "AP-free density at n=300 is above 0.30", "test_methodology": "greedy AP-free"},
+  {"id": "ap11", "statement": "Greedy AP-free density at n=5000 is below 0.22", "test_methodology": "AP-free single-point comparison"},
+  {"id": "ap12", "statement": "No 3-term AP in greedy AP-free set for n=150", "test_methodology": "AP-free verification"},
+  {"id": "ap13", "statement": "AP-free greedy density at n=750 is below 0.38", "test_methodology": "greedy AP-free"},
+  {"id": "ap14", "statement": "Greedy AP-free density monotonic decrease n=1000 to n=5000", "test_methodology": "AP-free monotonic sweep"},
+  {"id": "ap15", "statement": "AP-free construction density at n=400 exceeds 0.32", "test_methodology": "AP-free single point"},
+  {"id": "ap16", "statement": "Greedy AP-free at n=2500 has density below 0.30", "test_methodology": "AP-free greedy optimized"},
+  {"id": "ap17", "statement": "AP-free density at n=600 is between 0.25 and 0.40", "test_methodology": "AP-free band check"},
+  {"id": "ap18", "statement": "Greedy AP-free set for n=800 has size at least 200", "test_methodology": "AP-free minimum size claim"},
+  {"id": "ap19", "statement": "AP-free greedy density drops below 0.35 by n=1500", "test_methodology": "threshold crossing AP-free"},
+  {"id": "ap20", "statement": "Greedy AP-free density at n=1000 is above 0.28", "test_methodology": "AP-free single-point check"}
+]

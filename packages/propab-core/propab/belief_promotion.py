@@ -178,7 +178,8 @@ def try_trend_promotion(
             return None
     elif not is_consistent_trend(values, decreasing=values[0] > values[-1]):
         return None
-    return [r[0] for r in rows[: max(min_nodes, 5)]]
+    cap = int(threshold.get("max_supporting_nodes") or len(rows))
+    return [r[0] for r in rows[:cap]]
 
 
 def apply_trend_promotion_to_beliefs(

@@ -181,9 +181,14 @@ class PolicyStore:
         return store
 
     def save(self, path: Path | None = None) -> Path:
+        from propab.lifetime_postgres import lifetime_postgres_enabled, save_policy_store
+
+        if lifetime_postgres_enabled():
+            save_policy_store(self)
+            self._sync_legacy_search_policy()
+            return policy_store_path()
         p = path or policy_store_path()
         p.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
-        # Legacy adapter for scripts still reading search_policy.json
         self._sync_legacy_search_policy()
         return p
 
@@ -196,6 +201,13 @@ class PolicyStore:
 
     @classmethod
     def load(cls, path: Path | None = None) -> PolicyStore:
+        from propab.lifetime_postgres import lifetime_postgres_enabled, load_policy_store_cls
+
+        if lifetime_postgres_enabled():
+            try:
+                return load_policy_store_cls()
+            except Exception:
+                pass
         p = path or policy_store_path()
         if p.is_file():
             try:

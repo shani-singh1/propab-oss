@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     qdrant_url: str = ""
     qdrant_collection: str = "propab_chunks"
     propab_data_dir: str = "./data"
+    # "json" for tests/local; "postgres" for production (T1-001 upsert semantics).
+    lifetime_store_backend: str = "json"
     minio_endpoint: str = ""
     minio_access_key: str = ""
     minio_secret_key: str = ""

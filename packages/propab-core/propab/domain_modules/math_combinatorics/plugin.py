@@ -340,6 +340,7 @@ class MathCombinatoricsPlugin(DomainPlugin):
     def belief_promotion_threshold(self) -> dict[str, Any]:
         return {
             "requires_supporting_nodes": 3,
+            "max_supporting_nodes": 12,
             "requires_confidence": "weak",
             "allow_trend_promotion": True,
             "trend_definition": (

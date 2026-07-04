@@ -12,8 +12,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "packages" / "propab-core"))
 
 from propab.domain_modules.math_combinatorics.routing_inspector import (  # noqa: E402
-    inspect_corpus,
+    inspect_corpus as inspect_combinatorics_corpus,
     inspect_routing,
+)
+from propab.domain_modules.genomics.routing_inspector import (  # noqa: E402
+    ROUTING_CORPUS as GENOMICS_CORPUS,
+    inspect_corpus as inspect_genomics_corpus,
 )
 
 DEFAULT_EXAMPLE = {
@@ -25,6 +29,10 @@ DEFAULT_EXAMPLE = {
 CORPUS_ARTIFACTS = (
     ROOT / "artifacts" / "campaign_ac60fcda_deep_analysis.json",
     ROOT / "artifacts" / "campaign_da855131_deep_analysis.json",
+)
+
+AP_FREE_CORPUS = (
+    ROOT / "packages" / "propab-core" / "propab" / "domain_modules" / "math_combinatorics" / "ap_free_corpus.json"
 )
 
 
@@ -46,6 +54,16 @@ def _load_corpus_from_artifacts() -> list[dict]:
                     "prior_verdict": key.replace("_hypotheses", ""),
                 })
     return out
+
+
+def _load_ap_free_corpus() -> list[dict]:
+    if not AP_FREE_CORPUS.is_file():
+        return []
+    return json.loads(AP_FREE_CORPUS.read_text(encoding="utf-8"))
+
+
+def _load_full_corpus() -> list[dict]:
+    return _load_corpus_from_artifacts() + _load_ap_free_corpus()
 
 
 def _load_corpus_from_api(campaign_id: str, api: str) -> list[dict]:
@@ -87,15 +105,29 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.corpus or args.campaign_id:
-        corpus = (
+        comb_corpus = (
             _load_corpus_from_api(args.campaign_id, args.api)
             if args.campaign_id
-            else _load_corpus_from_artifacts()
+            else _load_full_corpus()
         )
-        if not corpus:
+        genomics_report = inspect_genomics_corpus(GENOMICS_CORPUS)
+        if not comb_corpus and genomics_report["total"] == 0:
             print("No corpus hypotheses found.", file=sys.stderr)
             return 1
-        report = inspect_corpus(corpus)
+        comb_report = inspect_combinatorics_corpus(comb_corpus) if comb_corpus else {
+            "total": 0, "routing_ok": 0, "routing_mismatches": 0, "mismatch_rate": 0.0, "mismatches": [],
+        }
+        report = {
+            "total": comb_report["total"] + genomics_report["total"],
+            "routing_ok": comb_report["routing_ok"] + genomics_report["routing_ok"],
+            "routing_mismatches": comb_report["routing_mismatches"] + genomics_report["routing_mismatches"],
+            "mismatch_rate": round(
+                (comb_report["routing_mismatches"] + genomics_report["routing_mismatches"])
+                / max(comb_report["total"] + genomics_report["total"], 1),
+                3,
+            ),
+            "mismatches": comb_report.get("mismatches", []) + genomics_report.get("mismatches", []),
+        }
         text = json.dumps(
             {
                 "total": report["total"],

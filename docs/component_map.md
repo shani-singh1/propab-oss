@@ -222,18 +222,18 @@ Two structural facts that Checklists 2 and 4 target:
 
 ## Lifetime learning
 
-All stores are JSON files under `{propab_data_dir}/lifetime_knowledge/`, loaded → mutated → saved with **no locking (last-writer-wins)**.
+Default backend: JSON files under `{propab_data_dir}/lifetime_knowledge/` (last-writer-wins).
+When `lifetime_store_backend=postgres`, `propab/lifetime_postgres.py` upserts per entity
+(T1-001 migration `20260704130000_lifetime_knowledge_postgres`).
 
-> **CL3/CL4 status — DEFERRED (concurrency, not correctness):** the LWW behavior
-> is unchanged this session. It is only a hazard when two campaigns finalize
-> concurrently and both write the same JSON store. Because `ingest_campaign`
-> runs once at campaign end (single writer per campaign) and campaigns are
-> currently serialized through the API-process BackgroundTask, there is no live
-> concurrent-write path today. Fixing LWW properly (file locks or moving these
-> stores to Postgres) is a **Checklist 4** item — it only becomes real once the
-> orchestrator runs campaigns concurrently off the API process, and it can only
-> be validated on a running multi-worker stack. Marked here explicitly rather
-> than silently.
+> **T1-001 (in progress):** Postgres upsert path wired for `KnowledgeGraph`,
+> `MetaScienceLedger`, and `PolicyFitnessLedger`. JSON remains default for tests;
+> set `LIFETIME_STORE_BACKEND=postgres` and run migration on the stack to enable.
+
+### `lifetime_postgres.py`
+- **File:** `packages/propab-core/propab/lifetime_postgres.py`
+- **Does:** Per-claim/theory/seed upserts; replaces JSON LWW when backend is postgres.
+- **Test:** `tests/test_lifetime_postgres_concurrent.py` (skips without Postgres).
 
 ### `KnowledgeGraph`
 - **File:** `packages/propab-core/propab/knowledge_graph.py`

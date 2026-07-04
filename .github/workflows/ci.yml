@@ -23,6 +23,22 @@ jobs:
       - name: Run tests
         run: pytest tests/ -q --tb=short
 
+      - name: Routing inspector (zero mismatches)
+        run: python scripts/inspect_hypothesis_routing.py --corpus --require-zero-mismatches
+
+      - name: Domain preflights (non-stub)
+        run: |
+          python -c "
+          from propab.domain_modules.registry import all_plugins
+          stubs = {'enzyme_kinetics', 'graph_invariants'}
+          for p in all_plugins():
+              if p.domain_id in stubs:
+                  continue
+              r = p.preflight()
+              assert r.passed, f'{p.domain_id}: {r.reason}'
+          print('all preflights passed')
+          "
+
   compose-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -31,6 +47,9 @@ jobs:
 
       - name: Validate Docker Compose file
         run: docker compose -f docker-compose.yml config -q
+
+      - name: Validate production Compose file
+        run: docker compose -f docker-compose.prod.yml config -q
 
       - name: Build API and orchestrator images
         run: docker compose -f docker-compose.yml build api orchestrator

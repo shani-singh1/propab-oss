@@ -41,6 +41,10 @@ def _infer_features(hypothesis: dict[str, Any], claim: str) -> list[str]:
 def _resolve_verifier(claim: str, methodology: str, full_text: str) -> str:
     if is_cap_set_hypothesis(full_text, methodology, full_text=full_text):
         return "cap_set_sweep"
+    if "ap-free" in claim.lower() or "ap free" in claim.lower():
+        if _wants_asymptotic_analysis(claim) or len(_extract_n_list(claim)) >= 2:
+            return "ap_free_sweep"
+        return "ap_free"
     if is_sidon_hypothesis(full_text, methodology, full_text=full_text):
         if _wants_bc_matched_comparison(full_text):
             return "sidon_bc_matched_compare"
@@ -55,8 +59,6 @@ def _resolve_verifier(claim: str, methodology: str, full_text: str) -> str:
         return "sidon_single_point"
     if "sumset" in claim.lower():
         return "sumset"
-    if "ap-free" in claim.lower():
-        return "ap_free"
     return "sidon_sweep_greedy"
 
 
@@ -88,6 +90,7 @@ def _expected_metric(verifier: str) -> str:
         "sidon_single_point": "sidon_density",
         "sumset": "sumset_growth",
         "ap_free": "ap_free_density",
+        "ap_free_sweep": "ap_free_density_sweep",
     }.get(verifier, "sidon_ratio_to_sqrt_n")
 
 
