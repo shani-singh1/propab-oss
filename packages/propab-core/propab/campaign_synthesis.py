@@ -349,6 +349,7 @@ async def run_campaign_synthesis_pass(
                 "binding_accepted_count": metrics.get("binding_accepted_count", 0),
                 "falsifiability_rejected_count": metrics.get("falsifiability_rejected_count", 0),
                 "belief_cap_rejected_count": metrics.get("belief_cap_rejected_count", 0),
+                "beliefs_promoted_by_trend": metrics.get("beliefs_promoted_by_trend", 0),
                 "active_beliefs": [b.to_dict() for b in belief_state.active_beliefs],
                 "branch_exhausted": belief_state.branch_exhausted,
                 "exhaustion_rounds": belief_state.exhaustion_rounds,

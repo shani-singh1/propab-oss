@@ -92,6 +92,20 @@ def test_trend_promotion_from_json_evidence_summary() -> None:
     assert len(ids) >= 3
 
 
+def test_apply_synthesis_preserves_trend_promoted_beliefs() -> None:
+    state = CampaignBeliefState()
+    state.active_beliefs.append(BeliefObject(
+        statement="carried promoted belief",
+        confidence="weak",
+        supporting_nodes=["a", "b", "c"],
+    ))
+    state.apply_synthesis_beliefs([
+        {"statement": "new ungrounded belief", "confidence": "weak", "status": "active"},
+    ], allow_ungrounded=True)
+    assert any(b.statement == "carried promoted belief" for b in state.active_beliefs)
+    assert len(state.active_beliefs[0].supporting_nodes) == 3
+
+
 def test_trend_promotion_three_monotone_nodes() -> None:
     nodes = {
         "a": _confirmed_node("a", 500, 0.939),

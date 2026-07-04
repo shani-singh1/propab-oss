@@ -223,7 +223,14 @@ class CampaignBeliefState:
                 contradicting_nodes=contradicting,
                 status=status,  # type: ignore[arg-type]
             ))
-        self.active_beliefs = updated[:cap]
+        carried = [b for b in self.active_beliefs if b.supporting_nodes]
+        seen = {b.statement for b in carried}
+        for belief in updated:
+            if belief.statement in seen:
+                continue
+            carried.append(belief)
+            seen.add(belief.statement)
+        self.active_beliefs = carried[:cap]
 
     def check_exhaustion(self) -> bool:
         """Section 4.2: no belief above unclear and no new belief introduced."""

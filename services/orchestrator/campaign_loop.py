@@ -161,6 +161,25 @@ def _prior_snippets(prior_dict: dict[str, Any]) -> list[str]:
     return snippets
 
 
+def _resolve_synthesis_domain_id(campaign: ResearchCampaign, parsed_domain: str = "") -> str:
+    """Resolve domain plugin id from campaign tag/payload — not infer_session_domain()."""
+    from propab.domain_modules.registry import resolve_domain_plugin
+
+    plugin = resolve_domain_plugin(
+        question=campaign.question,
+        payload={"domain_profile": getattr(campaign, "domain_profile", None)},
+    )
+    if plugin is not None:
+        return plugin.domain_id
+    explicit = str(getattr(campaign, "domain_profile", None) or "").strip()
+    if explicit:
+        return explicit
+    m = re.search(r"\[domain_profile:([a-z0-9_]+)\]", campaign.question or "", re.I)
+    if m:
+        return m.group(1).lower()
+    return parsed_domain
+
+
 def _apply_result_diagnostics(
     tree: HypothesisTree,
     node_id: str,
@@ -866,7 +885,7 @@ async def _maybe_run_campaign_synthesis(
         prior_snippets=prior_snippets,
         emitter=emitter,
         session_factory=session_factory,
-        domain_id=str(getattr(campaign, "domain_profile", None) or ""),
+        domain_id=_resolve_synthesis_domain_id(campaign),
     )
     return len(added) > 0
 
@@ -1654,7 +1673,7 @@ async def run_campaign_loop(
         from propab.numerical_seeds import format_seeds_for_question
 
         knowledge_graph = lifetime.graph
-        domain_profile_id = str(getattr(parsed, "domain_profile", None) or domain or "")
+        domain_profile_id = _resolve_synthesis_domain_id(campaign, parsed_domain=domain)
         seed_block = format_seeds_for_question(
             knowledge_graph.get_numerical_seeds(domain_profile_id or "math_combinatorics"),
         )
@@ -1824,7 +1843,7 @@ async def run_campaign_loop(
                             prior_snippets=prior_snippets,
                             emitter=emitter,
                             session_factory=session_factory,
-                            domain_id=domain_profile_id or domain,
+                            domain_id=domain_profile_id,
                             synthesis_history_buckets=synthesis_history_buckets,
                             diversity_reset_instruction=reset_prompt,
                         )
