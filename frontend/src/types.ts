@@ -46,6 +46,23 @@ export interface CampaignSummary {
   tree: TreeSummary;
 }
 
+export type ConfidenceLevel = "strong" | "weak" | "unclear";
+export type BeliefStatus = "active" | "strengthened" | "weakened" | "abandoned";
+
+export interface BeliefObject {
+  statement: string;
+  confidence: ConfidenceLevel;
+  supporting_nodes: string[];
+  contradicting_nodes: string[];
+  status: BeliefStatus;
+  exhaustion_rounds: number;
+}
+
+export interface CampaignBeliefState {
+  active_beliefs: BeliefObject[];
+  [k: string]: unknown;
+}
+
 export interface CampaignState {
   campaign_id: string;
   campaign: {
@@ -61,6 +78,8 @@ export interface CampaignState {
     compute_budget_seconds: number;
     compute_seconds_used: number;
     started_at: string;
+    stop_reason?: string | null;
+    belief_state?: CampaignBeliefState;
   };
   summary: CampaignSummary;
   research_session: {

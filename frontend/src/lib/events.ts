@@ -1,4 +1,5 @@
 import type { PropabEvent, Verdict } from "../types";
+import { verdictColor } from "./status";
 
 // Coarse phase for an event type, used to group the stream and color it.
 export type Phase =
@@ -102,31 +103,48 @@ export function eventLabel(e: PropabEvent): string {
   }
 }
 
-export function verdictColor(v: Verdict | string | undefined): string {
-  switch (v) {
-    case "confirmed":
-      return "text-confirmed";
-    case "refuted":
-      return "text-refuted";
-    case "running":
-    case "pending":
-      return "text-running";
-    default:
-      return "text-inconclusive";
-  }
+// Event types that represent campaign milestones (the "Milestones" filter and
+// the emphasized timeline dots). Everything else is fine-grained activity.
+const MILESTONE_TYPES = new Set<string>([
+  "campaign.started",
+  "campaign.baseline_measured",
+  "campaign.breakthrough",
+  "campaign.budget_exhausted",
+  "campaign.completed",
+  "campaign.progress",
+  "hypothesis.generated",
+  "hypothesis.tree_expanded",
+  "hypothesis.tree_frontier_empty",
+  "hypothesis.promoted",
+  "hypothesis.retired",
+  "agent.completed",
+  "synthesis.result_received",
+  "synthesis.ledger_updated",
+  "synthesis.breakthrough",
+  "synthesis.dead_end",
+  "synthesis.all_inconclusive",
+  "paper.ready",
+  "session.completed",
+  "session.failed",
+]);
+
+export function isMilestone(t: string): boolean {
+  return MILESTONE_TYPES.has(t);
 }
 
-export function verdictBorder(v: Verdict | string | undefined): string {
-  switch (v) {
-    case "confirmed":
-      return "border-l-confirmed";
-    case "refuted":
-      return "border-l-refuted";
-    case "pending":
-      return "border-l-running";
-    default:
-      return "border-l-inconclusive";
-  }
+// Color of the timeline dot for an event: verdict-driven when present, else a
+// coarse tone (errors red, milestones ink, otherwise muted).
+export function eventDotColor(e: PropabEvent): string {
+  const v = (e.payload?.verdict as Verdict | undefined) || undefined;
+  if (v) return verdictColor(v);
+  const t = e.event_type;
+  if (isErrorEvent(t)) return "var(--red)";
+  if (t === "campaign.breakthrough" || t === "synthesis.breakthrough") return "var(--green)";
+  if (t === "campaign.budget_exhausted" || t === "synthesis.dead_end" || t === "session.failed")
+    return "var(--red)";
+  if (t === "synthesis.result_received" || t === "synthesis.ledger_updated") return "var(--green)";
+  if (isMilestone(t)) return "var(--text)";
+  return "var(--text3)";
 }
 
 export function isErrorEvent(t: string): boolean {

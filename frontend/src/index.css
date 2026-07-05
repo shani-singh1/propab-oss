@@ -2,34 +2,93 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Design tokens (from propab-design-ref-v1) ─────────────────────────────── */
+/* Dark is the default (:root); [data-theme="light"] flips the whole palette.   */
+:root,
+[data-theme="dark"] {
+  --desk: #0a0a0b;
+  --railBg: #151516;
+  --centerBg: #131314;
+  --rightBg: #0f0f10;
+  --text: #ededed;
+  --text2: rgba(255, 255, 255, 0.56);
+  --text3: rgba(255, 255, 255, 0.34);
+  --text4: rgba(255, 255, 255, 0.2);
+  --divider: rgba(255, 255, 255, 0.08);
+  --border: rgba(255, 255, 255, 0.11);
+  --rowSel: rgba(255, 255, 255, 0.065);
+  --rowHover: rgba(255, 255, 255, 0.038);
+  --chip: rgba(255, 255, 255, 0.07);
+  --mention: rgba(255, 255, 255, 0.055);
+  --green: #54c07a;
+  --greenDim: rgba(84, 192, 122, 0.15);
+  --red: #e06a60;
+  --redDim: rgba(224, 106, 96, 0.13);
+  --winShadow: 0 30px 80px rgba(0, 0, 0, 0.55), 0 4px 14px rgba(0, 0, 0, 0.4);
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --desk: #e6e4df;
+  --railBg: #f7f6f3;
+  --centerBg: #ffffff;
+  --rightBg: #faf9f7;
+  --text: #191919;
+  --text2: rgba(0, 0, 0, 0.58);
+  --text3: rgba(0, 0, 0, 0.4);
+  --text4: rgba(0, 0, 0, 0.24);
+  --divider: rgba(0, 0, 0, 0.09);
+  --border: rgba(0, 0, 0, 0.12);
+  --rowSel: rgba(0, 0, 0, 0.05);
+  --rowHover: rgba(0, 0, 0, 0.032);
+  --chip: rgba(0, 0, 0, 0.055);
+  --mention: rgba(0, 0, 0, 0.04);
+  --green: #1c8039;
+  --greenDim: rgba(28, 128, 57, 0.11);
+  --red: #c8392f;
+  --redDim: rgba(200, 57, 47, 0.09);
+  --winShadow: 0 26px 64px rgba(60, 50, 40, 0.2), 0 3px 12px rgba(60, 50, 40, 0.12);
+  color-scheme: light;
+}
+
 @layer base {
-  :root {
-    color-scheme: dark;
-  }
   html,
   body,
   #root {
     height: 100%;
-  }
-  body {
-    @apply bg-bg text-text-primary font-sans antialiased;
     margin: 0;
   }
+  body {
+    background: var(--desk);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
   ::selection {
-    background: rgba(124, 106, 247, 0.35);
+    background: var(--chip);
   }
 }
 
-@layer utilities {
-  .scrollbar-thin::-webkit-scrollbar {
+/* ── Utilities carried over from the reference ─────────────────────────────── */
+@layer components {
+  .pp-scroll::-webkit-scrollbar {
     width: 8px;
     height: 8px;
   }
-  .scrollbar-thin::-webkit-scrollbar-thumb {
-    background: #2a2d3a;
+  .pp-scroll::-webkit-scrollbar-thumb {
+    background: var(--border);
     border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: content-box;
   }
-  .scrollbar-thin::-webkit-scrollbar-track {
+  .pp-scroll::-webkit-scrollbar-track {
     background: transparent;
   }
+}
+
+.pp-row:hover {
+  background: var(--rowHover) !important;
+}
+textarea::placeholder,
+input::placeholder {
+  color: var(--text3);
 }

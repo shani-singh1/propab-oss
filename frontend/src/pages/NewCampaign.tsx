@@ -1,204 +1,175 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
-import { Card } from "../components/ui";
 
-type Kind = "empirical" | "verification";
+const label = "mb-2 text-[12px] font-semibold leading-none text-ink-2";
+const fieldBox =
+  "w-full rounded-[9px] border border-edge bg-rail px-[14px] py-3 text-[14px] leading-none text-ink outline-none focus:border-ink-3";
 
 export default function NewCampaign() {
   const nav = useNavigate();
   const [question, setQuestion] = useState("");
-  const [kind, setKind] = useState<Kind>("empirical");
-  const [hours, setHours] = useState(4);
+  const [budget, setBudget] = useState(4);
   const [metric, setMetric] = useState("val_accuracy");
-  const [threshold, setThreshold] = useState(5);
-  const [minConfidence, setMinConfidence] = useState(0.85);
-  const [minReplications, setMinReplications] = useState(2);
+  const [threshold, setThreshold] = useState(5); // percent
+  const [direction, setDirection] = useState("higher_is_better");
+  const [minConf, setMinConf] = useState(0.85);
+  const [minReps, setMinReps] = useState(3);
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
 
-  const onKind = (k: Kind) => {
-    setKind(k);
-    // Verification campaigns have no numeric training baseline; a non-ML metric name
-    // tells the backend to skip baseline measurement and judge by deterministic checks.
-    setMetric(k === "verification" ? "verified_instances" : "val_accuracy");
-    setMinReplications(k === "verification" ? 2 : 3);
-  };
+  const canLaunch = question.trim().length >= 8 && !submitting;
 
-  const submit = async () => {
-    if (question.trim().length < 8) {
-      setError("Please enter a research question (at least 8 characters).");
-      return;
-    }
+  const launch = async () => {
+    if (!canLaunch) return;
     setSubmitting(true);
-    setError(null);
+    setErr(null);
     try {
       const { campaign_id } = await api.createCampaign({
         question: question.trim(),
-        compute_budget_hours: hours,
+        compute_budget_hours: budget,
         breakthrough_criteria: {
           metric_name: metric.trim() || "val_accuracy",
           improvement_threshold: Math.max(0.001, threshold / 100),
-          direction: "higher_is_better",
-          min_confidence: minConfidence,
-          min_replications: minReplications,
+          direction,
+          min_confidence: minConf,
+          min_replications: minReps,
         },
       });
       nav(`/campaign/${campaign_id}`);
     } catch (e: any) {
-      setError(e?.message ?? String(e));
+      setErr(e?.message ?? String(e));
       setSubmitting(false);
     }
   };
 
   return (
-    <div className="h-full overflow-y-auto scrollbar-thin">
-      <div className="mx-auto max-w-2xl px-8 py-10">
-        <h1 className="text-2xl font-semibold tracking-tight">New campaign</h1>
-        <p className="mt-1 text-sm text-text-secondary">
-          Pose a question Propab can attack computationally and verify.
-        </p>
+    <main className="flex min-w-0 flex-1 flex-col bg-center">
+      <div className="flex shrink-0 items-center gap-[10px] border-b border-line px-[26px] py-4">
+        <span className="text-[16px] font-semibold leading-none text-ink">New campaign</span>
+        <span className="text-[12px] font-medium leading-none text-ink-3">
+          Define the question — Propab runs the science
+        </span>
+      </div>
 
-        <Card className="mt-6 space-y-6 p-6">
-          <Field label="Research question">
+      <div className="pp-scroll min-h-0 flex-1 overflow-y-auto p-[26px]">
+        <div className="flex max-w-[560px] flex-col gap-6">
+          {/* question */}
+          <div>
+            <div className={label}>Research question</div>
             <textarea
               value={question}
               onChange={(e) => setQuestion(e.target.value)}
-              rows={4}
-              placeholder="e.g. Investigate the Erdős–Straus conjecture: for every integer n ≥ 2, can 4/n be written as 1/x + 1/y + 1/z?"
-              className="w-full resize-none rounded-lg border border-border bg-bg px-3 py-2.5 text-sm text-text-primary outline-none transition focus:border-brand"
+              placeholder="What molecular determinants govern pathological tau oligomerization?"
+              className="min-h-[72px] w-full resize-none rounded-[9px] border border-edge bg-rail px-[14px] py-3 text-[14.5px] leading-[1.5] text-ink outline-none focus:border-ink-3"
             />
-          </Field>
+          </div>
 
-          <Field label="Campaign type">
-            <div className="grid grid-cols-2 gap-3">
-              <KindCard
-                active={kind === "empirical"}
-                onClick={() => onKind("empirical")}
-                title="Empirical"
-                desc="Measure a metric and beat a baseline (ML, simulation, benchmarks)."
-              />
-              <KindCard
-                active={kind === "verification"}
-                onClick={() => onKind("verification")}
-                title="Verification"
-                desc="Exactly-checkable claims (number theory, combinatorics, constructions)."
-              />
-            </div>
-          </Field>
-
-          <div className="grid grid-cols-2 gap-5">
-            <Field label={`Time budget — ${hours}h`}>
-              <input
-                type="range"
-                min={0.25}
-                max={12}
-                step={0.25}
-                value={hours}
-                onChange={(e) => setHours(parseFloat(e.target.value))}
-                className="w-full accent-brand"
-              />
-            </Field>
-            <Field label="Metric name">
+          {/* metric objective */}
+          <div>
+            <div className={label}>Breakthrough metric</div>
+            <div className="flex flex-wrap items-center gap-2">
               <input
                 value={metric}
                 onChange={(e) => setMetric(e.target.value)}
-                className="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm outline-none focus:border-brand"
+                className="flex-1 rounded-[9px] border border-edge bg-rail px-[14px] py-3 font-mono text-[13px] leading-none text-ink outline-none focus:border-ink-3"
               />
-            </Field>
+              {(["higher_is_better", "lower_is_better"] as const).map((d) => (
+                <button
+                  key={d}
+                  onClick={() => setDirection(d)}
+                  className="rounded-[20px] border px-[13px] py-[9px] text-[12px] font-medium leading-none"
+                  style={
+                    direction === d
+                      ? { borderColor: "var(--text)", color: "var(--text)" }
+                      : { borderColor: "var(--border)", color: "var(--text3)" }
+                  }
+                >
+                  {d === "higher_is_better" ? "Higher ↑" : "Lower ↓"}
+                </button>
+              ))}
+            </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-5">
-            <Field label={`Improvement target — ${threshold}%`}>
+          {/* budget + threshold grid */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <div className={label}>Compute budget (hours)</div>
               <input
-                type="range"
-                min={1}
-                max={50}
-                step={1}
+                type="number"
+                min={0.1}
+                max={168}
+                step={0.5}
+                value={budget}
+                onChange={(e) => setBudget(Number(e.target.value))}
+                className={fieldBox}
+              />
+            </div>
+            <div>
+              <div className={label}>Improvement threshold (%)</div>
+              <input
+                type="number"
+                min={0.1}
+                max={100}
+                step={0.5}
                 value={threshold}
-                onChange={(e) => setThreshold(parseInt(e.target.value))}
-                className="w-full accent-brand"
+                onChange={(e) => setThreshold(Number(e.target.value))}
+                className={fieldBox}
               />
-            </Field>
-            <Field label={`Min confidence — ${minConfidence.toFixed(2)}`}>
+            </div>
+            <div>
+              <div className={label}>Min confidence</div>
               <input
-                type="range"
+                type="number"
                 min={0.5}
-                max={0.99}
-                step={0.01}
-                value={minConfidence}
-                onChange={(e) => setMinConfidence(parseFloat(e.target.value))}
-                className="w-full accent-brand"
+                max={1}
+                step={0.05}
+                value={minConf}
+                onChange={(e) => setMinConf(Number(e.target.value))}
+                className={fieldBox}
               />
-            </Field>
-            <Field label={`Min replications — ${minReplications}`}>
+            </div>
+            <div>
+              <div className={label}>Min replications</div>
               <input
-                type="range"
+                type="number"
                 min={1}
-                max={6}
+                max={20}
                 step={1}
-                value={minReplications}
-                onChange={(e) => setMinReplications(parseInt(e.target.value))}
-                className="w-full accent-brand"
+                value={minReps}
+                onChange={(e) => setMinReps(Number(e.target.value))}
+                className={fieldBox}
               />
-            </Field>
+            </div>
           </div>
 
-          {error && <div className="text-sm text-refuted">{error}</div>}
+          {err && (
+            <div
+              className="rounded-[9px] border px-[14px] py-3 text-[12.5px] leading-relaxed"
+              style={{ borderColor: "var(--red)", color: "var(--red)", background: "var(--redDim)" }}
+            >
+              {err}
+            </div>
+          )}
 
-          <div className="flex justify-end gap-3 pt-2">
+          <div className="flex gap-[10px] pt-0.5">
+            <button
+              onClick={launch}
+              disabled={!canLaunch}
+              className="rounded-lg px-5 py-[11px] text-[13px] font-semibold leading-none disabled:opacity-40"
+              style={{ background: "var(--text)", color: "var(--centerBg)" }}
+            >
+              {submitting ? "Launching…" : "Launch campaign"}
+            </button>
             <button
               onClick={() => nav("/")}
-              className="rounded-lg border border-border px-4 py-2 text-sm text-text-secondary transition hover:bg-raised"
+              className="rounded-lg border border-edge px-5 py-[11px] text-[13px] font-medium leading-none text-ink-2"
             >
               Cancel
             </button>
-            <button
-              onClick={submit}
-              disabled={submitting}
-              className="rounded-lg bg-brand px-5 py-2 text-sm font-medium text-white transition hover:bg-brand/90 disabled:opacity-50"
-            >
-              {submitting ? "Starting…" : "Start campaign →"}
-            </button>
           </div>
-        </Card>
+        </div>
       </div>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <label className="block">
-      <span className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-text-muted">
-        {label}
-      </span>
-      {children}
-    </label>
-  );
-}
-
-function KindCard({
-  active,
-  onClick,
-  title,
-  desc,
-}: {
-  active: boolean;
-  onClick: () => void;
-  title: string;
-  desc: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`rounded-lg border p-3 text-left transition ${
-        active ? "border-brand bg-brand/10" : "border-border bg-bg hover:bg-raised"
-      }`}
-    >
-      <div className="text-sm font-semibold text-text-primary">{title}</div>
-      <div className="mt-1 text-xs text-text-secondary">{desc}</div>
-    </button>
+    </main>
   );
 }
