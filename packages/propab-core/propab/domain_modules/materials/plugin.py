@@ -95,3 +95,44 @@ class MaterialsPlugin(DomainPlugin):
         from propab.domain_profiles.materials import MATERIALS_PROFILE
 
         return MATERIALS_PROFILE
+
+    def literature_profile(self) -> dict[str, Any]:
+        return {
+            "seed_papers": [
+                {
+                    "title": (
+                        "Benchmarking materials property prediction methods: the Matbench "
+                        "test set and Automatminer reference algorithm"
+                    ),
+                    "authors": "A. Dunn, Q. Wang, A. Ganose, et al.",
+                    "year": 2020,
+                    "doi": "10.1038/s41524-020-00406-3",
+                },
+            ],
+            "search_terms": [
+                "matbench", "dielectric constant prediction", "crystal system", "materials informatics",
+                "descriptor-property relationship", "leave-one-crystal-system-out",
+            ],
+            "source_priorities": ["arxiv", "semantic_scholar", "crossref"],
+            "classification_codes": {
+                "arxiv": ["cond-mat.mtrl-sci"],
+            },
+            "open_problem_sources": [],
+            "tabulation_sources": [
+                {"name": "materials_project", "identifiers": []},
+            ],
+            "canonical_surveys": [
+                {
+                    "title": (
+                        "Benchmarking materials property prediction methods: the Matbench "
+                        "test set and Automatminer reference algorithm"
+                    ),
+                    "doi": "10.1038/s41524-020-00406-3",
+                },
+            ],
+            "novelty_criteria": (
+                "A finding is novel if it establishes a descriptor-to-dielectric relationship "
+                "that survives leave-one-crystal-system-out holdout and is not already captured "
+                "by the Matbench reference algorithm's baseline performance on this task."
+            ),
+        }

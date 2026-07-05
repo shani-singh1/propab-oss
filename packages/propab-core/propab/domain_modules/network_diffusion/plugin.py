@@ -83,3 +83,35 @@ class NetworkDiffusionPlugin(DomainPlugin):
             "expected_failure_modes": "Fails on ER graphs or when modularity Q<0.2; breaks if seed set >5% of nodes",
             "ood_test": "Train/evaluate on BA+SBM; hold out WS family; require LOFO R²>0 on WS or refute",
         }
+
+    def literature_profile(self) -> dict[str, Any]:
+        return {
+            "seed_papers": [
+                {
+                    "title": "Epidemic Spreading in Scale-Free Networks",
+                    "authors": "R. Pastor-Satorras, A. Vespignani",
+                    "year": 2001,
+                    "doi": "10.1103/PhysRevLett.86.3200",
+                },
+            ],
+            "search_terms": [
+                "epidemic spreading", "contagion", "SIS model", "SIR model", "percolation threshold",
+                "scale-free network", "targeted immunization", "network robustness",
+                "Barabasi-Albert", "Watts-Strogatz",
+            ],
+            "source_priorities": ["arxiv", "semantic_scholar", "mathoverflow"],
+            "classification_codes": {
+                "arxiv": ["cs.SI", "physics.soc-ph", "nlin.AO"],
+            },
+            "open_problem_sources": [],
+            "tabulation_sources": [],
+            "canonical_surveys": [
+                {"title": "Epidemic Spreading in Scale-Free Networks", "doi": "10.1103/PhysRevLett.86.3200"},
+            ],
+            "novelty_criteria": (
+                "A finding is novel if it establishes a diffusion/contagion effect that "
+                "transfers from the training topology family (BA/SBM) to a held-out family "
+                "(WS) and is not already predicted by the vanishing-epidemic-threshold result "
+                "for scale-free networks (Pastor-Satorras & Vespignani, 2001)."
+            ),
+        }

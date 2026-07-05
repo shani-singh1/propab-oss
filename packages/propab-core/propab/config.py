@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://127.0.0.1:11434"
     orchestrator_url: str = ""
     orchestrator_internal_token: str = ""
+    # services/literature/ — standalone literature intelligence microservice (Agent 3).
+    # Optional: campaigns fall back to each domain plugin's literature_prior() when unset.
+    literature_service_url: str = ""
     sub_agent_plan_source: str = "llm"
     sub_agent_max_planned_steps: int = 6
     sub_agent_max_rounds: int = 4

@@ -95,6 +95,46 @@ class EnzymeKineticsPlugin(DomainPlugin):
 
         return ENZYME_KINETICS_PROFILE
 
+    def literature_profile(self) -> dict[str, Any]:
+        return {
+            "seed_papers": [
+                {
+                    "title": (
+                        "The Moderately Efficient Enzyme: Evolutionary and Physicochemical "
+                        "Trends Shaping Enzyme Parameters"
+                    ),
+                    "authors": "A. Bar-Even, E. Noor, Y. Savir, et al.",
+                    "year": 2011,
+                    "doi": "10.1021/bi2002289",
+                },
+            ],
+            "search_terms": [
+                "enzyme kinetics", "kcat", "Km", "catalytic turnover number", "BRENDA",
+                "EC class", "enzyme evolution", "Michaelis-Menten", "catalytic efficiency",
+            ],
+            "source_priorities": ["pubmed", "europepmc", "biorxiv", "semantic_scholar", "crossref"],
+            "classification_codes": {
+                "mesh": ["Kinetics", "Enzymes", "Catalysis", "Substrate Specificity"],
+            },
+            "open_problem_sources": [],
+            "tabulation_sources": [],
+            "canonical_surveys": [
+                {
+                    "title": (
+                        "The Moderately Efficient Enzyme: Evolutionary and Physicochemical "
+                        "Trends Shaping Enzyme Parameters"
+                    ),
+                    "doi": "10.1021/bi2002289",
+                },
+            ],
+            "novelty_criteria": (
+                "A finding is novel if it establishes a kcat/Km relationship that survives "
+                "leave-EC-class-out holdout and is not already accounted for by the general "
+                "evolutionary/physicochemical trends (e.g. catalytic efficiency ceilings) "
+                "documented in the enzyme-parameter literature above."
+            ),
+        }
+
     def hypothesis_on_topic(self, text: str, methodology: str | None = None) -> bool:
         combined = f"{text} {methodology or ''}".lower()
         if any(x in combined for x in ("sidon", "cap-set", "docker", "filesystem")):

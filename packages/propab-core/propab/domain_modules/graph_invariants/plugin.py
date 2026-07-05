@@ -100,6 +100,39 @@ class GraphInvariantsPlugin(DomainPlugin):
 
         return GRAPH_INVARIANTS_PROFILE
 
+    def literature_profile(self) -> dict[str, Any]:
+        return {
+            "seed_papers": [
+                {
+                    "title": "The Structure and Function of Complex Networks",
+                    "authors": "M. E. J. Newman",
+                    "year": 2003,
+                    "doi": "10.1137/S003614450342480",
+                },
+            ],
+            "search_terms": [
+                "spectral gap", "algebraic connectivity", "clustering coefficient",
+                "graph invariant", "network family", "modularity", "Watts-Strogatz",
+                "Barabasi-Albert", "Erdos-Renyi random graph",
+            ],
+            "source_priorities": ["arxiv", "semantic_scholar", "mathoverflow"],
+            "classification_codes": {
+                "arxiv": ["cs.SI", "math.CO", "physics.soc-ph"],
+            },
+            "open_problem_sources": [],
+            "tabulation_sources": [],
+            "canonical_surveys": [
+                {"title": "The Structure and Function of Complex Networks", "doi": "10.1137/S003614450342480"},
+            ],
+            "novelty_criteria": (
+                "A finding is novel if it establishes a relationship between graph invariants "
+                "(spectral, clustering, degree-structure) that survives leave-one-network-"
+                "family-out holdout and is not a restatement of the well-known family-specific "
+                "behavior surveyed in Newman (2003) (e.g. small-world clustering vs. random-graph "
+                "clustering, scale-free degree heterogeneity)."
+            ),
+        }
+
     def hypothesis_on_topic(self, text: str, methodology: str | None = None) -> bool:
         combined = f"{text} {methodology or ''}".lower()
         if any(x in combined for x in ("sidon", "cap-set", "gene expression", "kcat")):
