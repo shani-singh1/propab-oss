@@ -1,8 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { api, API_BASE } from "../api";
+import { api } from "../api";
 import type { PaperPayload } from "../types";
-import { Card, Spinner } from "../components/ui";
 
 export default function Paper() {
   const { id } = useParams<{ id: string }>();
@@ -18,9 +17,9 @@ export default function Paper() {
   }, [id]);
 
   return (
-    <div className="h-full overflow-y-auto scrollbar-thin">
-      <div className="sticky top-0 z-10 flex items-center justify-between border-b border-border bg-surface/95 px-6 py-3 backdrop-blur">
-        <Link to={`/campaign/${id}`} className="text-sm text-text-secondary hover:text-text-primary">
+    <main className="flex min-w-0 flex-1 flex-col bg-center">
+      <div className="flex shrink-0 items-center justify-between border-b border-line px-[26px] py-3">
+        <Link to={`/campaign/${id}`} className="text-[12.5px] text-ink-2 hover:text-ink">
           ← Back to campaign
         </Link>
         <div className="flex gap-2">
@@ -29,7 +28,7 @@ export default function Paper() {
               href={paper.tex_url}
               target="_blank"
               rel="noreferrer"
-              className="rounded-lg border border-border px-3 py-1.5 text-sm text-text-secondary hover:bg-raised"
+              className="rounded-lg border border-edge px-3 py-1.5 text-[12.5px] text-ink-2 hover:bg-rowhover"
             >
               TeX
             </a>
@@ -39,7 +38,8 @@ export default function Paper() {
               href={paper.pdf_url}
               target="_blank"
               rel="noreferrer"
-              className="rounded-lg bg-brand px-3 py-1.5 text-sm font-medium text-white hover:bg-brand/90"
+              className="rounded-lg px-3 py-1.5 text-[12.5px] font-semibold"
+              style={{ background: "var(--text)", color: "var(--centerBg)" }}
             >
               Download PDF
             </a>
@@ -47,42 +47,44 @@ export default function Paper() {
         </div>
       </div>
 
-      <div className="mx-auto max-w-3xl px-8 py-10">
-        {error && (
-          <Card className="border-warning/40 p-4 text-sm text-warning">
-            Paper not ready yet ({error}). It’s generated when the campaign finishes.
-          </Card>
-        )}
-        {!paper && !error && <Spinner />}
-        {paper && (
-          <article className="space-y-8">
-            {paper.abstract_latex && (
-              <Section title="Abstract">
-                <p className="leading-relaxed text-text-primary">{clean(paper.abstract_latex)}</p>
-              </Section>
-            )}
-            {paper.methods_latex && <LatexSection raw={paper.methods_latex} />}
-            {paper.results_latex && <LatexSection raw={paper.results_latex} />}
-            {(paper.full_tex_chars || paper.figures_embedded != null) && (
-              <p className="border-t border-border pt-4 text-xs text-text-muted">
-                {paper.full_tex_chars ? `${paper.full_tex_chars} chars of LaTeX` : ""}
-                {paper.figures_embedded != null ? ` · ${paper.figures_embedded} figures` : ""}
-                {paper.pdf_url && (
-                  <> · PDF/TeX links resolve to the stack’s object store ({hostOf(paper.pdf_url)}).</>
-                )}
-              </p>
-            )}
-          </article>
-        )}
+      <div className="pp-scroll min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto max-w-3xl px-8 py-10">
+          {error && (
+            <div
+              className="rounded-[9px] border px-4 py-3 text-[12.5px] leading-relaxed"
+              style={{ borderColor: "var(--border)", color: "var(--text2)" }}
+            >
+              Paper not ready yet ({error}). It’s generated when the campaign finishes.
+            </div>
+          )}
+          {!paper && !error && <div className="text-[12.5px] text-ink-3">Loading paper…</div>}
+          {paper && (
+            <article className="space-y-8">
+              {paper.abstract_latex && (
+                <Section title="Abstract">
+                  <p className="text-[14px] leading-[1.7] text-ink">{clean(paper.abstract_latex)}</p>
+                </Section>
+              )}
+              {paper.methods_latex && <LatexSection raw={paper.methods_latex} />}
+              {paper.results_latex && <LatexSection raw={paper.results_latex} />}
+              {(paper.full_tex_chars || paper.figures_embedded != null) && (
+                <p className="border-t border-line pt-4 font-mono text-[11px] text-ink-3">
+                  {paper.full_tex_chars ? `${paper.full_tex_chars} chars of LaTeX` : ""}
+                  {paper.figures_embedded != null ? ` · ${paper.figures_embedded} figures` : ""}
+                </p>
+              )}
+            </article>
+          )}
+        </div>
       </div>
-    </div>
+    </main>
   );
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section>
-      <h2 className="mb-2 text-lg font-semibold text-text-primary">{title}</h2>
+      <h2 className="mb-2 text-[17px] font-semibold text-ink">{title}</h2>
       {children}
     </section>
   );
@@ -91,12 +93,11 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 // Render a latex block by splitting on \section/\subsection and cleaning commands.
 function LatexSection({ raw }: { raw: string }) {
   const parts = raw.split(/\\section\{([^}]*)\}/);
-  // parts: [pre, title1, body1, title2, body2, ...]
   const blocks: { title: string; body: string }[] = [];
   for (let i = 1; i < parts.length; i += 2) {
     blocks.push({ title: parts[i], body: parts[i + 1] ?? "" });
   }
-  if (blocks.length === 0) return <p className="leading-relaxed">{clean(raw)}</p>;
+  if (blocks.length === 0) return <p className="text-[14px] leading-[1.7] text-ink-2">{clean(raw)}</p>;
   return (
     <>
       {blocks.map((b, i) => (
@@ -106,12 +107,12 @@ function LatexSection({ raw }: { raw: string }) {
               .split(/\\subsection\{([^}]*)\}/)
               .map((seg, idx) =>
                 idx % 2 === 1 ? (
-                  <h3 key={idx} className="text-base font-semibold text-text-primary">
+                  <h3 key={idx} className="text-[15px] font-semibold text-ink">
                     {clean(seg)}
                   </h3>
                 ) : (
                   seg.trim() && (
-                    <p key={idx} className="whitespace-pre-wrap leading-relaxed text-text-secondary">
+                    <p key={idx} className="whitespace-pre-wrap text-[14px] leading-[1.7] text-ink-2">
                       {clean(seg)}
                     </p>
                   )
@@ -140,12 +141,4 @@ function clean(s: string): string {
     .replace(/\\([a-zA-Z]+)/g, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-}
-
-function hostOf(url: string): string {
-  try {
-    return new URL(url).host;
-  } catch {
-    return "object store";
-  }
 }

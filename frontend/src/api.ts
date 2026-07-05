@@ -59,6 +59,24 @@ export const api = {
     return res.json();
   },
 
+  // Resume a paused/concluded campaign, optionally pinning an orchestrator
+  // directive — the only real steering path the backend exposes today.
+  resumeCampaign: async (
+    id: string,
+    body: { orchestrator_directive?: string } = {},
+  ): Promise<{ campaign_id: string; status: string }> => {
+    const res = await fetch(`${API_BASE}/campaigns/${id}/resume`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`${res.status}: ${text.slice(0, 300)}`);
+    }
+    return res.json();
+  },
+
   streamUrl: (id: string) => `${API_BASE}/stream/${id}`,
 };
 

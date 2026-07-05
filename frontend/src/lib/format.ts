@@ -49,3 +49,17 @@ export function budgetPct(used: number, total: number): number {
   if (!total) return 0;
   return Math.min(100, Math.round((used / total) * 100));
 }
+
+// Elapsed offset of an event from the campaign start, as m:ss or h:mm.
+export function fmtOffset(startIso: string | null | undefined, iso: string | null | undefined): string {
+  if (!startIso || !iso) return "";
+  const a = new Date(startIso).getTime();
+  const b = new Date(iso).getTime();
+  if (isNaN(a) || isNaN(b)) return "";
+  const s = Math.max(0, Math.round((b - a) / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const r = s % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, "0")}`;
+  return `${m}:${String(r).padStart(2, "0")}`;
+}
