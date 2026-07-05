@@ -1,0 +1,40 @@
+{
+  "domains": [
+    {
+      "domain_id": "math_combinatorics",
+      "papers_indexed": 8,
+      "claims_indexed": 55,
+      "last_updated": "2026-07-05T06:18:05.067806+00:00",
+      "citation_verification_rate": 1.0,
+      "citation_verification_sample": {
+        "sampled": 40,
+        "verifiable": 40,
+        "verified": 40,
+        "rate": 1.0,
+        "unverifiable_sources": []
+      }
+    },
+    {
+      "domain_id": "llm_locator_verify",
+      "papers_indexed": 11,
+      "claims_indexed": 27,
+      "last_updated": "2026-07-05T12:20:00.000000+00:00",
+      "note": "Abstract-only sources (PubMed/bioRxiv/Semantic Scholar) via extractors/llm_claim_locator.py — LLM locates the claim-bearing sentence by index, code alone extracts verbatim. 25/27 claims came from the locator (2 regex/structural); prior to this fix, established_facts recall for these sources was ~0.",
+      "citation_verification_rate": 1.0,
+      "citation_verification_sample": {
+        "sampled": 27,
+        "verifiable": 27,
+        "verified": 27,
+        "rate": 1.0,
+        "unverifiable_sources": []
+      },
+      "citation_verification_sample_llm_located_only": {
+        "sampled": 25,
+        "verifiable": 25,
+        "verified": 25,
+        "rate": 1.0,
+        "unverifiable_sources": []
+      }
+    }
+  ]
+}

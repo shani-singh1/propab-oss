@@ -32,12 +32,24 @@ DESIGN.md
 propab_roadmap.md
 mandrake-data/
 
-# Local run outputs (campaign JSON, benches, poll logs)
-artifacts/
+# Local run outputs (campaign JSON, benches, poll logs).
+# NOTE: "artifacts/*" (not "artifacts/") so the "!" negations below can
+# actually re-include nested paths — git never descends into a directory
+# matched by a trailing-slash pattern, which silently no-ops any negation
+# of a file inside it.
+artifacts/*
 !artifacts/engineering_log.md
 !artifacts/routing_corpus_status.json
 !artifacts/ap_free_preflight_n50000.json
 !artifacts/econometrics_discoverybench_hms.json
+
+# Literature service artifacts (agent3.md "Artifacts to maintain")
+!artifacts/literature_coverage.json
+!artifacts/literature_misses.json
+!artifacts/astabench_literature_scores.json
+!artifacts/litqa2_live_results.json
+!artifacts/domain_gap_maps/
+!artifacts/domain_gap_maps/*.json
 
 # AstaBench eval logs and cached solutions
 logs/

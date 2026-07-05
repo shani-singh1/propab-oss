@@ -121,6 +121,42 @@ class MandrakePlugin(DomainPlugin):
         # adapter historically applies the generic gate override, so keep None.
         return None
 
+    def literature_profile(self) -> dict[str, Any]:
+        return {
+            "seed_papers": [
+                {
+                    "title": "Origin and evolution of retroelements based upon their reverse transcriptase sequences.",
+                    "authors": "Y. Xiong, T. H. Eickbush",
+                    "year": 1990,
+                    "doi": "10.1002/j.1460-2075.1990.tb07536.x",
+                },
+            ],
+            "search_terms": [
+                "reverse transcriptase", "retroelement evolution", "RT phylogeny",
+                "catalytic triad geometry", "thermal stability enzyme", "protein structural family",
+                "sequence identity clustered split",
+            ],
+            "source_priorities": ["pubmed", "europepmc", "biorxiv", "semantic_scholar", "crossref"],
+            "classification_codes": {
+                "mesh": ["RNA-Directed DNA Polymerase", "Retroelements", "Evolution, Molecular"],
+            },
+            "open_problem_sources": [],
+            "tabulation_sources": [],
+            "canonical_surveys": [
+                {
+                    "title": "Origin and evolution of retroelements based upon their reverse transcriptase sequences.",
+                    "doi": "10.1002/j.1460-2075.1990.tb07536.x",
+                },
+            ],
+            "novelty_criteria": (
+                "A finding is novel if it establishes a within-family predictive signal for RT "
+                "activity that survives both leave-one-family-out holdout and a low-sequence-"
+                "identity split (ruling out the sequence-redundancy artifact), rather than "
+                "restating the RT phylogenetic family structure already established by Xiong & "
+                "Eickbush (1990)."
+            ),
+        }
+
     def apply_contrarian_belief_reset(
         self,
         belief_state: CampaignBeliefState,

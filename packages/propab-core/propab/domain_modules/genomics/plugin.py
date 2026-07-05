@@ -103,6 +103,49 @@ class GenomicsPlugin(DomainPlugin):
     def literature_prior(self, question: str) -> dict[str, Any]:
         return get_literature_prior(question)
 
+    def literature_profile(self) -> dict[str, Any]:
+        return {
+            "seed_papers": [
+                {
+                    "title": "The GTEx Consortium atlas of genetic regulatory effects across human tissues",
+                    "authors": "GTEx Consortium",
+                    "year": 2020,
+                    "doi": "10.1126/science.aaz1776",
+                },
+                {
+                    "title": (
+                        "Genome-wide midrange transcription profiles reveal expression level "
+                        "relationships in human tissue specification"
+                    ),
+                    "authors": "I. Yanai, H. Benjamin, M. Shmoish, et al.",
+                    "year": 2005,
+                    "doi": "10.1093/bioinformatics/bti042",
+                },
+            ],
+            "search_terms": [
+                "GTEx", "cross-tissue gene expression", "tissue specificity", "tau index",
+                "housekeeping gene", "eQTL", "leave-tissue-out", "tissue-specific expression",
+            ],
+            "source_priorities": ["pubmed", "europepmc", "biorxiv", "semantic_scholar", "crossref"],
+            "classification_codes": {
+                "mesh": ["Gene Expression Profiling", "Organ Specificity", "Transcriptome"],
+            },
+            "open_problem_sources": [],
+            "tabulation_sources": [],
+            "canonical_surveys": [
+                {
+                    "title": "The GTEx Consortium atlas of genetic regulatory effects across human tissues",
+                    "doi": "10.1126/science.aaz1776",
+                },
+            ],
+            "novelty_criteria": (
+                "A finding is novel if it establishes a cross-tissue expression relationship "
+                "(e.g. a tissue-specificity/tau-index effect surviving leave-tissue-out holdout) "
+                "that is not a restatement of housekeeping-vs-tissue-specific classification "
+                "already established in the GTEx atlas and tau-index literature above."
+            ),
+        }
+
     def implementable_methodologies(self) -> list[str]:
         return ["leave-tissue-out", "lofo", "tissue label shuffle", "cross-tissue"]
 

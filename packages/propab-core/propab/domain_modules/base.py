@@ -176,6 +176,30 @@ class DomainPlugin(ABC):
         """Domain-specific literature context to seed a campaign. Default: none."""
         return {}
 
+    def literature_profile(self) -> dict[str, Any]:
+        """
+        Domain-specific configuration for the standalone literature intelligence
+        service (``services/literature/``). That service is domain-agnostic —
+        all knowledge about which sources, sequences, classifications, and
+        papers matter for this domain lives here, never in the service itself.
+
+        Returns a dict with keys: ``seed_papers``, ``search_terms``,
+        ``source_priorities``, ``classification_codes``, ``open_problem_sources``,
+        ``tabulation_sources``, ``canonical_surveys``, ``novelty_criteria``.
+        See ``agent3.md`` for the full schema. Default: empty — the literature
+        service falls back to keyword search on the research question alone.
+        """
+        return {
+            "seed_papers": [],
+            "search_terms": [],
+            "source_priorities": ["arxiv", "semantic_scholar"],
+            "classification_codes": {},
+            "open_problem_sources": [],
+            "tabulation_sources": [],
+            "canonical_surveys": [],
+            "novelty_criteria": "",
+        }
+
     def belief_promotion_threshold(self) -> dict[str, Any]:
         """
         Domain-appropriate rules for when a belief becomes active.

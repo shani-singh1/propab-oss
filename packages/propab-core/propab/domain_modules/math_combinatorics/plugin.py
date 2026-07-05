@@ -348,6 +348,66 @@ class MathCombinatoricsPlugin(DomainPlugin):
     def literature_prior(self, question: str) -> dict[str, Any]:
         return get_literature_prior(question)
 
+    def literature_profile(self) -> dict[str, Any]:
+        return {
+            "seed_papers": [
+                {
+                    "title": "On a problem of Sidon in additive number theory, and on some related problems",
+                    "authors": "P. Erdos, P. Turan",
+                    "year": 1941,
+                },
+                {
+                    "title": "Progression-free sets in Z_4^n are exponentially small",
+                    "authors": "E. Croot, V. Lev, P. Pach",
+                    "year": 2016,
+                    "arxiv_id": "1605.01506",
+                },
+                {
+                    "title": "On large subsets of F_q^n with no three-term arithmetic progression",
+                    "authors": "J. S. Ellenberg, D. Gijswijt",
+                    "year": 2016,
+                    "arxiv_id": "1605.09223",
+                },
+                {
+                    "title": "On sets of integers which contain no three terms in arithmetical progression",
+                    "authors": "F. A. Behrend",
+                    "year": 1946,
+                },
+            ],
+            "search_terms": [
+                "Sidon set", "cap set", "sumset", "AP-free", "arithmetic progression free",
+                "additive combinatorics", "extremal set theory", "Behrend construction",
+                "Croot-Lev-Pach", "Ellenberg-Gijswijt", "Bose-Chowla",
+            ],
+            "source_priorities": ["arxiv", "oeis", "zbmath", "semantic_scholar", "mathoverflow"],
+            "classification_codes": {
+                "arxiv": ["math.CO", "math.NT"],
+                "zbmath": ["05B10", "11B13", "11B25", "05D99"],
+            },
+            "open_problem_sources": [
+                {"name": "Erdos problems list", "url": "https://www.erdosproblems.com/"},
+            ],
+            "tabulation_sources": [
+                {
+                    "name": "OEIS",
+                    "identifiers": ["A005282", "A090245", "A003002"],
+                    # A005282: Mian-Chowla (greedy Sidon/B2) sequence.
+                    # A090245: max "no SET" card group per n attributes == cap-set size in F_3^n.
+                    # A003002: r3(n), largest 3-AP-free subset of {1..n} (Behrend/Szemeredi regime).
+                },
+            ],
+            "canonical_surveys": [
+                {"title": "Additive Combinatorics", "doi": "10.1017/CBO9780511755149"},
+            ],
+            "novelty_criteria": (
+                "A finding is novel if it establishes a Sidon/cap-set/AP-free bound or exact "
+                "value not present in the OEIS tabulations above (A005282, A090245, A003002) "
+                "and not directly implied by the Erdos-Turan/Lindstrom Sidon bounds, the "
+                "Croot-Lev-Pach/Ellenberg-Gijswijt cap-set bound, or the Behrend/Szemeredi "
+                "AP-free bounds listed in established_facts."
+            ),
+        }
+
     def belief_promotion_threshold(self) -> dict[str, Any]:
         return {
             "requires_supporting_nodes": 3,
