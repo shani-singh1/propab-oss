@@ -138,6 +138,7 @@ async def retrieve_relevant_chunks(
     max_chunks_per_doc: int = 4,
     top_k: int = 6,
     ranker: str = "bm25",
+    chunk_query: str = "",
 ) -> tuple[list[Chunk], list[str]]:
     """Issue several targeted searches → rank candidate documents → fetch full
     text of the best few → chunk → rank chunks (per-document cap) by relevance
@@ -158,10 +159,10 @@ async def retrieve_relevant_chunks(
     ``ranker`` selects local BM25 (default, no network) or dense embedding
     similarity for the chunk stage. Never raises — a single source's search/
     fetch failure is swallowed so one flaky API doesn't blank out others."""
-    # Cap the number of distinct queries actually issued: each query fans out
-    # to every source, so latency scales with len(queries) × n_sources. Three
-    # targeted queries give strong recall without a 25-search-per-question
-    # latency blowup on the n=100 eval.
+    # 3 targeted query phrasings — measured (CHANGELOG 0.8.0): widening to 5
+    # queries + 16 docs was flat on accuracy (the hard papers aren't surfaced
+    # by any public source regardless of net width) and materially slower, so
+    # kept at the lean 3.
     queries = (list(search_terms) or [question])[:3]
     # Each query is issued directly (relevance-sorted by the source) with NO
     # extra OR terms — the query string is already the targeted, complete
@@ -215,13 +216,22 @@ async def retrieve_relevant_chunks(
     # Stage 2: chunk each fetched doc, rank chunks *within each document*, and
     # keep only the best ``max_chunks_per_doc`` from each — so the final pool
     # is diverse across papers before the global rank/top_k.
+    #
+    # Chunk ranking uses ``chunk_query`` (question + answer-choice terms) not
+    # just the question: the answer-bearing chunk often shares no words with
+    # the question ("4 weeks" vs "how long do neurons survive") but DOES share
+    # the value with a choice, so folding the choice text into the chunk BM25
+    # query surfaces it. Document ranking (stage 1) stays on the bare question
+    # — choices shouldn't bias *which paper* is judged the source, only which
+    # chunks within it are pulled.
+    cq = chunk_query or question
     pooled: list[Chunk] = []
     for doc in full_docs:
         doc_chunks = chunk_document(doc)
-        best = await rerank_chunks(embedder, question, doc_chunks, max_chunks_per_doc, ranker=ranker)
+        best = await rerank_chunks(embedder, cq, doc_chunks, max_chunks_per_doc, ranker=ranker)
         pooled.extend(best)
 
-    ranked = await rerank_chunks(embedder, question, pooled, top_k, ranker=ranker)
+    ranked = await rerank_chunks(embedder, cq, pooled, top_k, ranker=ranker)
     return ranked, sources_with_hits
 
 

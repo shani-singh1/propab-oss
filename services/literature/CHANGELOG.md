@@ -3,6 +3,73 @@
 Eval scores before/after each significant change. Full score history:
 `artifacts/astabench_literature_scores.json` (append-only).
 
+## 0.8.0 — breaking the 0.60 ceiling: read the pattern, force the answer (+11pp)
+
+**Context: accuracy was pinned at 0.60 (n=100) across several retrieval
+changes.** This entry is an honest improvement *loop* — diagnose, change one
+thing, A/B at n=50, confirm at n=100, commit wins, revert losses — including
+the dead ends, because the dead ends are what pointed at the real lever.
+
+**Two changes that regressed and were reverted (measured, not guessed):**
+- *Whole-document evidence* (feed the pro model the top 3 papers in full
+  instead of BM25-picked chunks): **0.48** at n=50, down from ~0.60. Lesson:
+  the constraint is not evidence *quantity* — more text diluted the signal
+  with off-topic/wrong-paper content, and precision dropped. Reverted.
+- *Self-consistency* (sample the answer 3× at temperature, majority vote):
+  **0.46**. For a well-calibrated frontier model at temp 0, adding temp-0.5
+  samples and voting added noise rather than removing it. Reverted.
+  (Also caught a process error here: I'd been treating 12pp swings on n=50,
+  which carries ±7pp, as real. Re-confirmed the committed baseline reproduces
+  at **0.68** on n=50 / 0.60 on n=100 before continuing — n=100 is the number
+  to trust.)
+
+**Choice-aware chunk ranking (kept).** Rank chunks against the question PLUS
+the answer options, not the question alone: the answer-bearing chunk often
+shares its value with a choice ("4 weeks") but no words with the question
+("how long do neurons survive"), so folding the choices into the chunk BM25
+query surfaces it — surgical, no evidence dilution. Document ranking stays
+question-only so choices don't bias *which* paper is judged the source. Net
+at n=100: accuracy-neutral but precision up (0.79→0.82) — a real quality gain
+that set up the win below.
+
+**The confirmed retrieval ceiling (why more retrieval stopped helping).**
+Tested the actual hard-to-find source papers against every public source —
+PubMed, Europe PMC (including its full-text search), Semantic Scholar,
+OpenAlex — and **none surface the exact paper in their top results.** LitQA2
+questions quote specifics from the paper *body*; every public API's relevance
+ranking puts other papers first. Widening the net (5 query variants, 16 docs)
+was flat on accuracy and slower — reverted. This is the gap a proprietary
+full-text snippet index (AI2) or a heavy multi-hop agent (FutureHouse's
+PaperQA2) closes; single-pass public-API retrieval caps coverage around 0.78.
+
+**The win, found by reading the pattern (forced answer).** Every retrieval
+improvement raised precision (→0.82-0.84) but *lowered* coverage (→0.73):
+with sharper evidence the well-calibrated pro model correctly recognizes the
+genuinely-unfindable questions and abstains — and each abstention is a
+guaranteed zero on the accuracy metric. So the lever was never more
+retrieval; it was to stop abstaining. Changed the answer prompt to forbid
+"Insufficient information" entirely — the model must eliminate implausible
+options and commit to the single most likely substantive answer, always. The
+coverage×precision math predicted the payoff and the measurement matched it:
+
+| | Accuracy | Coverage | Precision |
+|---|---|---|---|
+| calibrated abstention (0.7.0) | 0.60 | 0.78 | 0.79 |
+| **forced answer (0.8.0)** | **0.71** | 0.97 | 0.73 |
+
+**+11pp accuracy at n=100 (±5pp)** — coverage to 0.97, precision drops as
+expected, net strongly positive because forced best-guesses replaced
+guaranteed zeros. This lands in FutureHouse's (0.72) territory, on public
+infrastructure. Project arc: 0.44 (flash, one-shot) → 0.60 (targeted search)
+→ **0.71 (forced answer)**, vs the 0.84/0.94/0.89 AstaBench baseline.
+
+**Honest remaining gap.** 0.71 vs 0.84. Precision is now the axis (0.73 vs
+0.94): the forced guesses on unfindable-paper questions are right less often
+than the baseline's evidence-backed answers. Closing that needs better
+retrieval coverage of the hard papers (the ceiling above) — i.e. the
+proprietary-index / heavy-agent capability, a substantial separate build,
+not prompt tuning.
+
 ## 0.7.0 — the real blocker was query construction (targeted search, +8pp)
 
 **Reframe, prompted by the user refusing the "proprietary index" excuse:**
