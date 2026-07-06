@@ -301,15 +301,16 @@ def _survives_label_shuffle_lofo(exp: dict[str, Any]) -> ArtifactVerification:
 
     survived = False
     rationale = ""
+    # A1: the only survival path is the full LOFO null — the observed LOFO must
+    # exceed the label-shuffle null p95 AND the shuffle permutation p must be
+    # strict. The old `gap < 0.85` heuristic (no null) and the `lofo > -0.05`
+    # (almost-always-true) fallback are removed: without real null statistics we
+    # fail closed.
     if lofo is not None and p95 is not None and p_ge is not None:
         survived = lofo > p95 and p_ge < 0.05
         rationale = f"LOFO={lofo:.3f} vs label-shuffle null p95={p95:.3f}, p={p_ge:.3f}"
-    elif lofo is not None and gap is not None:
-        survived = lofo > 0.05 and float(gap) < 0.85
-        rationale = f"LOFO={lofo:.3f} gap={float(gap):.3f} (heuristic; no label-shuffle null)"
-    elif lofo is not None and y_perm_p is not None:
-        survived = lofo > -0.05 and y_perm_p < 0.05
-        rationale = f"LOFO={lofo:.3f} y-perm p={y_perm_p:.3f} (fallback)"
+    else:
+        rationale = "insufficient LOFO null statistics (need lofo_r2, label_shuffle_null_p95, label_shuffle_permutation_p)"
 
     artifact = _base_artifact(
         ARTIFACT_FAMILY_LEAKAGE, "Group/family leakage", 0.9, "", [], TEST_LABEL_SHUFFLE_LOFO,
@@ -327,20 +328,67 @@ def _survives_label_shuffle_lofo(exp: dict[str, Any]) -> ArtifactVerification:
     )
 
 
+_PERMUTATION_P_THRESHOLD = 0.01
+_PERMUTATION_MIN_N = 100
+
+
 def _survives_permutation(ctx: EvidenceContext, exp: dict[str, Any]) -> ArtifactVerification:
-    p = ctx.p_value or exp.get("p_value")
-    n = ctx.n_samples or exp.get("n_samples") or 0
-    lofo = ctx.lofo_r2 or exp.get("lofo_r2") or exp.get("mean_r2")
+    """A1: fail-closed permutation-null test for significance-only evidence.
+
+    Survival requires an ACTUAL adversarial null that the observed result beats:
+      1. an outcome-permutation null p-value (`permutation_p`, computed by
+         re-labelling the actual outcome) below a strict threshold with an
+         adequate sample size; or
+      2. a label-shuffle null where the observed statistic genuinely exceeds the
+         shuffled-null p95 (`lofo/mean_r2 > label_shuffle_null_p95` with
+         `label_shuffle_permutation_p < 0.05`).
+
+    A raw significance p-value (`p_value`) reported by the worker is NOT a null
+    test and can never, on its own, make the result survive. If the required null
+    statistics are absent, this fails closed (survived=False).
+    """
+    n = _int_or_none(ctx.n_samples) or _int_or_none(exp.get("n_samples")) or 0
+    # Outcome-permutation null on the actual outcome (independent adversarial null).
+    perm_p = _float_or_none(exp.get("permutation_p") or exp.get("permutation_p_value"))
+    # Label-shuffle null statistics.
+    lofo = _float_or_none(exp.get("lofo_r2") or exp.get("mean_r2"))
+    if lofo is None:
+        lofo = _float_or_none(ctx.lofo_r2)
+    p95 = _float_or_none(exp.get("label_shuffle_null_p95"))
+    shuffle_p = _float_or_none(exp.get("label_shuffle_permutation_p"))
+
     survived = False
     rationale = ""
-    if lofo is not None:
-        survived = float(lofo) > 0.0
-        rationale = f"LOFO={float(lofo):.3f} positive under permutation context"
-    elif p is not None and n >= 80:
-        survived = float(p) < 0.01 and n >= 100
-        rationale = f"n={n} large enough for p={float(p):.4f} to be meaningful"
+    empirical_p: float | None = None
+    observed_stat: float | None = lofo
+
+    if perm_p is not None and n >= _PERMUTATION_MIN_N:
+        survived = perm_p < _PERMUTATION_P_THRESHOLD
+        empirical_p = perm_p
+        rationale = (
+            f"outcome-permutation null p={perm_p:.4f} "
+            f"(< {_PERMUTATION_P_THRESHOLD}) at n={n} (>= {_PERMUTATION_MIN_N})"
+            if survived
+            else f"outcome-permutation null p={perm_p:.4f} not below {_PERMUTATION_P_THRESHOLD} at n={n}"
+        )
+    elif lofo is not None and p95 is not None and shuffle_p is not None:
+        survived = lofo > p95 and shuffle_p < 0.05
+        empirical_p = shuffle_p
+        rationale = (
+            f"observed stat={lofo:.3f} vs label-shuffle null p95={p95:.3f}, "
+            f"shuffle p={shuffle_p:.3f}"
+        )
+    elif perm_p is not None:
+        rationale = (
+            f"permutation p={perm_p:.4f} present but n={n} < {_PERMUTATION_MIN_N} "
+            "— insufficient sample to trust null; fails audit"
+        )
+        empirical_p = perm_p
     else:
-        rationale = f"n={n} too small or no holdout — significance-only path fails audit"
+        rationale = (
+            "no outcome-permutation null and no label-shuffle null present — "
+            "significance-only path fails audit (fail-closed)"
+        )
 
     artifact = _base_artifact(
         ARTIFACT_SIGNIFICANCE_ONLY, "Significance-only confirmation", 0.85, "", [], TEST_PERMUTATION_NULL,
@@ -351,8 +399,9 @@ def _survives_permutation(ctx: EvidenceContext, exp: dict[str, Any]) -> Artifact
         survived=survived,
         effect_size=ctx.effect_size,
         confidence=0.7 if survived else 0.55,
-        observed_stat=float(lofo) if lofo is not None else None,
-        empirical_p=float(p) if p is not None else None,
+        observed_stat=observed_stat,
+        null_p95=p95,
+        empirical_p=empirical_p,
         rationale=rationale,
     )
 

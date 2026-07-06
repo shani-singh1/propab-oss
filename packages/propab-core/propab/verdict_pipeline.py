@@ -29,24 +29,29 @@ def classify_evidence_type(evidence: dict[str, Any]) -> str:
     if has_lofo:
         return "lofo"
 
+    # V2: deterministic gate-bypass requires an actual proof method. A bare
+    # `verified_true_steps` counter is NOT sufficient — a counter without an
+    # adversarial control must be routed through the artifact gate like any
+    # other result, so it cannot silently bypass artifact verification.
+    _PROOF_METHODS = {
+        "symbolic_proof",
+        "exact_check",
+        "counterexample_search",
+        "combinatorial_verification",
+        "combinatorial_computation",
+        "counterexample",
+    }
+    method = evidence.get("verification_method")
     is_deterministic = (
         evidence.get("deterministic") is True
-        or evidence.get("verification_method")
-        in {
-            "symbolic_proof",
-            "exact_check",
-            "counterexample_search",
-            "combinatorial_verification",
-            "combinatorial_computation",
-            "counterexample",
-        }
+        or method in _PROOF_METHODS
         or (
             vt > 0
             and vf == 0
-            and (
-                evidence.get("verification_method") not in {None, "", "significance"}
-                or vt >= 2
-            )
+            # An explicit non-significance verification method still counts as a
+            # proof-style check, but a bare counter (no method / "significance")
+            # no longer qualifies.
+            and method not in {None, "", "significance"}
         )
     )
     if is_deterministic:
@@ -166,11 +171,27 @@ def artifact_gate_stage(
         return verdict, confidence, gate_result.verdict_reason or reason
 
     if evidence_type == "statistical":
+        # V1: a purely statistical result is confirmable only when it carries a
+        # real, independent adversarial null (an outcome permutation null or a
+        # label-shuffle null) that PASSES. Route it through the artifact gate's
+        # permutation-null path instead of auto-downgrading. If the required null
+        # statistics are absent, the gate cannot mark it as surviving, so a bare
+        # significance number can never confirm.
+        #
+        # Fail-closed policy: only a genuinely PASSING null yields "confirmed".
+        # Any non-confirm gate outcome (including a hard "refuted" that the gate
+        # emits merely because no null was supplied) is collapsed to
+        # "inconclusive": absence of an adversarial control is not positive
+        # evidence of an artifact, so we must not manufacture a "refuted".
+        gate_result = run_full_artifact_gate(evidence, campaign_context=campaign_context)
+        merge_artifact_into_evidence(evidence, gate_result)
+        if gate_result.verdict == "confirmed":
+            return verdict, confidence, gate_result.verdict_reason or reason
         return (
             "inconclusive",
             confidence * 0.7,
-            "significance gate passed but no cross-group holdout "
-            "available to rule out artifact; treat as preliminary",
+            "significance gate passed but no passing adversarial null / holdout "
+            f"available to rule out artifact; treat as preliminary ({gate_result.verdict_reason})",
         )
 
     return "inconclusive", 0.0, f"unrecognized evidence type: {evidence_type}"
