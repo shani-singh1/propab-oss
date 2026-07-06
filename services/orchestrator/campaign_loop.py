@@ -861,8 +861,10 @@ async def _maybe_run_campaign_synthesis(
     prior_snippets: list[str] | None,
     session_factory: async_sessionmaker | None = None,
     lifetime_context: str = "",
+    lifetime_context_ref: list[str] | None = None,
 ) -> bool:
     """Tier-2 synthesis if triggered. Returns True if candidates were added."""
+    ctx = lifetime_context_ref[0] if lifetime_context_ref else lifetime_context
     if not bool(getattr(settings, "campaign_synthesis_enabled", True)):
         return False
     if campaign.belief_state.branch_exhausted:
@@ -887,7 +889,7 @@ async def _maybe_run_campaign_synthesis(
         emitter=emitter,
         session_factory=session_factory,
         domain_id=_resolve_synthesis_domain_id(campaign),
-        lifetime_context=lifetime_context,
+        lifetime_context=ctx,
     )
     return len(added) > 0
 
@@ -1129,6 +1131,7 @@ async def _iter_campaign_pipelined_results(
     generation: int = 0,
     prior_snippets: list[str] | None = None,
     lifetime_context: str = "",
+    lifetime_context_ref: list[str] | None = None,
 ) -> AsyncIterator[dict]:
     """
     Pipelined dispatch: keep up to ``max_concurrent`` Celery sub-agents running.
@@ -1162,6 +1165,7 @@ async def _iter_campaign_pipelined_results(
     async def refill_slots() -> bool:
         """Dispatch from frontier until at cap or no candidates. Returns True if any dispatch."""
         nonlocal last_progress_mono
+        ctx = lifetime_context_ref[0] if lifetime_context_ref else lifetime_context
         progressed_local = False
         while len(pending) < max_concurrent and not campaign.should_stop():
             if campaign.hypothesis_cap_reached():
@@ -1177,7 +1181,8 @@ async def _iter_campaign_pipelined_results(
                     inflight_ids=inflight,
                     prior_snippets=prior_snippets,
                     session_factory=session_factory,
-                    lifetime_context=lifetime_context,
+                    lifetime_context=ctx,
+                    lifetime_context_ref=lifetime_context_ref,
                 )
             node = campaign.hypothesis_tree.next_dispatch_candidate(inflight)
             if node is None:
@@ -1999,6 +2004,7 @@ async def run_campaign_loop(
                     ),
                 },
             )
+            _lifetime_ctx = [lifetime_seed_context]
             async for result in _iter_campaign_pipelined_results(
                 campaign=campaign,
                 max_concurrent=max_c,
@@ -2010,6 +2016,7 @@ async def run_campaign_loop(
                 generation=generation,
                 prior_snippets=prior_snippets,
                 lifetime_context=lifetime_seed_context,
+                lifetime_context_ref=_lifetime_ctx,
             ):
                 node_id = str(result.get("campaign_node_id") or "")
                 verdict = result.get("verdict", "inconclusive")
@@ -2037,6 +2044,16 @@ async def run_campaign_loop(
                     evidence,
                     failure_reason=str(result.get("failure_reason") or result.get("error") or ""),
                 )
+
+                if verdict == "confirmed":
+                    from propab.numerical_seeds import refresh_lifetime_context_with_crossings
+
+                    _lifetime_ctx[0] = refresh_lifetime_context_with_crossings(
+                        _lifetime_ctx[0],
+                        campaign.hypothesis_tree,
+                        campaign.question,
+                    )
+                    lifetime_seed_context = _lifetime_ctx[0]
 
                 # Recount from the tree (distinct nodes) rather than incrementing per
                 # result — re-dispatched nodes must not inflate the totals, so the

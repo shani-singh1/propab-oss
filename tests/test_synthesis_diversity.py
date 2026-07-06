@@ -52,6 +52,7 @@ def test_fallback_synthesis_seeds_sidon() -> None:
     seeds = fallback_synthesis_seeds("sidon", generation=1)
     assert len(seeds) == 1
     assert "Sidon" in seeds[0]["text"]
+    assert "decreasing" in seeds[0]["text"].lower()
 
 
 def test_forced_problem_type_after_sidon_streak() -> None:
@@ -83,13 +84,6 @@ def test_resolve_forced_prefers_tree_monoculture() -> None:
     assert forced == "ap_free"
 
 
-def test_bootstrap_forced_sidon_on_q1_question() -> None:
-    from propab.synthesis_diversity import bootstrap_forced_problem_type
-
-    q = "where does it first fall below 0.60? Run threshold sweeps for n in [10000, 50000]"
-    assert bootstrap_forced_problem_type(q) == "sidon"
-
-
 def test_filter_seed_dicts_rejects_cap_set_when_forcing_sidon() -> None:
     from propab.synthesis_diversity import filter_seed_dicts_for_diversity
 
@@ -97,10 +91,11 @@ def test_filter_seed_dicts_rejects_cap_set_when_forcing_sidon() -> None:
         "text": "Cap-set CLP ratio in F_3^8",
         "test_methodology": "cap-set CLP table lookup",
     }]
+    beliefs = ["Cap-set CLP ratios decrease monotonically in F_3^n"]
     out = filter_seed_dicts_for_diversity(
         caps,
         tree_nodes={},
-        question="fall below 0.60 n in [10000, 50000]",
+        active_belief_statements=beliefs,
         generation=1,
     )
     assert len(out) == 1

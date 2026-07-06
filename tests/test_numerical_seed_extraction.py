@@ -76,6 +76,23 @@ def test_claim_has_numeric_falsifier_rejects_pure_structural() -> None:
     )
 
 
+def test_extract_from_threshold_search_evidence() -> None:
+    node = {
+        "id": "struct-ts",
+        "verdict": "confirmed",
+        "finding": {
+            "threshold_search": {
+                "target_ratio": 0.60,
+                "crossing_n": 32000,
+                "crossing_ratio": 0.597,
+            },
+        },
+    }
+    seeds = extract_math_combinatorics_seeds([node])
+    assert len(seeds) == 1
+    assert seeds[0]["parameters"]["crossing_n"] == 32000
+
+
 def test_plugin_and_knowledge_graph_storage() -> None:
     plugin = MathCombinatoricsPlugin()
     ns = [500, 1000, 2000]

@@ -1,6 +1,7 @@
 """Synthesis diversity enforcement (fixes.md Track B1, B2, B3)."""
 from __future__ import annotations
 
+import re
 from collections import Counter
 from typing import Any
 
@@ -30,10 +31,23 @@ _SUBJECT_TO_PROBLEM = {
 }
 
 
+def q1_question_active(question: str) -> bool:
+    """True when the campaign question targets the Sidon 0.60 threshold (Q1)."""
+    q = (question or "").lower()
+    if "0.60" in q or ("0.6" in q and ("cross" in q or "fall" in q or "below" in q)):
+        return True
+    return "q1" in q and ("0.6" in q or "threshold" in q)
+
+
+def q1_threshold_target(question: str, *, default: float = 0.60) -> float:
+    m = re.search(r"(?:below|cross(?:es)?|under)\s*(0\.\d{2})", (question or "").lower())
+    return float(m.group(1)) if m else default
+
+
 def bootstrap_forced_problem_type(question: str) -> str | None:
     """Before the tree is large enough for monoculture stats, bias away from cap_set."""
     q = (question or "").lower()
-    if "cap-set table lookups are lower priority" in q or "0.60" in q or "10000" in q:
+    if "cap-set table lookups are lower priority" in q:
         return "sidon"
     if "ap-free" in q:
         return "ap_free"
@@ -71,7 +85,7 @@ def filter_seed_dicts_for_diversity(
     ]
     if filtered:
         return filtered
-    return fallback_synthesis_seeds(forced, generation=generation)
+    return fallback_synthesis_seeds(forced, generation=generation, question=question)
 
 
 def forced_from_tree_monoculture(
@@ -157,11 +171,10 @@ def diversity_requirement_prompt(forced_type: str, *, avoid_type: str | None = N
 FALLBACK_SEED_TEMPLATES: dict[str, dict[str, str]] = {
     "sidon": {
         "text": (
-            "Population: Greedy Sidon in {1,...,n} for n in [10000, 20000, 30000, 50000]. "
-            "Claim: F(n)/sqrt(n) first falls below 0.60 somewhere in this range, "
-            "continuing the monotonic descent established below n=10000."
+            "Population: Greedy Sidon in {1,...,n} for n in [1000, 5000, 10000]. "
+            "Claim: F(n)/sqrt(n) is strictly decreasing across the sweep."
         ),
-        "test_methodology": "greedy Sidon threshold crossing sweep",
+        "test_methodology": "greedy Sidon density sweep",
     },
     "ap_free": {
         "text": (
@@ -194,8 +207,14 @@ FALLBACK_SEED_TEMPLATES: dict[str, dict[str, str]] = {
 }
 
 
-def fallback_synthesis_seeds(forced_type: str, *, generation: int) -> list[dict[str, Any]]:
+def fallback_synthesis_seeds(
+    forced_type: str,
+    *,
+    generation: int,
+    question: str = "",
+) -> list[dict[str, Any]]:
     """Deterministic seeds when LLM synthesis ignores diversity reset (B3 fallback)."""
+    _ = question
     tpl = FALLBACK_SEED_TEMPLATES.get(forced_type)
     if not tpl:
         return []
