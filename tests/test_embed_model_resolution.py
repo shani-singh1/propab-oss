@@ -47,12 +47,17 @@ def test_explicit_openai_override_is_respected() -> None:
 # --- Settings.effective_embed_model ---------------------------------------
 
 def test_settings_effective_embed_model_gemini() -> None:
-    s = Settings(embed_provider="gemini")  # embed_model left at default
+    # Pass the OpenAI cross-provider default EXPLICITLY (not via the ambient .env,
+    # which a real deployment may set) so this exercises the resolution: gemini
+    # provider + OpenAI default model -> Google default.
+    s = Settings(embed_provider="gemini", embed_model=_OPENAI_DEFAULT_EMBED_MODEL)
     assert s.effective_embed_model == _GOOGLE_DEFAULT_EMBED_MODEL
 
 
 def test_settings_effective_embed_model_openai_unchanged() -> None:
-    s = Settings(embed_provider="openai")  # embed_model left at default
+    # Explicit OpenAI default so the assertion is independent of any ambient
+    # EMBED_MODEL in a deployment .env.
+    s = Settings(embed_provider="openai", embed_model=_OPENAI_DEFAULT_EMBED_MODEL)
     assert s.effective_embed_model == _OPENAI_DEFAULT_EMBED_MODEL
 
 
