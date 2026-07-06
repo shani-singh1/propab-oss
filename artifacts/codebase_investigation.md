@@ -374,15 +374,15 @@ conservative than its inputs — good. (Full read of section assembly still pend
 for completeness, but no dishonesty found.)
 
 ## LAYER 11 continued — the load-bearing significance tool is unlocated
-**T2 · HIGH · OPEN · SUSPECTED — the `statistical_significance` tool that the
-entire verdict pipeline gates on is not in `tools/statistics/`** (which contains
-only `category_counts`). The confirmation path (significance.py
-`_SIGNIFICANCE_TOOL_NAMES` = statistical_significance / bootstrap_confidence /
-literature_baseline_compare) depends on these tools existing and computing real
-p-values from real data. Their location and implementation are unconfirmed —
-if any is a spec-only stub or echoes example params (see registry.py:154), that
-directly compromises every "confirmed" verdict. **Find and verify these three
-tools compute from real inputs — highest-priority remaining read.**
+**T2 · CLEARED (positive) — the significance tools compute real statistics.**
+They live in `tools/ml_research/` (not `tools/statistics/`):
+`statistical_significance.py` uses real scipy (`stats.mannwhitneyu`,
+`stats.wilcoxon`); `literature_baseline_compare.py` uses `stats.t`/`stats.norm`.
+Not stubs. **But this sharpens W1/A1 rather than closing it:** the math is real,
+computed on the `results_a`/`results_b` arrays *the agent passes in*. So the
+integrity gap is purely INPUT PROVENANCE — a real p-value computed on fabricated
+data is still fabricated science, and the only guard is the 3-item denylist (W1).
+The tools are fine; the input pipeline is the exposure.
 
 ## LAYERS STILL PENDING (next passes — enumerated, not assumed clean)
 
