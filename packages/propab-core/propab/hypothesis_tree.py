@@ -224,6 +224,12 @@ class FrontierScoringContext:
     question: str = ""
     prior_snippets: list[str] = field(default_factory=list)
     theme_saturation_penalty: float = 0.15
+    # LL2: the learned search policy loaded for this campaign. When present, its
+    # per-theme weights and blocked failure signatures NUDGE live frontier
+    # selection (see _information_gain_score) — a boosted theme ranks slightly
+    # higher, a penalized/blocked one slightly lower. Bounded so it never
+    # dominates or zeroes the information-gain signal (convergence must survive).
+    policy: Any = None
 
 
 @dataclass
@@ -255,11 +261,13 @@ class HypothesisTree:
         prior_snippets: list[str] | None = None,
         *,
         theme_saturation_penalty: float = 0.15,
+        policy: Any = None,
     ) -> None:
         self._scoring_context = FrontierScoringContext(
             question=question,
             prior_snippets=list(prior_snippets or []),
             theme_saturation_penalty=theme_saturation_penalty,
+            policy=policy,
         )
 
     def theme_counts(self) -> dict[str, int]:
@@ -727,8 +735,52 @@ class HypothesisTree:
         )
         closure = estimate_closure_probability(node, parent=parent)
         score = info_gain * closure
+        # LL2: bounded learned-policy nudge on top of the information-gain signal.
+        # A boosted theme ranks slightly higher, a penalized/saturated/blocked one
+        # slightly lower — enough to flip the order of two otherwise-equal nodes,
+        # never enough to dominate or zero the information-gain signal. With a
+        # null/empty policy this multiplier is exactly 1.0 (backward compatible).
+        score *= self._policy_score_multiplier(node, theme_id)
         node.frontier_score = round(score, 4)
         return score
+
+    # ── LL2: learned-policy nudge on live frontier selection ─────────────────
+    # How much the learned SearchPolicy is allowed to move a frontier score.
+    # theme_weight ∈ [0.1, 2.0] centered at 1.0; we scale the deviation from 1.0
+    # by POLICY_NUDGE_BOUND so a fully-boosted theme gains at most +15% and a
+    # fully-penalized theme loses at most ~13.5% — a nudge, not a takeover.
+    POLICY_NUDGE_BOUND: float = 0.15
+    # Extra multiplicative deprioritization for a candidate whose failure
+    # signature matches a policy-blocked one. Conservative (deprioritize, not
+    # skip): a blocked candidate can still be dispatched if nothing else remains.
+    BLOCKED_SIGNATURE_FACTOR: float = 0.75
+
+    def _policy_score_multiplier(self, node: HypothesisNode, theme_id: str) -> float:
+        """Bounded multiplier in ~[0.66, 1.15] derived from the loaded policy.
+
+        Returns exactly 1.0 when no policy is present (backward compatible)."""
+        policy = getattr(self._scoring_context, "policy", None)
+        if policy is None:
+            return 1.0
+        mult = 1.0
+        theme_weight = getattr(policy, "theme_weight", None)
+        if callable(theme_weight):
+            try:
+                w = float(theme_weight(theme_id))
+            except (TypeError, ValueError):
+                w = 1.0
+            # Clamp the weight to the SearchPolicy's documented range [0.1, 2.0]
+            # BEFORE mapping, so the nudge is bounded no matter what a policy
+            # returns — a misbehaving/extreme weight can never dominate or zero
+            # the information-gain signal.
+            w = max(0.1, min(2.0, w))
+            # Map theme_weight deviation from 1.0 into a bounded nudge.
+            mult *= 1.0 + self.POLICY_NUDGE_BOUND * (w - 1.0)
+        blocked = getattr(policy, "blocked_failure_signatures", None) or ()
+        sig = getattr(node, "failure_signature", None)
+        if sig and sig in blocked:
+            mult *= self.BLOCKED_SIGNATURE_FACTOR
+        return mult
 
     @staticmethod
     def _field(node: Any, name: str) -> Any:
