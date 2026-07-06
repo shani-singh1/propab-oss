@@ -27,9 +27,10 @@
 | Area | Files | Depth |
 |---|---|---|
 | Campaign spine: hypothesis_tree, campaign_synthesis, belief_state, frontier | core | **deep** (convergence layer — fixed) |
-| Verdict: verdict_pipeline, significance | core | **deep** |
-| Worker: sub_agent_loop, think_act | services/worker | partial (1 flaw found) |
-| Evidence binding, artifact_verification, scoped_claim | core | pending |
+| Verdict: verdict_pipeline, significance | core | **deep** (V1-V4) |
+| Worker: sub_agent_loop, think_act | services/worker | partial (W1-W3; _build_evidence is LOFO-shaped) |
+| Artifact gate + evidence binding, scoped_claim | core | partial (A1-A3) |
+| Domain layer: base defaults, registry, plugins, adapters | core | partial (D1-D3) |
 | Numerical seeds, synthesis_diversity, belief_promotion | core | partial |
 | Orchestrator loop: campaign_loop.py (2369) | services/orchestrator | partial |
 | Generation: hypotheses, seed_validation, hypothesis_ranking, anomaly_seeds | orch | survey |
@@ -42,6 +43,39 @@
 
 Legend for the loop: pending = not yet read; survey = grepped/skimmed; partial =
 key paths read; deep = traced line by line.
+
+---
+
+## ★ CENTRAL THESIS (cross-layer) — Propab is domain-agnostic in *architecture* but domain-LOCKED in *fact*
+
+The single most important finding of this audit, spanning V1 · A1 · A3 · W1 · L7:
+**only ~3 domains can ever produce a "confirmed" finding; every other domain
+launches a campaign and silently produces nothing.** The confirmation machinery
+assumes evidence is either (a) a deterministic proof (math: `verified_true_steps`)
+or (b) a leave-one-family-out grouped-regression with null stats (mandrake /
+materials: `lofo_r2` + `label_shuffle_null_p95`). The chain:
+
+1. Domain defaults fail-open: `preflight()` returns `passed=True` (L7/D1) → any
+   domain **launches**, even underpowered/unsupported.
+2. Generic verification is unimplemented: `DomainPlugin.run_verification` raises
+   `NotImplementedError` (L7/D2); the worker's `_build_evidence` is built around
+   `mean_r2`/`lofo_r2` (LOFO regression) — there is no generic "run an experiment,
+   get statistics" path that yields confirmable evidence.
+3. Statistical evidence auto-downgrades: even if stats are produced,
+   `artifact_gate_stage` forces `statistical` → `inconclusive` (V1).
+4. The rigor gate rubber-stamps or trusts self-reported stats (A1) and assumes
+   grouped data (A3).
+
+⇒ A new/statistical domain: launches, confirms nothing, spends its budget on
+inconclusive breadth, finalizes empty — **and every layer reports "success"** (a
+non-null stop reason, health metrics logged) so nothing surfaces the failure.
+This is the infrastructure-level reason campaigns "run but do no real research,"
+and it is *upstream of the convergence layer I already fixed* (no confirmed
+parents ⇒ nothing to deepen). **This must be fixed before any multi-domain
+campaign.** Fix shape: a `DomainPlugin.confirmation_contract()` that declares what
+evidence + which adversarial control confirms in *that* domain, a real generic
+statistical-with-permutation-null path, and a preflight that fails-closed when the
+domain can't actually be verified.
 
 ---
 
@@ -187,6 +221,80 @@ V3's `min_metric_steps=2` bar silently makes single-shot experiments inconclusiv
 Cross-layer with V3. Trace `_build_evidence` / the tool loop's step accounting.
 
 ---
+
+## LAYER 4 — Artifact gate & evidence binding (the "rigor" layer) [partial]
+
+Files: `artifact_verification.py` (753), `evidence_binding.py` (384),
+`scoped_claim.py`. This is what makes "confirmed" mean "survived an adversarial
+control." Reading the survival tests:
+
+**A1 · CRITICAL · OPEN · VERIFIED — the artifact gate does not run the null test;
+it reads the worker's self-reported null statistics, and its fallbacks
+rubber-stamp.** `_survives_label_shuffle_lofo` / `_survives_permutation`
+(artifact_verification.py:286, 330) consume `lofo_r2`, `label_shuffle_null_p95`,
+`label_shuffle_permutation_p`, `permutation_p` **from the evidence dict the worker
+produced** — no shuffle/permutation is computed here. Worse, the fallback branches
+are near-trivial: `_survives_permutation` returns `survived = (lofo > 0.0)` when a
+LOFO number is present (line 337) — i.e. *any positive effect "survives" the
+permutation null*, which is not a null test at all; `_survives_label_shuffle_lofo`
+has a `lofo > 0.05 and gap < 0.85` heuristic (line 308) that passes with no
+label-shuffle null, and a `lofo > -0.05 and y_perm_p < 0.05` path (line 311) whose
+LOFO condition is almost always true. *Design intent (ARCHITECTURE §7):* "runs
+adversarial tests (label-shuffle LOFO, permutation nulls) to decide whether a
+confirmed verdict survives." *Actual behaviour:* it threshold-checks
+agent-supplied statistics and, when the strong stats are absent, waves the result
+through on `lofo > 0`. With W1 (the worker can fabricate inputs) this means the
+core rigor guarantee is **self-attested by the same agent whose claim is being
+judged**. The offline permutation-audit scripts (ARCHITECTURE §11) can re-run it
+independently, but the *in-pipeline* "confirmed" — the one the tree, beliefs, and
+paper use — is not independently verified. **Fix direction:** the gate must
+recompute the null from raw per-sample data (require the worker to return the raw
+arrays / a reproducible artifact), or at minimum FAIL-closed when the strong null
+stats are absent instead of falling back to `lofo>0`.
+
+**A2 · HIGH · PENDING — does evidence binding reject genuine support?**
+`evidence_binding.filter_node_citations` runs at write time and is credited with
+"belief citation integrity." If it is too strict, beliefs never accrue supporting
+nodes → beliefs stay `unclear` → (with the exhaustion logic) the branch trends to
+exhausted, and rival tension that drives discriminating experiments never forms.
+Needs a rejection-reason histogram from real data; the health metric warns if it
+runs 50+ times with zero rejections (too loose) but nothing warns on *too strict*.
+Trace `filter_node_citations`.
+
+**A3 · HIGH · PENDING · SUSPECTED — LOFO assumes grouped/family data most domains
+lack.** Label-shuffle-LOFO is a leave-one-*group*-out control; it presupposes the
+dataset has meaningful groups (mandrake families, material systems). A domain with
+i.i.d. samples and no grouping can't produce `lofo_r2`, so per V1 it can't confirm
+statistically and per A1 can't take the LOFO path — it is structurally locked out
+of "confirmed." This is the domain-generality root that V1 and A1 share. Confirm
+by checking whether the generic domain path can ever emit `lofo_r2`.
+
+## LAYER 7 — Domain layer (the domain-agnostic seam) [partial]
+
+Files: `domain_modules/base.py`, `registry.py`, plugins, `domain_adapters/*`,
+`domain_profiles/*`. Core imports no domain constant — architecturally clean — but
+the *defaults* decide what happens for an unsupported domain:
+
+**D1 · CRITICAL · OPEN · VERIFIED — `preflight()` defaults to `passed=True`.**
+(base.py:170) The "fail-fast power check" that is supposed to refuse an
+underpowered domain in seconds **fails open**: any domain that doesn't override
+preflight launches a full campaign. So the gate protects only the domains that
+least need it (materials implements it) and waves through exactly the new/unknown
+domains that most need a power check. **Fix:** default preflight should fail-closed
+(or at least WARN loudly) when the domain provides no verification path.
+
+**D2 · CRITICAL · OPEN · VERIFIED — `run_verification` raises NotImplementedError
+by default**, and the worker's evidence builder is LOFO-shaped (`_build_evidence`
+reads `mean_r2`/`lofo_r2`, sub_agent_loop.py:429). A domain that doesn't implement
+a verification path (or a LOFO adapter) produces no confirmable evidence — its
+experiments error to `inconclusive`. There is no generic "run experiment → get
+statistics → confirm with a permutation null" path. See CENTRAL THESIS.
+
+**D3 · MED · PENDING — `artifact_models`, `extract_numerical_seeds`,
+`scope_template` default to empty/None.** Individually safe, but together they mean
+a generic domain gets: no artifact vocabulary (gate has nothing domain-specific),
+no numerical-seed compounding, no scope templates → the scope/OOD gates degrade to
+no-ops. Verify each isn't silently disabling a check that then reports "passed."
 
 ## LAYERS PENDING DEEP AUDIT (loop continues — do not treat absence as clean)
 
