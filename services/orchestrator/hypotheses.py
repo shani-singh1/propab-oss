@@ -18,6 +18,144 @@ from services.orchestrator.intake import ParsedQuestion
 from services.orchestrator.schemas import Prior, RankedHypothesis
 
 
+# Tokens that carry no domain signal — never used as the subject of a seed claim.
+_STOPWORDS = frozenset(
+    {
+        "which", "what", "where", "when", "whether", "does", "doing", "about",
+        "there", "their", "these", "those", "would", "could", "should", "using",
+        "study", "studies", "research", "question", "investigate", "analyze",
+        "compare", "measure", "determine", "understand", "consider", "given",
+        "under", "above", "below", "between", "across", "within", "domain",
+        "profile", "value", "values", "effect", "effects", "result", "results",
+        "based", "than", "then", "with", "from", "into", "over", "more", "most",
+        "less", "some", "many", "such", "each", "both", "same", "other", "this",
+        "that", "have", "will", "been", "being",
+    }
+)
+
+
+def _salient_terms(question: str, *, prior: Prior | None = None, limit: int = 8) -> list[str]:
+    """Content words that characterize the question's own domain shape.
+
+    Domain-agnostic: pulls the question's rarer nouns (length >= 4, not a
+    stopword) plus terms borrowed from the literature prior's open gaps and key
+    papers, so an arbitrary question still yields concrete subject matter.
+    """
+    text = strip_question_suffix(question or "")
+    # Drop any [domain_profile:...] tag so it never leaks into a claim.
+    text = re.sub(r"\[domain_profile:[a-z0-9_]+\]", " ", text, flags=re.I)
+    seen: list[str] = []
+
+    def _add(raw: str) -> None:
+        for w in re.findall(r"[A-Za-z][A-Za-z0-9\-]{3,}", raw or ""):
+            wl = w.lower()
+            if wl in _STOPWORDS or wl in {s.lower() for s in seen}:
+                continue
+            seen.append(w)
+
+    _add(text)
+    if prior is not None:
+        for gap in (prior.open_gaps or [])[:3]:
+            _add(str(gap.get("text") or gap.get("gap") or ""))
+        for kp in (prior.key_papers or [])[:3]:
+            _add(str(kp.get("title") or ""))
+    return seen[:limit]
+
+
+def _parametric_families(question: str) -> list[str]:
+    """Parametric knobs literally present in the question (e.g. 'n', 'k', 'p<0.05', '10^6')."""
+    text = strip_question_suffix(question or "")
+    families: list[str] = []
+    # single-letter parameters like n, k, p, m used as variables
+    for m in re.findall(r"(?<![A-Za-z])([a-z])\s*(?:[=<>≤≥]|\b(?:up to|below|above)\b)", text, flags=re.I):
+        if m.lower() not in {s.lower() for s in families}:
+            families.append(m)
+    # explicit numeric bounds / powers
+    for m in re.findall(r"(\d+(?:\^\d+|e\d+|,\d{3})*)", text):
+        if m not in families:
+            families.append(m)
+    return families[:4]
+
+
+def _domain_shape_options(question: str, *, prior: Prior | None = None) -> list[str]:
+    """Domain-GENERAL discovery fallbacks derived from the question's own structure.
+
+    Produces, for ANY question with zero keyword matches, a set of concrete,
+    falsifiable seed claims: a discovery claim, a competing-mechanism contrast,
+    a parametric/boundary probe, and a finite-verification claim — each phrased
+    from the question's salient terms and (when available) the literature prior.
+    This replaces the former hardcoded per-topic keyword table.
+    """
+    terms = _salient_terms(question, prior=prior)
+    subject = " ".join(terms[:3]) if terms else "the stated phenomenon"
+    # Full-context phrase reuses the question's own salient vocabulary so the
+    # domain-general seed still shares enough tokens with the question to clear
+    # the lexical relevance gate (the embedding gate is primary in production).
+    context = " ".join(terms) if terms else subject
+    secondary = " ".join(terms[3:6]) if len(terms) > 3 else subject
+    families = _parametric_families(question)
+    fam = families[0] if families else None
+    bound = next((f for f in families if any(c.isdigit() for c in f)), "10^4")
+
+    if fam and fam.isalpha():
+        boundary = (
+            f"Within {context}, there is a boundary regime in parameter {fam} where the "
+            f"effect claimed for {subject} weakens or reverses, locatable by sweeping {fam}."
+        )
+    elif families:
+        boundary = (
+            f"Within {context}, the claimed effect on {subject} has a threshold near "
+            f"{families[0]} beyond which the sign or magnitude of the effect changes."
+        )
+    else:
+        boundary = (
+            f"Within {context}, a parametric regime exists in which the claimed effect on "
+            f"{subject} weakens or reverses, identifiable by a systematic parameter sweep."
+        )
+
+    return [
+        (
+            f"Within {context}, a measurable structured pattern relating {subject} to "
+            f"{secondary} is detectable by direct simulation or exact enumeration and "
+            f"exceeds a matched noise-only null model."
+        ),
+        (
+            f"For {context}, two competing mechanisms for {subject} make divergent, "
+            f"testable predictions on held-out instance families, so their ranking can be "
+            f"decided empirically rather than assumed."
+        ),
+        boundary,
+        (
+            f"Finite verification up to {bound} distinguishes the leading claim about "
+            f"{subject} within {context} from a random baseline with a reproducible test statistic."
+        ),
+    ]
+
+
+def _domain_fallback_options(question: str, *, prior: Prior | None = None) -> list[str]:
+    """Domain-general discovery fallbacks for seed generation.
+
+    PRIMARY behaviour is now domain-shape driven (``_domain_shape_options``): any
+    question — including ones matching none of the historical demo topics — yields
+    concrete, question-relevant seed claims. The canned demo hypotheses survive
+    ONLY as an optional supplement, appended after the general seeds so the demo
+    topics keep their tuned phrasing without gating the general path.
+    """
+    general = _domain_shape_options(question, prior=prior)
+    extra = _demo_topic_supplement(question)
+    if not extra:
+        return general
+    # General seeds first, demo phrasings appended, de-duplicated.
+    merged: list[str] = list(general)
+    seen = {g.strip().lower() for g in general}
+    for opt in extra:
+        key = opt.strip().lower()
+        if key not in seen:
+            merged.append(opt)
+            seen.add(key)
+    return merged
+
+
 def _scoped_contagion_text(claim: str, *, ood: str) -> str:
     return (
         f"{claim}\n"
@@ -29,21 +167,25 @@ def _scoped_contagion_text(claim: str, *, ood: str) -> str:
     )
 
 
-def _domain_fallback_options(question: str) -> list[str]:
-    """Domain-specific discovery fallbacks (no generic ML intervention phrasing)."""
+def _demo_topic_supplement(question: str) -> list[str]:
+    """OPTIONAL extra phrasings for the historical demo topics.
+
+    These are NEVER the sole source of seeds (see ``_domain_fallback_options``);
+    they only enrich the general seeds when a demo topic is recognized, so the
+    tuned demo behaviour is preserved without making the engine look
+    domain-general while being keyword-gated.
+    """
     ql = (question or "").lower()
     if any(k in ql for k in ("egyptian", "unit fraction", "1/n", "erdős", "erdos", "strauss")):
         return [
             "Odd n ≡ 1 (mod 4) below 10,000 more often admit five-term odd-denominator representations than other residue classes.",
             "A finite scan up to n = 10,000 finds no counterexample to a fixed modular necessary condition for five-term sums.",
             "Density of representable odd n decreases as the smallest prime factor of n increases, testable by exact enumeration.",
-            "Parametric families n = pq with distinct odd primes p,q show higher representation rate than prime n.",
         ]
     if any(k in ql for k in ("collatz", "3n+1", "stopping time")):
         return [
             "Residue class mod 8 predicts median Collatz stopping time among integers below 10^6.",
             "Numbers with many factors of 2 in their trajectory prefix have shorter stopping times on average.",
-            "No residue class below mod 16 exhibits stopping times exceeding 5× the global median.",
             "Stopping-time variance is higher for n ≡ 3 (mod 4) than for n ≡ 1 (mod 4).",
         ]
     if any(k in ql for k in ("prime gap", "cramér", "prime gaps")):
@@ -51,7 +193,6 @@ def _domain_fallback_options(question: str) -> list[str]:
             "Local prime gaps above 10^6 follow a log-scaled distribution closer to Cramér heuristics than a constant baseline.",
             "Intervals with higher prime density show smaller normalized gaps than sparse intervals.",
             "Twin-prime-like small gaps occur more often than a naive random model predicts in [10^6, 10^6+10^5].",
-            "Maximum gap in sliding windows grows sublinearly with window center up to 10^7.",
         ]
     if any(k in ql for k in ("contagion", "epidemic", "diffusion", "spreading", "sir", "sis")):
         return [
@@ -70,153 +211,14 @@ def _domain_fallback_options(question: str) -> list[str]:
                 "replicas with heavy-tailed degree sequences.",
                 ood="Transfer test on ER graphs with matched mean degree; effect should weaken.",
             ),
-            _scoped_contagion_text(
-                "Algebraic connectivity correlates with time-to-50% infected across Barabási–Albert "
-                "and ER families separately.",
-                ood="Train on BA, evaluate correlation sign on held-out ER ensemble.",
-            ),
-        ]
-    if any(k in ql for k in ("resilience", "targeted removal", "robustness", "node removal", "percolation")):
-        return [
-            "Targeted highest-degree removal fragments BA graphs faster than random removal at equal fraction removed.",
-            "Percolation threshold on heavy-tailed configuration models shifts left when the tail exponent decreases.",
-            "Betweenness-centrality removal predicts giant-component collapse better than degree on spatial networks.",
-            "Assortativity protects against fragmentation under targeted attack up to a critical removal fraction.",
-        ]
-    if any(k in ql for k in ("community", "modularity", "clustering", "block model")):
-        return [
-            "Modularity optimization recovers planted blocks in SBM down to edge probability p = c/n log n.",
-            "Spectral clustering outperforms modularity when inter-block edge density is below 0.02.",
-            "Normalized cut objective aligns with planted partitions on balanced two-block models.",
-            "Greedy modularity fails to detect small communities below 5% graph size.",
         ]
     if any(k in ql for k in ("cache", "replacement", "lru", "miss rate")):
         return [
             "LRU-adversarial traces expose at least 2× higher miss rate for LRU than for LFU on fixed capacity.",
             "Zipf access with exponent s>1 favors adaptive policies over FIFO at capacity ≤ 256.",
             "Belady-optimal offline policy gap to LRU shrinks as trace length increases beyond 10^5 references.",
-            "Random replacement is within 15% of LRU miss rate only on nearly uniform access patterns.",
         ]
-    if any(k in ql for k in ("scheduling", "waiting time", "round-robin", "queue", "m/m/1")):
-        return [
-            "SRPT reduces mean waiting time versus round-robin on Pareto job sizes with α < 2.",
-            "M/M/1 waiting-time variance at ρ=0.9 is within 10% of heavy-traffic approximation.",
-            "Weighted fair queueing bounds 99th-percentile delay for low-priority flows vs strict priority.",
-            "Bursty arrivals inflate tail latency more under FCFS than under shortest-job-first.",
-        ]
-    if any(k in ql for k in ("coloring", "graph color", "chromatic")):
-        return [
-            "Smallest-last ordering uses fewer colors than random order on random geometric graphs.",
-            "Greedy coloring exceeds chromatic number by at most one on trees with ≥ 10^4 vertices.",
-            "DSatur heuristic beats largest-first on Erdős–Rényi G(n,p) at p = 0.05.",
-            "Edge density above 0.2 forces greedy palette size ≥ ω(G) + 2 on some instances.",
-        ]
-    if any(k in ql for k in ("gene", "regulatory", "knockdown", "expression")):
-        return [
-            "Hub gene knockdown increases expression variance of downstream targets more than leaf knockdown.",
-            "Feedback loops in published GRNs amplify perturbation effects within three hops.",
-            "Essential genes cluster in high in-degree modules of the regulatory network.",
-            "Knockdown of low-betweenness genes rarely changes global expression PCA axes.",
-        ]
-    if any(k in ql for k in ("protein", "ppi", "essentiality", "betweenness")):
-        return [
-            "High-betweenness PPI proteins are enriched for essentiality vs degree-matched controls.",
-            "Peripheral PPI modules have lower essential-gene fraction than core modules.",
-            "Clustering coefficient in PPI networks anti-correlates with essentiality at fixed degree.",
-            "Bottleneck proteins bridge more shortest paths than expected in degree-preserving null models.",
-        ]
-    if any(k in ql for k in ("evolution", "selection", "frequency spectrum", "pathway")):
-        return [
-            "Selection strength from site-frequency spectra correlates with metabolic pathway centrality.",
-            "Peripheral pathway genes show weaker selection signatures than hub enzymes.",
-            "Purifying selection dominates nonsynonymous SNPs in conserved pathway cores.",
-            "Positive-selection outliers map to pathway crosstalk nodes more than isolated reactions.",
-        ]
-    if any(k in ql for k in ("auction", "second-price", "private value", "revenue")):
-        return [
-            "Correlated private values reduce second-price revenue vs independent-value predictions.",
-            "Reserve-price optimization shifts bidder surplus more than mechanism choice in thin markets.",
-            "Revenue equivalence breaks when values share a common shock component.",
-            "Winner's curse appears in affiliated-value auctions with n < 20 bidders.",
-        ]
-    if any(k in ql for k in ("interbank", "cascade", "exposure", "market", "adoption", "referral")):
-        return [
-            "Interbank exposure cascades show heavier depth tails under fractional contagion than threshold models.",
-            "Referral-network adoption fits logistic growth better than exponential in early windows.",
-            "Network effects raise adoption curvature when central influencers connect otherwise sparse clusters.",
-            "Cascade depth scales with eigenvector centrality of the seed node in exposure graphs.",
-        ]
-    if any(k in ql for k in ("load balanc", "power-of-two", "latency", "tail latency")):
-        return [
-            "Power-of-two-choices assignment cuts p99 latency versus uniform random under bursty Poisson arrivals.",
-            "Join-shortest-queue reduces mean delay when service times are heavy-tailed.",
-            "Random assignment induces queue instability at ρ>0.9 before JSQ does on identical traces.",
-            "Affinity routing increases tail latency when hot keys concentrate on few servers.",
-        ]
-    if any(k in ql for k in ("power grid", "cascade failure", "bridge", "line graph")):
-        return [
-            "Cascade failures in toy power grids concentrate on bridges in the line graph.",
-            "High-degree buses trigger larger cascades than high-betweenness buses in IEEE test cases.",
-            "Removing top 5% edges by effective resistance reduces cascade size more than random edge cuts.",
-            "Islands after line outages correlate with cut-set size in the transmission graph.",
-        ]
-    if any(k in ql for k in ("tsp", "christofides", "approximation", "metric")):
-        return [
-            "2-approximation MST-doubling tour length exceeds Christofides by >10% on random Euclidean instances.",
-            "Christofides is within 5% of optimal on n ≤ 200 planar point sets.",
-            "Greedy insertion beats nearest-neighbor on uniform random points in the unit square.",
-            "Tour length scales linearly with √n for random Euclidean instances in dimension 2.",
-        ]
-    if any(k in ql for k in ("kuramoto", "synchronization", "fiedler", "spectral")):
-        return [
-            "Fiedler value (algebraic connectivity) correlates with Kuramoto synchronization time on RGG.",
-            "Higher spectral gap reduces phase dispersion at fixed coupling strength K.",
-            "Synchronization failure occurs below a critical K proportional to 1/λ2.",
-            "Degree-heterogeneous Kuramoto networks desynchronize when hub phases drift first.",
-        ]
-    if any(k in ql for k in ("bfs", "bidirectional", "shortest path")):
-        return [
-            "Bidirectional BFS visits fewer edges than unidirectional BFS on sparse graphs with diameter < 20.",
-            "Hub nodes inflate unidirectional frontier size on social-network-like graphs.",
-            "Bidirectional search wins when start and goal degrees are balanced.",
-            "Unidirectional BFS matches bidirectional cost only on expander-like graphs.",
-        ]
-    if "activation" in ql and "transformer" in ql:
-        return [
-            "GELU improves convergence stability over ReLU in transformer sequence classification.",
-            "SiLU reduces early gradient noise compared with ReLU under identical optimizer settings.",
-            "Activation choice changes time-to-target accuracy even when final loss is similar.",
-            "Smooth activations reduce variance of validation loss across random seeds.",
-        ]
-    if "warmup" in ql:
-        return [
-            "Learning-rate warmup improves final generalization, not only early-step stability.",
-            "Warmup benefit persists when early instability is controlled via gradient clipping.",
-            "Warmup particularly improves adaptive optimizer behavior by stabilizing moment estimates.",
-            "Delayed warmup underperforms immediate warmup on final validation metrics.",
-        ]
-    if "batch normalization" in ql or "pre-norm" in ql or "post-norm" in ql:
-        return [
-            "Pre-norm improves gradient flow robustness in noisy MLP training.",
-            "Post-norm converges faster initially but becomes less stable at high noise.",
-            "Pre-norm permits larger stable learning rates than post-norm under equal width/depth.",
-            "Norm placement interacts with depth more strongly than with width in noisy settings.",
-        ]
-    if any(k in ql for k in ("optimizer", "sgd", "adam", "adamw", "rmsprop", "adagrad")):
-        return [
-            "AdamW is the strongest overall optimizer across mixed loss-surface geometries.",
-            "RMSProp performs best on plateaus due to adaptive scaling of sparse gradients.",
-            "SGD with momentum gives better final loss on noisy landscapes than adaptive methods.",
-            "Adagrad leads early convergence on sparse problems but degrades in long runs.",
-        ]
-    # Last resort: anchor claims to question nouns (not ML templates).
-    snippet = " ".join(w for w in re.findall(r"[a-zA-Z]{5,}", question)[:6])
-    return [
-        f"A measurable structural pattern in {snippet or 'the stated domain'} is detectable with simulation or exact enumeration.",
-        f"Competing mechanisms for {snippet or 'the phenomenon'} make different predictions on held-out graph or number families.",
-        f"A parametric family in the question admits a boundary regime where the claimed effect reverses.",
-        f"Finite verification up to 10^4 distinguishes the main claim from a noise-only null model.",
-    ]
+    return []
 
 
 def _null_hypothesis_text(question: str) -> str:
@@ -228,13 +230,13 @@ def _null_hypothesis_text(question: str) -> str:
     )
 
 
-def _fallback_hypothesis_text(question: str, rank: int) -> str:
+def _fallback_hypothesis_text(question: str, rank: int, *, prior: Prior | None = None) -> str:
     """Discovery or control fallback without generic ML template phrasing."""
     if rank >= 5:
         null = _null_hypothesis_text(question)
         from propab.scoped_claim import enrich_entry_with_scope
         return enrich_entry_with_scope({"text": null}, question)["text"]
-    options = _domain_fallback_options(question)
+    options = _domain_fallback_options(question, prior=prior)
     text = options[(rank - 1) % len(options)]
     from propab.scoped_claim import enrich_entry_with_scope
     return enrich_entry_with_scope({"text": text}, question)["text"]
@@ -365,15 +367,21 @@ def _inject_discovery_fallbacks(
     question: str,
     max_hypotheses: int,
     min_discovery: int = 3,
+    prior: Prior | None = None,
 ) -> list[RankedHypothesis]:
-    """Ensure at least ``min_discovery`` discovery hypotheses survive the gate."""
+    """Ensure at least ``min_discovery`` discovery hypotheses survive the gate.
+
+    Injected seeds are marked ``is_fallback=1.0`` in their scores so downstream
+    consumers can distinguish a synthesized seed from an LLM-validated,
+    scope-checked hypothesis (G2: fallbacks must never masquerade as validated).
+    """
     from propab.research_quality import infer_node_role
 
     discovery = [h for h in kept if infer_node_role(h.text) != "CONTROL"]
     if len(discovery) >= min_discovery:
         return kept
     existing_texts = {strip_question_suffix(h.text) for h in kept}
-    options = _domain_fallback_options(question)
+    options = _domain_fallback_options(question, prior=prior)
     rank_base = len(kept) + 1
     for opt in options:
         if len(discovery) >= min_discovery:
@@ -390,7 +398,13 @@ def _inject_discovery_fallbacks(
                 test_methodology=(
                     "Test with statistical_significance, bootstrap_confidence, or finite enumeration."
                 ),
-                scores={"question_relevance": 0.5, "composite": 0.4, "scope_fit": 0.5},
+                scores={
+                    "question_relevance": 0.5,
+                    "composite": 0.4,
+                    "scope_fit": 0.5,
+                    "is_fallback": 1.0,
+                    "scope_fallback": 1.0,
+                },
                 rank=rank_base,
             )
         )
@@ -464,7 +478,7 @@ async def generate_ranked_hypotheses(
         if scope is None or not validate_scoped_claim(scope)[0]:
             used_fallback = True
             entry = enrich_entry_with_scope(
-                {"text": _fallback_hypothesis_text(parsed.text, rank), "id": raw_entry.get("id", f"h{rank}")},
+                {"text": _fallback_hypothesis_text(parsed.text, rank, prior=prior), "id": raw_entry.get("id", f"h{rank}")},
                 parsed.text,
                 allow_template_fill=False,
             )
@@ -475,7 +489,7 @@ async def generate_ranked_hypotheses(
         if not raw_text or _is_ml_template_hypothesis(raw_text):
             used_fallback = True
             entry = enrich_entry_with_scope(
-                {"text": _fallback_hypothesis_text(parsed.text, rank), "id": f"h{rank}"},
+                {"text": _fallback_hypothesis_text(parsed.text, rank, prior=prior), "id": f"h{rank}"},
                 parsed.text,
                 allow_template_fill=False,
             )
@@ -491,6 +505,9 @@ async def generate_ranked_hypotheses(
         scores_extra: dict[str, float] = {
             "scope_valid": 1.0 if entry.get("_scope_valid") else 0.0,
             "scope_fallback": 1.0 if used_fallback else 0.0,
+            # G2: a fallback seed is never an LLM-validated, on-topic hypothesis;
+            # mark it so downstream consumers cannot count it as validated.
+            "is_fallback": 1.0 if used_fallback else 0.0,
         }
 
         hypotheses.append(
@@ -545,14 +562,25 @@ async def generate_ranked_hypotheses(
                 "missing": scope_missing,
             })
             continue
-        if scope and is_boilerplate_scope(scope, parsed.text) and (h.scores or {}).get("scope_fallback") != 1.0:
-            rejected.append({
-                "id": h.id,
-                "text": core_text[:200],
-                "question_relevance_score": rel,
-                "reason": "boilerplate_scope",
-            })
-            continue
+        is_fallback = (h.scores or {}).get("scope_fallback") == 1.0 or (h.scores or {}).get("is_fallback") == 1.0
+        if scope and is_boilerplate_scope(scope, parsed.text):
+            if not is_fallback:
+                # A non-fallback (i.e. purportedly LLM-validated) hypothesis with
+                # verbatim template scope is a cosmetic gate bypass — reject it.
+                rejected.append({
+                    "id": h.id,
+                    "text": core_text[:200],
+                    "question_relevance_score": rel,
+                    "reason": "boilerplate_scope",
+                })
+                continue
+            # G2: a fallback with template scope may carry the campaign, but it
+            # MUST stay flagged so it cannot be counted as a validated,
+            # scope-checked, on-topic hypothesis downstream.
+            h.scores = dict(h.scores or {})
+            h.scores["is_fallback"] = 1.0
+            h.scores["boilerplate_scope"] = 1.0
+            h.scores["scope_valid"] = 0.0
         h.scores = dict(h.scores or {})
         h.scores["question_relevance"] = rel
         if rel >= threshold:
@@ -572,18 +600,26 @@ async def generate_ranked_hypotheses(
             question=parsed.text,
             max_hypotheses=max_hypotheses,
             min_discovery=min(3, max(1, max_hypotheses - 1)),
+            prior=prior,
         )
     else:
-        # Gate rejected everything — rebuild from domain fallbacks + null.
+        # Gate rejected everything — rebuild from domain-general fallbacks + null.
         hypotheses = []
         for idx in range(max_hypotheses):
             rank = idx + 1
             hypotheses.append(
                 RankedHypothesis(
                     id=f"h{rank}",
-                    text=_fallback_hypothesis_text(parsed.text, rank),
+                    text=_fallback_hypothesis_text(parsed.text, rank, prior=prior),
                     test_methodology="Test with statistical_significance or bootstrap_confidence.",
-                    scores={"composite": 0.4, "question_relevance": 0.45},
+                    # G2: rebuilt seeds are fallbacks, flagged so they are never
+                    # mistaken for validated LLM hypotheses.
+                    scores={
+                        "composite": 0.4,
+                        "question_relevance": 0.45,
+                        "is_fallback": 1.0,
+                        "scope_fallback": 1.0,
+                    },
                     rank=rank,
                 )
             )
@@ -600,6 +636,7 @@ async def generate_ranked_hypotheses(
             question=parsed.text,
             max_hypotheses=max_hypotheses,
             min_discovery=min(3, max(1, max_hypotheses - 1)),
+            prior=prior,
         )
 
     n_generated = max_hypotheses
