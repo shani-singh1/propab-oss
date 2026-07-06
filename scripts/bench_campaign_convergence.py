@@ -63,7 +63,7 @@ def _region(node) -> tuple[int, int]:
     return (int(m.group(1)), int(m.group(2))) if m else (10000, 50000)
 
 
-def run(*, generations: int = 60, seed: int = 0) -> dict:
+def run(*, generations: int = 40, seed: int = 0, node_cap: int = 90) -> dict:
     rng = random.Random(seed)
     tree = HypothesisTree()
     tree.set_scoring_context(QUESTION, [])
@@ -99,6 +99,8 @@ def run(*, generations: int = 60, seed: int = 0) -> dict:
         #    still-expandable node (the convergence move the LLM is told to make).
         #    Feed the REAL apply_synthesis_to_frontier so its real dedup + parent
         #    resolution + frontier insertion decide what survives.
+        if len(tree.nodes) >= node_cap:  # real campaigns have a hypothesis cap;
+            break                        # measure convergence within a fixed budget
         targets = [n for n in tree.nodes.values()
                    if n.verdict == "confirmed" and len(n.children) < 5 and n.depth < 8]
         cands = []
@@ -114,8 +116,11 @@ def run(*, generations: int = 60, seed: int = 0) -> dict:
             continue
         narrow_proposed += len(cands)
         parsed = {"beliefs": [], "frontier_candidates": cands, "direction_exhausted": False}
+        # PROD relevance threshold (0.35), not 0.0 — the benchmark must exercise
+        # the same gate production does, or it hides bugs (e.g. narrowing children
+        # being relevance-dropped; investigation report §6d).
         _got, metrics = apply_synthesis_to_frontier(
-            tree, state, parsed, question=QUESTION, generation=gen, relevance_threshold=0.0,
+            tree, state, parsed, question=QUESTION, generation=gen, relevance_threshold=0.35,
         )
         child_ct += int(metrics.get("n_added_as_children") or 0)
         root_ct += int(metrics.get("n_added_as_roots") or 0)
