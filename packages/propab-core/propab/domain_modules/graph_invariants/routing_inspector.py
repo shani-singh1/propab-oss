@@ -3,7 +3,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from propab.domain_modules.graph_invariants.adapter import KNOWN_INVARIANTS, GraphInvariantSpec
+from propab.domain_modules.graph_invariants.adapter import (
+    KNOWN_INVARIANTS,
+    GraphInvariantNotIdentified,
+    GraphInvariantSpec,
+)
 from propab.domain_modules.graph_invariants.verifier import run_graph_invariant_check
 
 ROUTING_CORPUS: list[dict[str, Any]] = [
@@ -31,7 +35,18 @@ ROUTING_CORPUS: list[dict[str, Any]] = [
 
 
 def inspect_routing(hypothesis: dict[str, Any], *, dry_run_experiment: bool = True) -> dict[str, Any]:
-    spec = GraphInvariantSpec.from_hypothesis(hypothesis)
+    try:
+        spec = GraphInvariantSpec.from_hypothesis(hypothesis)
+    except GraphInvariantNotIdentified as exc:
+        # DOM4: no graph invariant identified — refuse rather than default-route.
+        return {
+            "domain": "graph_invariants",
+            "resolved_verifier": "graph_invariant_lofo",
+            "resolved_invariants": [],
+            "expected_metric_name": "invariant_correlation",
+            "routing_ok": False,
+            "error": str(exc),
+        }
     invalid = [x for x in (spec.source_invariant, spec.target_invariant) if x not in KNOWN_INVARIANTS]
     routing_ok = not invalid
     out: dict[str, Any] = {
