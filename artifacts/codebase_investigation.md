@@ -272,6 +272,73 @@ Concrete plan for that layer (to be validated before/while implementing):
 4. Validate on a real math_combinatorics campaign (the numerical-crossing path
    just committed is the cleanest place to measure depth growth).
 
+## 6b. Convergence issue HUNT (deep, "no campaign until quantified & fixed")
+
+Mandate reset: no live campaigns; each layer must be **substantially improved AND
+quantified** before moving on, and this layer must never be the culprit for a
+failed campaign. Hunting every convergence-killer, not just the frontier score.
+
+**[VERIFIED — MAJOR] The duplicate filter rejects the narrowing move itself.**
+`_is_duplicate_frontier_candidate` rejects any candidate ≥`FRONTIER_DEDUP_SIMILARITY`
+(0.85) text-similar to any existing node (exempting only the *direct* parent).
+`text_similarity = max(full_text, dedup_key)` and `_dedup_key` = the first-line
+claim title. A scope-narrowing child differs from its parent/siblings ONLY in the
+specific region/value, so it is ~0.85–0.96 similar. **Measured** (realistic Q1
+threshold-sweep texts): parent~child 0.847, **child~sibling 0.963 → REJECTED**.
+So the search can add ONE narrowing child but not a *sequence* of them refining a
+region — it structurally cannot do progressive (log-style) narrowing of a
+confirmed finding. This is a prime, quantified root cause of "campaigns run but
+never converge," independent of the frontier-score fix (§3.3): even with the
+frontier *preferring* to deepen, dedup deletes the deeper candidates. **Fix
+direction:** make dedup scope/parameter-aware — two textually-similar candidates
+whose numeric/scope discriminators DIFFER are distinct experiments, not
+duplicates; only reject true rephrasings (same claim AND same discriminators).
+
+**[OK] Branch exhaustion is reasonably guarded.** `record_synthesis_exhaustion`
+sets exhausted only when `check_exhaustion()` (all active beliefs unclear / none)
+AND the LLM's self-reported `direction_exhausted` are BOTH true, for
+`EXHAUSTION_ROUNDS_REQUIRED`=3 consecutive rounds. Not a silent no-candidates
+trap. (But it compounds the dedup bug: if dedup keeps deleting narrowing
+candidates, rounds add nothing and beliefs can drift to "unclear," nudging toward
+exhaustion — so the dedup fix also protects exhaustion.)
+
+## 6c. The convergence NUMBER (offline benchmark on real code)
+
+`scripts/bench_campaign_convergence.py` drives the **real** convergence code
+(`apply_synthesis_to_frontier` → real dedup + parent resolution + frontier
+insertion; real `next_batch`/`_information_gain_score`; real `update_node`) with
+a mock LLM (schema-valid narrowing candidates) + mock verdict. 10 seeds. This is
+the layer's leading number — no live campaigns needed.
+
+| metric | before hunt | after fixes | meaning |
+|---|---|---|---|
+| narrowing-dedup reject rate | 0.323 | **0.022** | fraction of narrowing moves the dedup deleted |
+| max confirmed-lineage depth | 1.1 | **1.9** | how deep a real finding gets narrowed |
+| confirmed nodes | 1.3 | **3.9** | search no longer halts after ~2 waves |
+| silent candidate drops | present | **0** | every proposed candidate is accounted for |
+
+**Issues found & fixed this hunt:** frontier deprioritized deepening (§3.3, fixed
++ metric); scope-blind dedup deleted the narrowing sequence and starved the
+frontier (§6b, THE dominant killer — fixed, scope/parameter-aware); silent
+candidate drops (validate_scoped_claim / relevance `continue`s incremented no
+metric — fixed, now `n_rejected_invalid_scope`/`n_rejected_low_relevance`).
+
+**Still to hunt before this layer is "won't be the culprit" (NOT done yet):**
+1. Depth plateau: benchmark `max_depth` is flat vs budget — after the dedup fix
+   the trace reaches depth 3, but need to confirm nothing caps a *single lineage*
+   short (e.g. `format_expansion_targets` `children<5` + sort-by-fewest-children
+   may steer the LLM off a deep node once it has a couple children; the depth<8
+   cap; the expansion merit gate `info_gain_min`).
+2. Minor benchmark over-count (+1–2): a degenerate deep region can hit two reject
+   buckets — confirm it's benign, not a real double-count in production.
+3. Not-yet-hunted convergence gates: theme-monoculture forcing, hypothesis-cap
+   termination behaviour, `_question_relevance` on deep narrow children (could
+   silently down-rank legitimate deep tests), and whether `entropy_trajectory`
+   steers or only reports.
+4. Non-numeric narrowing: scope-aware dedup currently keys on *numbers*; biology
+   sub-population narrowing (no distinct numbers) still falls back to text dedup —
+   generalize to scope-term discriminators.
+
 ## 7. Convergence fix — iteration log (branch `campaign-convergence`)
 
 **Iter 1 [DONE] — frontier now deepens confirmed findings (§3.3).**
