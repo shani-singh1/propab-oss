@@ -296,6 +296,32 @@ a generic domain gets: no artifact vocabulary (gate has nothing domain-specific)
 no numerical-seed compounding, no scope templates → the scope/OOD gates degrade to
 no-ops. Verify each isn't silently disabling a check that then reports "passed."
 
+## LAYER 6 — Hypothesis generation (the starting frontier) [partial]
+
+Files: `hypotheses.py` (627), `seed_validation.py`, `hypothesis_ranking.py`,
+`anomaly_seeds.py`. The seeds are the campaign's initial frontier — bad seeds ⇒
+bad campaign.
+
+**G1 · HIGH · OPEN · VERIFIED — the "domain fallback" seed generator is a
+hardcoded keyword→canned-hypotheses lookup for ~5 demo topics.**
+`_domain_fallback_options` (hypotheses.py:32) matches the question against literal
+keyword lists (`egyptian`/`unit fraction`, `collatz`, `prime gap`,
+`contagion`/`sir`/`sis`, …) and returns 3-4 fully-written hypotheses per known
+topic; **any question outside these returns `[]`.** So seed quality is a cliff:
+excellent for the handful of demo questions this was tuned on, empty for anything
+else (falling through to `_fallback_hypothesis_text`, a generic template). This is
+another facet of the CENTRAL THESIS — the system looks domain-general but is
+tuned to specific demo research questions. For a genuinely new question the
+campaign starts from weak/empty seeds. **Fix:** generation must not depend on a
+hardcoded topic table; the LLM path + literature prior should carry unknown
+domains, and the fallback should be domain-shape-driven, not keyword-driven.
+
+**G2 · PENDING — question-relevance gate + scope-fallback honesty.** `used_fallback`
+/ `scope_fallback` paths substitute template text when the LLM output fails scope
+validation; verify these don't quietly inject boilerplate that then passes as a
+real hypothesis (the `is_boilerplate_scope` check at line 548 suggests this failure
+mode is known — confirm it's fully closed).
+
 ## LAYERS PENDING DEEP AUDIT (loop continues — do not treat absence as clean)
 
 Each gets the same four-lens read (bugs / arch flaws / dishonest components /
