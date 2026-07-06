@@ -107,7 +107,7 @@ from services.orchestrator.hypothesis_ranking import (
     strip_question_suffix,
 )
 from services.orchestrator.hypotheses import _is_ml_template_hypothesis
-from services.orchestrator.intake import parse_question
+from services.orchestrator.intake import ParsedQuestion, parse_question
 from services.orchestrator.lifetime_knowledge import (
     enrich_prior_from_lifetime,
     ingest_campaign,
@@ -119,6 +119,7 @@ from propab.layer05.simulation_fitness_ledger import SimulationFitnessLedger
 from propab.policy_fitness_ledger import PolicyFitnessLedger
 from services.orchestrator.policy_analyst import llm_policy_analyst
 from services.orchestrator.literature import build_prior
+from services.orchestrator.literature_client import build_prior_via_service
 from services.orchestrator.paper import _session_experiment_step_count, write_paper_minimal
 from services.orchestrator.schemas import Prior
 from services.worker.peer_findings import build_peer_finding_payload, publish_peer_finding
@@ -250,6 +251,48 @@ def _resolve_synthesis_domain_id(campaign: ResearchCampaign, parsed_domain: str 
     if m:
         return m.group(1).lower()
     return parsed_domain
+
+
+async def _build_campaign_prior(
+    parsed: ParsedQuestion,
+    *,
+    campaign: ResearchCampaign,
+    emitter: EventEmitter,
+    session_factory: async_sessionmaker,
+    llm: LLMClient,
+) -> Prior:
+    """Build the campaign's literature prior.
+
+    Uses the NEW dedicated literature service (``services/literature/``) when
+    ``settings.literature_service_url`` is set — resolving the campaign's domain
+    plugin so its ``literature_profile()`` reaches the service, and falling back
+    to the OLD embedded ``build_prior`` inside ``build_prior_via_service`` on any
+    service failure. When the URL is empty, uses the OLD embedded path directly
+    (backward compatible).
+    """
+    if settings.literature_service_url:
+        from propab.domain_modules.registry import resolve_domain_plugin
+
+        domain_plugin = resolve_domain_plugin(
+            question=campaign.question,
+            payload={"domain_profile": getattr(campaign, "domain_profile", None)},
+        )
+        return await build_prior_via_service(
+            parsed,
+            session_id=campaign.id,
+            emitter=emitter,
+            session_factory=session_factory,
+            llm=llm,
+            domain_plugin=domain_plugin,
+        )
+    return await build_prior(
+        parsed,
+        session_id=campaign.id,
+        emitter=emitter,
+        session_factory=session_factory,
+        paper_ttl_days=30,
+        llm=llm,
+    )
 
 
 def _apply_result_diagnostics(
@@ -1823,11 +1866,9 @@ async def run_campaign_loop(
             )
             try:
                 prior = await asyncio.wait_for(
-                    build_prior(
-                        parsed, session_id=campaign.id, emitter=emitter,
-                        session_factory=session_factory,
-                        paper_ttl_days=30,
-                        llm=llm,
+                    _build_campaign_prior(
+                        parsed, campaign=campaign, emitter=emitter,
+                        session_factory=session_factory, llm=llm,
                     ),
                     timeout=prior_timeout,
                 )

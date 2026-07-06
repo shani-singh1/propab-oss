@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     # services/literature/ — standalone literature intelligence microservice (Agent 3).
     # Optional: campaigns fall back to each domain plugin's literature_prior() when unset.
     literature_service_url: str = ""
+    # httpx timeout (seconds) for calls to the literature service /prior endpoint.
+    # Prior-building can be slow (fetch + extract + synthesize), so this is generous.
+    literature_service_timeout_sec: float = 600.0
+    # Retrieval depth requested from the literature service (standard|deep|exhaustive).
+    literature_service_depth: str = "standard"
     sub_agent_plan_source: str = "llm"
     sub_agent_max_planned_steps: int = 6
     sub_agent_max_rounds: int = 4
