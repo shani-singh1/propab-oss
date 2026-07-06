@@ -48,6 +48,31 @@ def test_dedup_allows_scope_narrowing_but_rejects_rephrasing() -> None:
     assert dup2 is True
 
 
+def test_dedup_allows_nonnumeric_subpopulation_narrowing() -> None:
+    """Scope-aware dedup must also handle NON-numeric narrowing (a biology
+    sub-population), where the claim title is unchanged (text ~identical) and only
+    the Population/Distribution lines differ. Judged on parameters, not text, so
+    the sub-population refinement survives while a same-scope rephrasing is a dup."""
+    from propab.belief_state import CampaignBeliefState
+    from propab.campaign_synthesis import _is_duplicate_frontier_candidate
+    from propab.hypothesis_tree import HypothesisTree
+
+    tree = HypothesisTree()
+    tree.add_seeds([{"text": "Thermal features predict RT activity.\n"
+                             "Population: RT enzymes\nDistribution: mandrake 7 families\n"
+                             "Claimed generalization: cross-family\nExpected failure modes: leakage\n"
+                             "OOD test: LOFO", "test_methodology": "x"}], generation=0)
+    st = CampaignBeliefState()
+    narrow = ("Thermal features predict RT activity.\n"
+              "Population: thermophilic RT enzymes\nDistribution: mandrake 3 thermophilic families\n"
+              "Claimed generalization: within-thermophile\nExpected failure modes: leakage\nOOD test: LOFO")
+    rephrase = ("Thermal descriptors predict RT enzyme activity.\n"
+                "Population: RT enzymes\nDistribution: mandrake 7 families\n"
+                "Claimed generalization: cross-family\nExpected failure modes: leakage\nOOD test: LOFO")
+    assert _is_duplicate_frontier_candidate(narrow, tree, st, same_round_texts=[])[0] is False
+    assert _is_duplicate_frontier_candidate(rephrase, tree, st, same_round_texts=[])[0] is True
+
+
 def test_deepening_confirmed_bypasses_type_diversity_force() -> None:
     """The anti-monoculture type-diversity force must NOT reject the narrowing of
     a CONFIRMED finding — deepening one finding is inherently single-type and is

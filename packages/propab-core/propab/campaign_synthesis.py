@@ -44,6 +44,20 @@ def _dedup_key(text: str) -> str:
 
 
 _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+_SCOPE_LINE_RE = re.compile(r"^\s*(population|distribution|claimed generalization)\s*:\s*(.+)$", re.I | re.M)
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _scope_signature(text: str) -> frozenset[str]:
+    """Content tokens of the scope lines (Population / Distribution / Claimed
+    generalization). Two candidates that narrow along a NON-numeric axis (e.g. a
+    biology sub-population: 'RT enzymes' → 'thermophilic RT enzymes') differ in
+    these lines even with no distinct numbers, so this is the general parameter
+    fingerprint that complements ``_numeric_signature`` for non-math domains."""
+    toks: set[str] = set()
+    for _label, content in _SCOPE_LINE_RE.findall(text or ""):
+        toks.update(_WORD_RE.findall(content.lower()))
+    return frozenset(toks)
 
 
 def _numeric_signature(text: str) -> frozenset[str]:
@@ -85,16 +99,25 @@ def _text_similarity_ge(a_norm: str, a_key: str, b_text: str, floor: float) -> f
     return max(full, core)
 
 
-def _distinct_parameters(cand_nums: frozenset[str], existing_text: str, similarity: float) -> bool:
+def _distinct_parameters(
+    cand_nums: frozenset[str], existing_text: str, similarity: float, cand_scope: frozenset[str] = frozenset()
+) -> bool:
     """True when a textually-similar candidate is actually a DISTINCT experiment
-    (different numeric parameters) — a narrowing step, not a rephrasing — so it
-    must NOT be dropped as a duplicate. Near-identical text (≥0.98) is treated as
-    a true duplicate regardless, so exact rephrasings still can't flood the tree;
-    non-numeric claims (either side has no numbers) fall back to text dedup."""
-    if similarity >= 0.98:
-        return False
+    — a narrowing step, not a rephrasing — so it must NOT be dropped as a
+    duplicate. Distinctness is judged on the PARAMETER fingerprint, not the text:
+    different NUMBERS (math threshold sweeps) OR a meaningfully different SCOPE
+    (non-numeric narrowing, e.g. biology sub-populations). Judging on parameters
+    rather than text is load-bearing: a narrowing child often keeps the same
+    first-line claim title (so text similarity ≈ 1.0) and differs only in its
+    Population/Distribution lines — a text-only guard wrongly rejected exactly
+    that. Same parameters ⇒ same experiment (a rephrasing) ⇒ not distinct."""
+    _ = similarity
     other_nums = _numeric_signature(existing_text)
-    return bool(cand_nums) and bool(other_nums) and cand_nums != other_nums
+    if cand_nums and other_nums and cand_nums != other_nums:
+        return True
+    other_scope = _scope_signature(existing_text)
+    # a meaningful scope difference (not just one incidental token) = distinct
+    return bool(cand_scope) and bool(other_scope) and len(cand_scope ^ other_scope) >= 2
 
 
 def _is_duplicate_frontier_candidate(
@@ -107,6 +130,7 @@ def _is_duplicate_frontier_candidate(
     threshold: float = FRONTIER_DEDUP_SIMILARITY,
 ) -> tuple[bool, str]:
     cand_nums = _numeric_signature(text)
+    cand_scope = _scope_signature(text)
     a_norm = _norm_text(text)
     a_key = _dedup_key(text)
     floor = min(threshold, 0.98)
@@ -116,13 +140,13 @@ def _is_duplicate_frontier_candidate(
         similarity = _text_similarity_ge(a_norm, a_key, existing_text, floor)
         if allowed_parent_id and existing_id == allowed_parent_id and similarity < 0.98:
             continue
-        if similarity >= threshold and _distinct_parameters(cand_nums, existing_text, similarity):
+        if similarity >= threshold and _distinct_parameters(cand_nums, existing_text, similarity, cand_scope):
             continue
         if similarity >= threshold:
             return True, f"tree_node:{existing_id}"
     for sibling in same_round_texts:
         sim = _text_similarity_ge(a_norm, a_key, sibling, floor)
-        if sim >= threshold and _distinct_parameters(cand_nums, sibling, sim):
+        if sim >= threshold and _distinct_parameters(cand_nums, sibling, sim, cand_scope):
             continue
         if sim >= threshold:
             return True, "same_round_sibling"
