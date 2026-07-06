@@ -635,7 +635,7 @@ min_steps) gets a correction prompt, then `_fallback_significance_action`. So it
 silent empty trace in the main path; residual risk is only the pre-min_steps early-stop.
 Real but LOW-MED. **Fix:** treat unparseable decisions as error/retry, not implicit stop.
 
-**CFG5 · MED · VERIFIED — `embed_model` default assumes OpenAI, mismatches gemini.**
+**CFG5 · MED · FIXED (fix/cfg5-embed-default, merged+verified: `resolve_embed_model` rewrites the OpenAI cross-provider default to `gemini-embedding-2` for gemini/google, with a loud warning; 9 tests) — WAS: `embed_model` default assumes OpenAI, mismatches gemini.**
 `config.py:32` `embed_model="text-embedding-3-small"` (OpenAI id) but `embeddings.py:64`
 routes gemini/google to `_google_embed`. A gemini deployment that doesn't override
 `EMBED_MODEL` sends an OpenAI id to the Google endpoint → 400/throw → callers catch
@@ -656,10 +656,10 @@ sanity-checked). Baselines established so far (verified by me — read + ran):
 | Literature | LitQA2 eval | accuracy | **0.76–0.78** (n=100) | done |
 | Convergence | `scripts/bench_campaign_convergence.py` | confirmed-lineage depth / narrow-reject | **3.2 / 0.001** | done |
 | Verdict | `bench/bench_verdict.py` | **false-confirm rate** / recall | **0.0 / 1.0** (clean) | ✓ ran |
-| Evidence-binding | `bench/bench_binding.py` | precision / recall | **0.5 / 1.0** | ✓ ran |
+| Evidence-binding | `bench/bench_binding.py` | precision / recall | **0.5 → 1.0 / 1.0** (BND1 FIXED) | ✓ ran |
 | Generation | `bench/bench_generation.py` | dup-pass / off-topic-reject | **0.0 / 1.0** (filters clean) | ✓ ran |
 
-**BND1 · MED · VERIFIED (via bench) — binding accepts cross-domain supporters →
+**BND1 · MED · FIXED (fix/bnd1-binding-precision, merged+verified: I re-ran the bench myself — precision 0.5→1.0, recall held 1.0, false-accepts 5→0; subject-discriminating overlap via `_RELATIONSHIP_TERMS` stoplist + guarded `_subject_mismatch` veto; 22 tests) — WAS: binding accepts cross-domain supporters →
 precision 0.5.** The binding benchmark shows recall 1.0 in ALL five domains (A4
 domain-generality confirmed) but precision 0.5: irrelevant + fabricated citations
 are cleanly rejected (0/5 each), yet all 5 "genuine-for-a-different-subject"
@@ -697,7 +697,7 @@ appearance of support with zero executable verification. Central-thesis-in-minia
 **Fix:** `_enforce_domain_preflight` must fail-closed when a domain PROFILE resolves
 but no plugin owns it (or require every profile to have a verifying plugin).
 
-**DOM2 (was L7-2) · HIGH · VERIFIED (read myself) — three demo domains "confirm"
+**DOM2 (was L7-2) · HIGH · FIXED-labeling (fix/dom2-synthetic-provenance, merged+verified: `uses_synthetic_data()` flag flows adapter→`data_provenance` on evidence→paper labels "synthetic dataset (illustrative)" in table/narrative/methods; `_effective_verdict` untouched; 28 tests incl honesty regression). RESIDUAL OPEN: the graph_invariants `modularity=0.25·clustering+…` TAUTOLOGY (a real generator flaw, labeling doesn't fix it) — track as DOM2b. WAS: three demo domains "confirm"
 findings on SYNTHETIC seed-42 data presented as real datasets; one is a tautology.**
 `genomics/adapter.py` (`_synthetic_gtex_frame`, used unconditionally, meta
 `synthetic:True`) presents as "GTEx v8 subset"; `graph_invariants/adapter.py`
@@ -712,7 +712,7 @@ as real.) **Fix:** surface synthetic-data provenance into the verdict/paper and
 downgrade/flag, or load real datasets; never present a seed-42 confirmation as a
 real-dataset finding.
 
-**DOM3 (was L7-3) · MED · VERIFIED-by-auditor (unchanged file; ran matchers) — routing
+**DOM3 (was L7-3) · MED · FIXED (fix/dom3-routing-confidence, merged+verified: `match_score` count-of-markers; `resolve_domain_plugin` picks MAX not first; ambiguity warning on near-tie; explicit-tag fast path preserved; 25 tests) — WAS: routing
 collisions resolve by REGISTRATION ORDER, no confidence.** `registry.py` `resolve_domain_plugin`
 returns the FIRST plugin whose `matches()` is True. A question with both combinatorics
 and graph terms fires `graph_invariants` AND `math_combinatorics` → silently routes to
