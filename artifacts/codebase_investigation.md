@@ -535,7 +535,8 @@ only `state_dict` ref in the tools tree is the READ in inspect_gradients). Any
 gradient-health/eval claim on a "trained" model is meaningless. **Fix:** persist
 weights (or retrain deterministically) before inspection.
 
-**TOOL3 · HIGH · LIKELY (auditor VERIFIED; I spot-read evaluate_model, trust the rest)
+**TOOL3/TOOL4 · HIGH/MED · FIXED (fix/tool34-algo-honesty, merged+verified: benchmark_algorithm + compare_implementations now return success=False — core has no safe sandbox to execute agent code, so they refuse rather than emit name-hash timing / hardcoded all_correct / broken complexity; 5 tests). Original finding below.**
+**TOOL3 · HIGH · (was LIKELY; auditor VERIFIED; I spot-read evaluate_model, trust the rest)
 — `benchmark_algorithm` and `compare_implementations` IGNORE the agent's code/inputs
 and emit confident fake results.** `compare_implementations.py:39-100`: ignores
 `implementations`/`test_inputs`; times a fixed matmul seeded by the impl NAME hash;
@@ -584,7 +585,7 @@ A masking test inserts a `refuted` Claim that production never creates. **Fix:**
 denominators from confirmed + matching `graph.failures`. (TODO: confirm add_claim only
 ever gets confirmed — I verified the rate math + established_fact filter, not the caller.)
 
-**LL2 · HIGH · LIKELY — learned policy knobs never steer live dispatch.** Live dispatch
+**LL2 · HIGH · FIXED (fix/ll2-policy-dispatch, merged+verified: `_information_gain_score` applies a bounded per-theme multiplier from the loaded policy — theme_weight clamped to [0.1,2.0]→±15%, +0.75 for blocked signatures; campaign_loop threads `search_policy` into `set_scoring_context`; convergence bench UNCHANGED depth 3.2; I finished the agent's partial work + added a defensive clamp + 4 tests) — WAS: learned policy knobs never steer live dispatch.** Live dispatch
 (`next_dispatch_candidate`→`_information_gain_score`) never references the `SearchPolicy`;
 only `saturated_themes` COUNT nudges one global scalar (`campaign_loop.py:1725`).
 `theme_boost`/per-theme `theme_penalty`/`blocked_failure_signatures`/
@@ -605,7 +606,8 @@ time) or a mixed-version deploy. The Postgres/meta-ledger loaders DO field-filte
 path was missed. **Fix:** field-filter in `from_dict`; on load error, log loudly and
 REFUSE to overwrite (fail closed).
 
-**LL5 · MED · LIKELY — theory objects hardcoded to the contagion/network domain.**
+**LL5/LL6 · MED/LOW-MED · FIXED (fix/ll5-ll6-lifetime-honesty, merged+verified: LL5 theory names/assumptions domain-neutral — contagion framing only for genuine network-diffusion themes; LL6 `established_fact_texts` gates on T2+ replication OR confidence≥0.6 and carries campaign_id/claim provenance not []; 14 tests). Original finding below.**
+**LL5 · MED · (was LIKELY) — theory objects hardcoded to the contagion/network domain.**
 `theory_objects.py:24-33`: `name=f"{theme}_contagion_theory"`, assumption "Competing
 diffusion models apply", injected into EVERY future campaign's prior via
 `enrich_prior_from_lifetime`. A materials/number-theory campaign gets contagion-framed
