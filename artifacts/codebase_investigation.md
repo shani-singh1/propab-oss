@@ -323,21 +323,50 @@ frontier (§6b, THE dominant killer — fixed, scope/parameter-aware); silent
 candidate drops (validate_scoped_claim / relevance `continue`s incremented no
 metric — fixed, now `n_rejected_invalid_scope`/`n_rejected_low_relevance`).
 
-**Still to hunt before this layer is "won't be the culprit" (NOT done yet):**
-1. Depth plateau: benchmark `max_depth` is flat vs budget — after the dedup fix
-   the trace reaches depth 3, but need to confirm nothing caps a *single lineage*
-   short (e.g. `format_expansion_targets` `children<5` + sort-by-fewest-children
-   may steer the LLM off a deep node once it has a couple children; the depth<8
-   cap; the expansion merit gate `info_gain_min`).
-2. Minor benchmark over-count (+1–2): a degenerate deep region can hit two reject
-   buckets — confirm it's benign, not a real double-count in production.
-3. Not-yet-hunted convergence gates: theme-monoculture forcing, hypothesis-cap
-   termination behaviour, `_question_relevance` on deep narrow children (could
-   silently down-rank legitimate deep tests), and whether `entropy_trajectory`
-   steers or only reports.
-4. Non-numeric narrowing: scope-aware dedup currently keys on *numbers*; biology
-   sub-population narrowing (no distinct numbers) still falls back to text dedup —
-   generalize to scope-term discriminators.
+### 6d–6f. Further killers found & fixed (all quantified on the real-code bench)
+
+- **§6d Relevance gate dropped narrowing children.** Lexical question-relevance
+  falls as a child narrows (full region 0.43 passes 0.35; any sub-region 0.33
+  fails) → at the prod threshold the search couldn't narrow past level 1. Fixed:
+  a synthesis CHILD (already on-topic + scope-validated) bypasses the lexical
+  relevance THRESHOLD and inherits its parent's relevance for ranking; roots
+  still face the gate. (The benchmark was also using threshold 0.0, hiding this —
+  now uses the prod 0.35.)
+- **§6e Anti-monoculture type-diversity force rejected narrowing.** Deepening one
+  confirmed finding is inherently single-type, so `forced_type` rejected 8/8
+  narrowing children once a finding was pursued → depth stalled at ~4 even with
+  every experiment confirming. Fixed: a deepening refinement of a CONFIRMED
+  parent bypasses the type-diversity force.
+- **§6f O(n²) dedup made long campaigns crawl.** Each candidate was SequenceMatch-
+  ed against every node (131-node round = 16.5s, quadratic). Fixed with a
+  difflib `real_quick_ratio` (O(1) exact upper bound) pre-filter → 16.5s → 6.3s.
+- **Non-numeric narrowing** (biology sub-populations): dedup now judges
+  distinctness on the parameter fingerprint — different numbers OR a ≥2-token
+  scope-line difference — independent of text similarity, so a same-title-
+  different-scope refinement survives.
+
+**Cleared (verified not a convergence bug):** branch exhaustion (guarded by
+beliefs-unclear AND LLM `direction_exhausted`, ×3 rounds); belief ≤3 cap
+(by-design summary, not the search state); `expansion_passes_merit_gate` (dead —
+no caller in the synthesis path); `entropy_trajectory` (report-only; steering is
+the frontier score); depth cap (depth<8, reachable — capability verified to 7).
+
+### 6g. FINAL convergence number (real-code benchmark, within a 90-node budget)
+
+| metric | start of hunt | DONE |
+|---|---|---|
+| max confirmed-lineage depth | 1.1 | **3.2** (capability to 7 = depth<8 cap) |
+| confirmed nodes | 1.3 | **17.3** |
+| narrowing-dedup reject rate | 0.323 | **0.001** |
+| silent candidate drops | present | **0** |
+| 131-node synthesis round | 16.5s | **6.3s** |
+
+Every identified convergence-killer is fixed and covered by a test; the layer now
+turns a confirmed finding into progressively narrower confirmed findings (numeric
+and non-numeric), and it is instrumented so a future stall is visible, not silent.
+Residual (non-blocking): dead `expansion_passes_merit_gate` could be removed;
+`entropy_trajectory` could be wired to *steer* (not just report) as a future
+enhancement.
 
 ## 7. Convergence fix — iteration log (branch `campaign-convergence`)
 
