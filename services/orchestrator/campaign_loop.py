@@ -151,6 +151,18 @@ def _campaign_ledger_from_tree(tree: HypothesisTree) -> dict[str, Any]:
     }
 
 
+def confirmed_findings_count(campaign: "ResearchCampaign") -> int:
+    """The honest, paper-reported count of confirmed findings for O3 signalling.
+
+    ``campaign.total_confirmed`` is the number of distinct confirmed *discovery*
+    nodes (controls excluded), kept fresh by ``recount_from_tree`` — the same count
+    the paper abstract and DB present. This is the honest "did we confirm anything
+    the paper reports" number, so a zero here means the run produced no verified
+    result even though it finalizes with a normal stop reason.
+    """
+    return int(getattr(campaign, "total_confirmed", 0) or 0)
+
+
 def _prior_snippets(prior_dict: dict[str, Any]) -> list[str]:
     snippets: list[str] = []
     for f in prior_dict.get("established_facts") or []:
@@ -371,7 +383,7 @@ def _coerce_scalar_float(val: Any) -> float | None:
             if isinstance(x, (int, float)):
                 return float(x)
         except Exception:
-            return None
+            return None  # deliberately best-effort: non-numeric .item() → no scalar
     return None
 
 
@@ -504,7 +516,7 @@ def _extract_primary_metric_from_worker_result(result: dict, metric_name: str) -
             if got is not None:
                 return got
         except ValueError:
-            pass
+            pass  # deliberately best-effort: unparseable scalar → try next pattern
     matches = re.findall(r"(?:val_accuracy|accuracy|test_accuracy)[^\d]*([0-9]+\.?[0-9]*)", text_blob)
     if matches:
         try:
@@ -512,7 +524,7 @@ def _extract_primary_metric_from_worker_result(result: dict, metric_name: str) -
             if got is not None:
                 return got
         except ValueError:
-            pass
+            pass  # deliberately best-effort: unparseable scalar → give up (return None)
     return None
 
 
@@ -730,7 +742,16 @@ Return JSON only:
             )
             json_match = re.search(r"\{.*\}", raw, re.DOTALL)
             config = json.loads(json_match.group()) if json_match else {}
-        except Exception:
+        except Exception as cfg_exc:
+            # Fall back to defaults, but make the failure visible: a silently empty
+            # config means the baseline ran with fallback dataset/metric/steps, which
+            # would otherwise look like an intentional configuration.
+            logger.warning(
+                "[campaign %s] baseline config LLM/JSON parse failed (%s) — "
+                "using default dataset/metric/n_steps for the baseline experiment.",
+                campaign.id,
+                cfg_exc,
+            )
             config = {}
 
     metric_name = _normalize_metric_name(
@@ -1367,7 +1388,7 @@ async def _iter_campaign_pipelined_results(
         try:
             await _redis.close()
         except Exception:
-            pass
+            pass  # deliberately best-effort: connection teardown errors are irrelevant
 
     for item in pending:
         yield {
@@ -1402,7 +1423,7 @@ async def _try_salvage_paper(
         try:
             campaign.recount_from_tree()
         except Exception:
-            pass
+            pass  # deliberately best-effort: salvage proceeds with existing counts
         await db_set_research_session_stage(campaign.id, session_factory, stage="campaign.paper")
         synthesis = build_campaign_synthesis_payload(campaign)
         await write_paper_minimal(
@@ -1471,7 +1492,12 @@ async def _enforce_domain_preflight(
     try:
         await db_mark_research_session_failed(campaign.id, session_factory)
     except Exception:
-        pass
+        # Make it visible: if this fails the session row is stuck 'running' after a
+        # preflight block, which otherwise looks like a live campaign that stalled.
+        logger.exception(
+            "[campaign %s] mark-failed after preflight-block failed — session row may stay 'running'",
+            campaign.id,
+        )
     await emitter.emit(
         session_id=campaign.id,
         event_type=EventType.CAMPAIGN_BUDGET_EXHAUSTED,
@@ -2202,6 +2228,7 @@ async def run_campaign_loop(
         # Ownership-contracts per-campaign health metrics: worker experiment
         # success rate + worker utilization onto research_campaigns, and the
         # artifact-gate precision (confirmed findings backed by a null test).
+        _confirmed, _survived = 0, 0  # raw tree audit counts (populated below)
         try:
             from propab.health_metrics import (
                 compute_confirmed_audit_counts,
@@ -2225,6 +2252,31 @@ async def run_campaign_loop(
                 )
         except Exception:  # noqa: BLE001 — metric logging must never break a campaign
             logger.exception("[campaign %s] campaign-end health logging failed", campaign.id)
+
+        # ── O3: honest "finalized with zero confirmed findings" signal ──────
+        # A campaign that confirmed nothing still finalizes with a normal-looking
+        # stop reason and writes a paper, so a broken run presents as a completed
+        # one. Layer an explicit, queryable signal on top of the existing stop
+        # reason (this does NOT change control flow or the stop-reason enum — it is
+        # purely additive observability, and it fires under EVERY normal stop
+        # reason). ``total_confirmed`` is the paper-reported number (distinct
+        # confirmed *discovery* nodes, controls excluded, kept fresh by
+        # ``recount_from_tree`` in the result loop) — the same count the paper
+        # abstract and DB present, hence the honest one. The raw tree audit count
+        # (all confirmed nodes, incl. controls) is logged alongside for context.
+        n_confirmed_findings = confirmed_findings_count(campaign)
+        finalized_without_findings = n_confirmed_findings == 0
+        if finalized_without_findings:
+            logger.warning(
+                "[campaign %s] FINALIZED WITH ZERO CONFIRMED FINDINGS "
+                "(stop_reason=%s, total_hypotheses=%s, tree_confirmed_nodes=%s) — "
+                "a paper will be written but the campaign confirmed nothing; "
+                "this run produced no verified result.",
+                campaign.id,
+                campaign.stop_reason,
+                getattr(campaign, "total_hypotheses", 0),
+                _confirmed,
+            )
 
         await asyncio.to_thread(write_campaign_snapshot, "pre_paper", campaign, prior_dict)
 
@@ -2314,7 +2366,16 @@ async def run_campaign_loop(
             session_id=campaign.id,
             event_type=EventType.CAMPAIGN_COMPLETED,
             step="campaign.complete",
-            payload=campaign.summary(),
+            # Carry the honest zero-findings signal (O3) on the terminal event so
+            # logs/frontend can surface "completed but confirmed nothing" without
+            # having to re-derive it. Additive to campaign.summary(); does not
+            # change the stop reason or completion semantics.
+            payload={
+                **campaign.summary(),  # already carries stop_reason + total_confirmed
+                "finalized_without_findings": finalized_without_findings,
+                "confirmed_findings_count": n_confirmed_findings,
+                "tree_confirmed_nodes": _confirmed,
+            },
         )
 
     except Exception as exc:
@@ -2333,6 +2394,18 @@ async def run_campaign_loop(
                 await db_mark_research_session_completed(campaign.id, session_factory)
             except Exception:
                 logger.exception("[campaign %s] salvage paper written but mark-completed failed", campaign.id)
+            # O3: the salvage path also finalizes a completed-looking run, so it
+            # gets the same honest zero-findings signal (recount_from_tree above
+            # keeps total_confirmed fresh).
+            salvage_confirmed = confirmed_findings_count(campaign)
+            salvage_without_findings = salvage_confirmed == 0
+            if salvage_without_findings:
+                logger.warning(
+                    "[campaign %s] SALVAGED WITH ZERO CONFIRMED FINDINGS "
+                    "(stop_reason=%s) — paper salvaged from trace but nothing was confirmed.",
+                    campaign.id,
+                    campaign.stop_reason,
+                )
             await emitter.emit(
                 session_id=campaign.id,
                 event_type=EventType.CAMPAIGN_COMPLETED,
@@ -2340,6 +2413,8 @@ async def run_campaign_loop(
                 payload={
                     "salvaged_after_error": type(exc).__name__,
                     "stop_reason": campaign.stop_reason,
+                    "finalized_without_findings": salvage_without_findings,
+                    "confirmed_findings_count": salvage_confirmed,
                     "campaign_summary": campaign.summary(),
                 },
             )
@@ -2347,14 +2422,21 @@ async def run_campaign_loop(
         try:
             await db_mark_research_session_failed(campaign.id, session_factory)
         except Exception:
-            pass
+            # Make it visible: a swallowed failure here leaves the session 'running'
+            # forever after a fatal error, masking the crash as a live campaign.
+            logger.exception(
+                "[campaign %s] mark-failed after fatal error failed — session row may stay 'running'",
+                campaign.id,
+            )
         # Record an explicit terminal reason so the campaign never stays "active"
         # with a null stop_reason after a fatal, unsalvageable error.
         campaign.finalize_stop(STOP_REASON_FATAL_ERROR)
         try:
             await db_save_campaign(campaign, session_factory)
         except Exception:
-            pass
+            logger.exception(
+                "[campaign %s] db_save of FATAL_ERROR stop reason failed", campaign.id
+            )
         await emitter.emit(
             session_id=campaign.id,
             event_type=EventType.SESSION_FAILED,
