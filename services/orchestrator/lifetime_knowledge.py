@@ -206,7 +206,9 @@ def ingest_campaign(
     failures = extract_failures_from_campaign(cid, nodes, ledger=ledger)
     n_fail = merge_failures_into_graph(graph, failures)
 
-    theories = form_theories_from_claims(claims, min_support=2)
+    theories = form_theories_from_claims(
+        claims, min_support=2, domain=(seed_domain or db),
+    )
     n_theory = merge_theories_into_graph(graph, theories)
 
     summary = campaign.summary()

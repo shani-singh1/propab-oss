@@ -161,15 +161,36 @@ class KnowledgeGraph:
                 break
         return out
 
+    # LL6 promotion gate: a confirmed claim only becomes an unqualified
+    # "established fact" (surfaced to every future campaign as settled prior)
+    # if it is either replicated (T2+) OR carries a solid confidence floor.
+    # A single-campaign, unreplicated, confidence-0 claim (T1) stays in the
+    # graph but is NOT promoted — it is not settled knowledge.
+    MIN_ESTABLISHED_CONFIDENCE = 0.6
+    _REPLICATED_LEVELS = frozenset({"T2", "T3"})
+
+    def _is_established(self, claim: Claim) -> bool:
+        if claim.verdict != "confirmed":
+            return False
+        level = str(claim.replication_level or "").strip().upper()
+        if level in self._REPLICATED_LEVELS:
+            return True
+        return float(claim.confidence or 0.0) >= self.MIN_ESTABLISHED_CONFIDENCE
+
     def established_fact_texts(self, *, limit: int = 30) -> list[dict[str, Any]]:
         facts: list[dict[str, Any]] = []
         for c in sorted(self.claims.values(), key=lambda x: -x.confidence):
-            if c.verdict != "confirmed":
+            if not self._is_established(c):
                 continue
+            # Carry provenance so a promoted fact is traceable back to its
+            # source campaign/claim instead of the untraceable `[]` (LL6).
+            provenance = [p for p in (c.campaign_id, c.id) if p]
             facts.append({
                 "text": c.text[:500],
                 "confidence": c.confidence,
-                "paper_ids": [],
+                "paper_ids": provenance,
+                "campaign_id": c.campaign_id,
+                "claim_id": c.id,
                 "theme": c.theme,
                 "replication_level": c.replication_level,
             })
