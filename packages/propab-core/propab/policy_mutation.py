@@ -34,7 +34,9 @@ def mutate_policy_params(
     Derive boosts, penalties, blocked failures from bucket-local statistics only.
     """
     cids = campaign_ids_in_bucket(meta, budget_bucket=budget_bucket, domain_bucket=domain_bucket)
-    rates = graph.theme_success_rates(campaign_ids=cids or None)
+    bucket = cids or None
+    counts = graph.theme_counts(campaign_ids=bucket)
+    rates = graph.theme_success_rates(campaign_ids=bucket)
 
     boosts: dict[str, float] = {}
     penalties: dict[str, float] = {}
@@ -44,10 +46,8 @@ def mutate_policy_params(
         if rate >= 0.4:
             boosts[theme] = round(min(0.35, rate * 0.5), 3)
         elif rate < 0.15:
-            n = sum(
-                1 for c in graph.claims.values()
-                if c.theme == theme and (not cids or c.campaign_id in cids)
-            )
+            c = counts.get(theme, {"confirmed": 0, "failed": 0})
+            n = c["confirmed"] + c["failed"]
             if n >= 5:
                 penalties[theme] = 0.25
                 if theme not in saturated:

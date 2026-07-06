@@ -6,6 +6,7 @@ Claim, Mechanism, Failure, Theory, Question nodes in a persisted graph.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -13,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 from propab.config import settings
+
+logger = logging.getLogger(__name__)
 
 KNOWLEDGE_VERSION = 1
 
@@ -174,22 +177,57 @@ class KnowledgeGraph:
                 break
         return facts
 
+    def theme_counts(
+        self,
+        *,
+        campaign_ids: set[str] | None = None,
+    ) -> dict[str, dict[str, int]]:
+        """Confirmed vs failed counts per theme (optional bucket filter).
+
+        ``self.claims`` holds ONLY confirmed claims — refuted/inconclusive
+        outcomes are persisted as ``FailureRecord``s in ``self.failures``.
+        A theme's honest denominator is therefore confirmed claims PLUS the
+        failures recorded against that same theme. Both confirmed claims and
+        failures are themed from the node's ``primary_theme`` (see
+        ``negative_knowledge.extract_confirmed_claims`` /
+        ``extract_failures_from_campaign``), so they share one theme namespace.
+        """
+        counts: dict[str, dict[str, int]] = {}
+
+        def _bucket(theme: str) -> dict[str, int]:
+            return counts.setdefault(theme, {"confirmed": 0, "failed": 0})
+
+        for c in self.claims.values():
+            if campaign_ids is not None and c.campaign_id and c.campaign_id not in campaign_ids:
+                continue
+            b = _bucket(c.theme)
+            if c.verdict == "confirmed":
+                b["confirmed"] += 1
+            else:
+                b["failed"] += 1
+        for f in self.failures.values():
+            if campaign_ids is not None and f.campaign_id and f.campaign_id not in campaign_ids:
+                continue
+            _bucket(f.theme)["failed"] += 1
+        return counts
+
     def theme_success_rates(
         self,
         *,
         campaign_ids: set[str] | None = None,
     ) -> dict[str, float]:
-        """Fraction confirmed among tested claims per theme (optional bucket filter)."""
-        by_theme: dict[str, list[str]] = {}
-        for c in self.claims.values():
-            if campaign_ids is not None and c.campaign_id and c.campaign_id not in campaign_ids:
-                continue
-            by_theme.setdefault(c.theme, []).append(c.verdict)
+        """Fraction confirmed among tested outcomes per theme (optional bucket filter).
+
+        Denominator is confirmed claims + matching failures for the theme, so a
+        theme that mostly fails yields a rate well below 1.0 (the previously
+        structurally-1.0 statistic that made the penalty branch dead code).
+        """
         rates: dict[str, float] = {}
-        for theme, verdicts in by_theme.items():
-            if not verdicts:
+        for theme, c in self.theme_counts(campaign_ids=campaign_ids).items():
+            total = c["confirmed"] + c["failed"]
+            if total <= 0:
                 continue
-            rates[theme] = sum(1 for v in verdicts if v == "confirmed") / len(verdicts)
+            rates[theme] = c["confirmed"] / total
         return rates
 
     def to_dict(self) -> dict[str, Any]:
@@ -209,16 +247,22 @@ class KnowledgeGraph:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> KnowledgeGraph:
         g = cls(version=int(data.get("version") or KNOWLEDGE_VERSION))
+
+        def _fields(record_cls: type, rec: dict[str, Any]) -> dict[str, Any]:
+            # Drop keys not in the current dataclass so a drifted/renamed field
+            # on one persisted record can never TypeError and wipe the store.
+            return {k: v for k, v in rec.items() if k in record_cls.__dataclass_fields__}
+
         for k, v in (data.get("claims") or {}).items():
-            g.claims[k] = Claim(**v)
+            g.claims[k] = Claim(**_fields(Claim, v))
         for k, v in (data.get("mechanisms") or {}).items():
-            g.mechanisms[k] = MechanismRecord(**v)
+            g.mechanisms[k] = MechanismRecord(**_fields(MechanismRecord, v))
         for k, v in (data.get("failures") or {}).items():
-            g.failures[k] = FailureRecord(**v)
+            g.failures[k] = FailureRecord(**_fields(FailureRecord, v))
         for k, v in (data.get("theories") or {}).items():
-            g.theories[k] = Theory(**v)
+            g.theories[k] = Theory(**_fields(Theory, v))
         for k, v in (data.get("questions") or {}).items():
-            g.questions[k] = ResearchQuestion(**v)
+            g.questions[k] = ResearchQuestion(**_fields(ResearchQuestion, v))
         g.links = list(data.get("links") or [])
         g.campaign_ids = list(data.get("campaign_ids") or [])
         g.numerical_seeds = dict(data.get("numerical_seeds") or {})
@@ -248,11 +292,30 @@ class KnowledgeGraph:
                 pass
         p = path or knowledge_store_path()
         if not p.is_file():
+            # Legitimate first run: no store yet. An empty graph here is safe
+            # because there is nothing on disk to clobber.
             return cls()
         try:
             return cls.from_dict(json.loads(p.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, OSError, TypeError):
-            return cls()
+        except (json.JSONDecodeError, OSError, TypeError) as exc:
+            # An EXISTING store failed to load. Returning an empty graph would
+            # let the caller's next save() overwrite accumulated cross-campaign
+            # knowledge with nothing — a silent, permanent wipe (LL3). Fail
+            # closed: log loudly and re-raise so callers abort before saving,
+            # leaving the on-disk file intact for inspection/recovery.
+            #
+            # Drifted/renamed record fields no longer reach here — from_dict
+            # field-filters them — so this path now means genuine corruption
+            # (unreadable file or invalid JSON), which must not be masked.
+            logger.error(
+                "Refusing to load lifetime knowledge graph from %s: %s. "
+                "Not returning an empty graph (would clobber accumulated "
+                "knowledge on next save); re-raising to fail closed.",
+                p,
+                exc,
+                exc_info=True,
+            )
+            raise
 
 
 def new_id(prefix: str = "kg") -> str:
