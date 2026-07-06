@@ -477,19 +477,77 @@ def _deep_scan_accuracy_candidates(obj: Any, *, depth: int = 0) -> list[float]:
     return found
 
 
+# Sub-dicts a worker/tool result may nest its scalar metrics under.
+_METRIC_SUBDICT_KEYS = ("metrics", "scores", "results", "evidence", "output")
+
+
+def _is_accuracy_metric(metric_name: str) -> bool:
+    """True when the declared metric is classification-accuracy-family (ML default path)."""
+    return "acc" in (metric_name or "").lower()
+
+
+def _find_declared_metric(obj: Any, metric_name: str) -> float | None:
+    """Domain-general: pull the campaign's DECLARED metric from a worker result.
+
+    Checks, in order: the metric's own key at this level, a generic
+    ``metric_value`` carrier whose sibling ``metric_name`` matches the declared
+    metric (or an unlabelled ``metric_value`` at the top level), then a small set
+    of common sub-dicts (``metrics``/``scores``/``results``/``evidence``/``output``).
+    Never substitutes a differently-named metric.
+    """
+    if not isinstance(obj, dict):
+        return None
+
+    # 1. The declared metric under its own key.
+    v = _coerce_scalar_float(obj.get(metric_name))
+    if v is not None:
+        return _sanity_check_metric(metric_name, v)
+
+    # 2. Generic metric_value + metric_name pair. Accept when the sibling
+    #    metric_name matches the declared metric, or when metric_name is absent
+    #    (a bare metric_value is the worker's generic primary-metric carrier).
+    if "metric_value" in obj:
+        sibling = obj.get("metric_name")
+        if sibling is None or str(sibling).strip().lower() == str(metric_name).strip().lower():
+            v = _coerce_scalar_float(obj.get("metric_value"))
+            if v is not None:
+                return _sanity_check_metric(metric_name, v)
+
+    # 3. Recurse into common metric sub-dicts (one level of well-known containers).
+    for sub_key in _METRIC_SUBDICT_KEYS:
+        sub = obj.get(sub_key)
+        if isinstance(sub, dict):
+            got = _find_declared_metric(sub, metric_name)
+            if got is not None:
+                return got
+    return None
+
+
 def _extract_primary_metric_from_worker_result(result: dict, metric_name: str) -> float | None:
-    """Parse val_accuracy (etc.) from Celery sub-agent return dict or embedded evidence JSON."""
+    """Extract the campaign's declared metric from a Celery sub-agent return dict.
+
+    Domain-general: prefers the DECLARED ``metric_name`` (top-level, a
+    ``metric_value``/``metric_name`` pair, or a common sub-dict). Only falls back
+    to ML accuracy-family keys / deep scans when the declared metric is itself an
+    accuracy metric. Fails closed (``None``) for a non-accuracy metric that is
+    absent — it never substitutes a differently-named value.
+    """
     if not isinstance(result, dict):
         return None
 
-    for key in (
-        metric_name,
-        "metric_value",
-        "val_accuracy",
-        "test_accuracy",
-        "accuracy",
-        "validation_accuracy",
-    ):
+    # Preferred, domain-agnostic path: the declared metric wherever it lives.
+    got = _find_declared_metric(result, metric_name)
+    if got is not None:
+        return got
+
+    # ── ML default path ──────────────────────────────────────────────────────
+    # Accuracy-family fallbacks (val_accuracy / accuracy / deep scans / text
+    # regexes) apply ONLY when the campaign metric is itself accuracy-family.
+    # For any other declared metric we fail closed rather than invent a value.
+    if not _is_accuracy_metric(metric_name):
+        return None
+
+    for key in ("val_accuracy", "test_accuracy", "accuracy", "validation_accuracy"):
         v = _coerce_scalar_float(result.get(key))
         if v is not None:
             got = _sanity_check_metric(metric_name, v)
