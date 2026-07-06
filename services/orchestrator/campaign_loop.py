@@ -1581,7 +1581,58 @@ async def _enforce_domain_preflight(
 
     plugin = resolve_domain_plugin(question=campaign.question)
     if plugin is None:
-        return True  # no scientific-domain owner → no domain-specific power gate
+        # No plugin owns this question. But the artifact gate resolves standards by
+        # PROFILE, not plugin — so a domain that has a profile but no executing plugin
+        # (e.g. econometrics) would launch with no real verification capability yet
+        # still be held to that profile's standards. That is a domain that "looks
+        # supported but can never honestly verify." Resolve the profile with the SAME
+        # resolver the artifact gate uses (propab.domain_profiles.resolve_domain_profile,
+        # see artifact_verification.run_artifact_gate) so the fail-closed trigger is
+        # exactly "a profile the gate will apply."
+        from propab.artifact_verification import EvidenceContext
+        from propab.domain_profiles import resolve_domain_profile
+
+        profile = resolve_domain_profile(
+            EvidenceContext(hypothesis_text=campaign.question),
+            question=campaign.question,
+        )
+        if profile is None:
+            return True  # no plugin AND no profile → genuinely generic → generic sandbox path
+
+        reason = (
+            f"the '{profile.profile_id}' domain applies verification standards but has no "
+            "plugin that can execute verification — refusing to launch a campaign that "
+            "cannot confirm honestly"
+        )
+        logger.warning(
+            "[campaign %s] domain preflight FAILED (%s): %s",
+            campaign.id, profile.profile_id, reason,
+        )
+        campaign.finalize_stop(STOP_REASON_DOMAIN_PREFLIGHT_FAILED)
+        try:
+            await db_save_campaign(campaign, session_factory)
+        except Exception:
+            logger.exception("[campaign %s] db_save after preflight-fail failed", campaign.id)
+        try:
+            await db_mark_research_session_failed(campaign.id, session_factory)
+        except Exception:
+            logger.exception(
+                "[campaign %s] mark-failed after preflight-block failed — session row may stay 'running'",
+                campaign.id,
+            )
+        await emitter.emit(
+            session_id=campaign.id,
+            event_type=EventType.CAMPAIGN_BUDGET_EXHAUSTED,
+            step="campaign.preflight_failed",
+            payload={
+                "domain": profile.profile_id,
+                "stop_reason": STOP_REASON_DOMAIN_PREFLIGHT_FAILED,
+                "reason": "domain_profile_without_verifying_plugin",
+                "details": {"profile_id": profile.profile_id, "message": reason},
+                **campaign.summary(),
+            },
+        )
+        return False
 
     try:
         result = plugin.preflight()
