@@ -388,6 +388,16 @@ integrity gap is purely INPUT PROVENANCE — a real p-value computed on fabricat
 data is still fabricated science, and the only guard is the 3-item denylist (W1).
 The tools are fine; the input pipeline is the exposure.
 
+## LAYER 12 — Config, core-state, sandbox [survey, self-hunt pass]
+
+**CFG1 · LOW · OPEN · VERIFIED — committed defaults don't match the intended deployment.** `config.py`: `llm_provider="openai"`/`llm_model="gpt-4o"`, `embed_provider="openai"`/`text-embedding-3-small`, and sandbox default image falls back to `python:3.11-alpine` — while the actual deployment runs Gemini + the `propab-oss-worker` image (env-overridden in `.env`). Harmless when env is set, but a fresh/mis-configured run silently uses gpt-4o (needs an OpenAI key) or a numpy-less alpine sandbox (experiments ImportError). Align defaults or fail-loud if the expected provider/image isn't configured.
+
+**CAM1 · CLEARED — `campaign.recount_from_tree` is correct.** It counts `verdict=="confirmed" and node_role != CONTROL`; `node_role` is a dataclass field defaulting to `DISCOVERY` and is always set by `add_seeds`/synthesis, so the `getattr(default=CONTROL)` never fires for real nodes. `total_confirmed` (the paper/O3 count) is honest.
+
+**BP1 · CLEARED — belief trend-promotion is evidence-gated.** `belief_promotion.try_trend_promotion` requires the domain threshold to allow it, `>= requires_supporting_nodes` (default 3) CONFIRMED metric nodes, and a consistent monotonic trend — it cannot promote a belief without confirmed evidence. (Confirmed now means a real null passed, post round 1.)
+
+**SBX1 · CLEARED — the sandbox is real.** `sandbox.run_sandboxed_python` runs in an isolated Docker container (no network) and returns explicit `image_not_found`/`docker_api`/`docker_timeout` errors — no silent in-process fake. The in-process `_run_inline_trusted_sandbox_code` path is scoped to the deterministic JSON-printer 'trusted stubs' (W2 — verify that classifier's boundary can't be tricked into running arbitrary code un-isolated).
+
 ## LAYERS STILL PENDING (next passes — enumerated, not assumed clean)
 
 Each gets the same four-lens read (bugs / arch flaws / dishonest components /
