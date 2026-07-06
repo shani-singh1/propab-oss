@@ -253,7 +253,7 @@ recompute the null from raw per-sample data (require the worker to return the ra
 arrays / a reproducible artifact), or at minimum FAIL-closed when the strong null
 stats are absent instead of falling back to `lofo>0`.
 
-**A2 · HIGH · FIXING (agent: fix/evidence-binding) — does evidence binding reject genuine support?**
+**A2 · HIGH · CLEARED (fix/evidence-binding, verified) + instrumentation FIXED — does evidence binding reject genuine support?**
 `evidence_binding.filter_node_citations` runs at write time and is credited with
 "belief citation integrity." If it is too strict, beliefs never accrue supporting
 nodes → beliefs stay `unclear` → (with the exhaustion logic) the branch trends to
@@ -261,6 +261,8 @@ exhausted, and rival tension that drives discriminating experiments never forms.
 Needs a rejection-reason histogram from real data; the health metric warns if it
 runs 50+ times with zero rejections (too loose) but nothing warns on *too strict*.
 Trace `filter_node_citations`.
+
+**A4 · HIGH · OPEN · VERIFIED — evidence binding's acceptance criterion is hardcoded biology/mandrake vocab, so beliefs can't form for other domains.** (Found while VERIFYING the A2 audit — the subagent correctly cleared "binding wrongly over-rejects for its designed inputs" but missed this.) `infer_test_targets`/`infer_population_scope` (evidence_binding.py ~40-127) match only hardcoded regexes — `_LOFO_RE`, `_REDUND_RE` (sequence identity), `_CONFOUND_RE` (plate id), `_FAMILY_CAT_RE` (evolutionary family), and `_FEATURE_TOKEN_RE` which literally lists mandrake feature names (`triad_best_rmsd`, `sp_motif_found`, `D2_D3_dist`). For ANY non-biology domain a node's text matches none → it gets no tags → `binding_check` returns `cited_node_untyped_for_citing_claim` → EVERY citation is rejected → `apply_synthesis_beliefs` sends the belief to `proposed_ungrounded_beliefs`, it stays `unclear`, and the branch trends to exhausted. So belief formation is starved for every domain outside the demo biology vocab — a CENTRAL-THESIS domain-lock, now made VISIBLE by the symmetric over-strict health warning A2 added. **Fix:** binding acceptance must use STRUCTURED finding fields (verdict, metric name/direction, claim_scope, scope_delta) — which the code currently ignores — not hardcoded text regexes, so a genuine supporter in any domain can be matched to a belief while fabricated/irrelevant nodes are still rejected.
 
 **A3 · HIGH · PENDING · SUSPECTED — LOFO assumes grouped/family data most domains
 lack.** Label-shuffle-LOFO is a leave-one-*group*-out control; it presupposes the
