@@ -459,6 +459,16 @@ domain-generality blockers). Nothing below is cleared yet.
   writes prose over the (correctly-bucketed) findings and could soft-embellish
   within an already-gated confirmed finding; counts/verdicts themselves are
   deterministic. Not opened as an actionable issue (low, structural gate sound).
+  **UPDATE 2026-07-07 — REWORKED (feat/paper-research-quality, merged+verified):** the
+  paper is no longer an experiment-log. New `paper_narrative.py` + reworked
+  `paper_compiler`/`paper_sections`/`paper.py` emit real sections (Abstract, Intro,
+  Methods w/ verification protocol, Results w/ summary-counts + findings tables,
+  matplotlib figures, a Research-Narrative chain-of-reasoning from the real trace,
+  Discussion + threats-to-validity). Honesty PRESERVED + TESTED — `_effective_verdict`
+  stays the single source of truth; figures/tables/narrative read the SAME gated
+  `findings`; a regression test proves an inconclusive/control/absent finding appears in
+  NO table, figure, or narrative. Verified by me: 37 paper tests pass on worktree core.
+  Residual: no local `pdflatex` end-to-end PDF check (validated at LaTeX-string + PNG).
 - **L10 API + events + persistence** (`routes/*`, `stream.py`, `events.py`,
   `db.py`, `campaign_db.py`) — SSE/event integrity, resume correctness.
   **PARTIALLY SURVEYED → L10-R1 opened (below).**
@@ -647,7 +657,7 @@ sanity-checked). Baselines established so far (verified by me — read + ran):
 | Convergence | `scripts/bench_campaign_convergence.py` | confirmed-lineage depth / narrow-reject | **3.2 / 0.001** | done |
 | Verdict | `bench/bench_verdict.py` | **false-confirm rate** / recall | **0.0 / 1.0** (clean) | ✓ ran |
 | Evidence-binding | `bench/bench_binding.py` | precision / recall | **0.5 / 1.0** | ✓ ran |
-| Generation | `bench/bench_generation.py` | dup-pass / off-topic-reject | *(agent running)* | — |
+| Generation | `bench/bench_generation.py` | dup-pass / off-topic-reject | **0.0 / 1.0** (filters clean) | ✓ ran |
 
 **BND1 · MED · VERIFIED (via bench) — binding accepts cross-domain supporters →
 precision 0.5.** The binding benchmark shows recall 1.0 in ALL five domains (A4
