@@ -87,7 +87,7 @@ Files: `verdict_pipeline.py`, `significance.py`. This decides confirmed / refute
 it. Composition `classify_verdict_stage → artifact_gate_stage → ood_gate_stage →
 scope_integrity_stage` is clean and pure. But:
 
-**V1 · CRITICAL · OPEN · VERIFIED — statistical-only evidence can NEVER be
+**V1 · CRITICAL · FIXING (agent: fix/confirmation-layer) · VERIFIED — statistical-only evidence can NEVER be
 confirmed, silently blocking every non-LOFO/non-deterministic domain.**
 `classify_verdict` (significance.py) will return "confirmed" for a good
 statistical result (gate passed + metric direction supports + replicated). But
@@ -112,7 +112,7 @@ should be confirmable; the gate should demand *an* adversarial control
 appropriate to the evidence type, not specifically LOFO. Needs a
 domain-plugin-provided "confirmation evidence contract."
 
-**V2 · HIGH · OPEN · VERIFIED — the "deterministic" class bypasses the artifact
+**V2 · HIGH · FIXING (agent: fix/confirmation-layer) · VERIFIED — the "deterministic" class bypasses the artifact
 gate on a loose, agent-influenceable trigger.** `classify_evidence_type`
 (verdict_pipeline.py:43) tags evidence "deterministic" when
 `verified_true_steps>0 AND verified_false_steps==0 AND (method not in
@@ -229,7 +229,7 @@ Files: `artifact_verification.py` (753), `evidence_binding.py` (384),
 `scoped_claim.py`. This is what makes "confirmed" mean "survived an adversarial
 control." Reading the survival tests:
 
-**A1 · CRITICAL · OPEN · VERIFIED — the artifact gate does not run the null test;
+**A1 · CRITICAL · FIXING (agent: fix/confirmation-layer) · VERIFIED — the artifact gate does not run the null test;
 it reads the worker's self-reported null statistics, and its fallbacks
 rubber-stamp.** `_survives_label_shuffle_lofo` / `_survives_permutation`
 (artifact_verification.py:286, 330) consume `lofo_r2`, `label_shuffle_null_p95`,
@@ -303,7 +303,7 @@ Files: `hypotheses.py` (627), `seed_validation.py`, `hypothesis_ranking.py`,
 `anomaly_seeds.py`. The seeds are the campaign's initial frontier — bad seeds ⇒
 bad campaign.
 
-**G1 · HIGH · OPEN · VERIFIED — the "domain fallback" seed generator is a
+**G1 · HIGH · FIXING (agent: fix/generation-layer) · VERIFIED — the "domain fallback" seed generator is a
 hardcoded keyword→canned-hypotheses lookup for ~5 demo topics.**
 `_domain_fallback_options` (hypotheses.py:32) matches the question against literal
 keyword lists (`egyptian`/`unit fraction`, `collatz`, `prime gap`,
