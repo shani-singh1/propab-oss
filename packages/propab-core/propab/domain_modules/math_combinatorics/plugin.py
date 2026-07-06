@@ -184,6 +184,11 @@ class MathCombinatoricsPlugin(DomainPlugin):
             ),
         }
 
+    # Distinct additive-combinatorics markers. One is enough to gate (these terms
+    # are specific to the domain); the count feeds match_score for collision
+    # tie-breaks against overlapping domains (e.g. graph_invariants).
+    _MATCH_MARKERS = ("sidon", "cap set", "sumset", "additive combinator", "ap-free")
+
     def matches(self, *, question: str = "", payload: dict[str, Any] | None = None) -> bool:
         q = (question or "").lower()
         if "domain_profile:math_combinatorics" in q:
@@ -193,8 +198,16 @@ class MathCombinatoricsPlugin(DomainPlugin):
                 return True
             if str(payload.get("domain") or "") == "math_combinatorics":
                 return True
-        markers = ("sidon", "cap set", "sumset", "additive combinator", "ap-free")
-        return any(m in q for m in markers)
+        return any(m in q for m in self._MATCH_MARKERS)
+
+    def match_score(self, *, question: str = "", payload: dict[str, Any] | None = None) -> float:
+        q = (question or "").lower()
+        if "domain_profile:math_combinatorics" in q or (
+            payload
+            and str(payload.get("domain_profile") or payload.get("domain") or "") == "math_combinatorics"
+        ):
+            return float(len(self._MATCH_MARKERS))
+        return float(sum(1 for m in self._MATCH_MARKERS if m in q))
 
     def available_features(self) -> list[str]:
         return [

@@ -50,6 +50,17 @@ class GenomicsPlugin(DomainPlugin):
         hits = sum(1 for m in self.scope_question_markers if m in q)
         return hits >= 2 or "[domain_profile:genomics]" in q
 
+    def match_score(self, *, question: str = "", payload: dict[str, Any] | None = None) -> float:
+        # Score = count of distinct genomics markers present, so an
+        # enzyme-vs-genomics collision resolves to whichever domain's vocabulary
+        # is more prevalent rather than to registration order.
+        if payload and str(payload.get("domain") or payload.get("domain_profile") or "") == "genomics":
+            return float(len(self.scope_question_markers))
+        q = (question or "").lower()
+        if "[domain_profile:genomics]" in q:
+            return float(len(self.scope_question_markers))
+        return float(sum(1 for m in self.scope_question_markers if m in q))
+
     def available_features(self) -> list[str]:
         return list(KNOWN_FEATURES)
 

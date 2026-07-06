@@ -38,6 +38,17 @@ class EnzymeKineticsPlugin(DomainPlugin):
         hits = sum(1 for m in self.scope_question_markers if m in q)
         return hits >= 2 or "[domain_profile:enzyme_kinetics]" in q
 
+    def match_score(self, *, question: str = "", payload: dict[str, Any] | None = None) -> float:
+        # Score = count of distinct enzyme markers present, so a question rich in
+        # enzyme vocabulary outranks a colliding domain (e.g. genomics) instead of
+        # losing on registration order.
+        if payload and str(payload.get("domain") or payload.get("domain_profile") or "") == "enzyme_kinetics":
+            return float(len(self.scope_question_markers))
+        q = (question or "").lower()
+        if "[domain_profile:enzyme_kinetics]" in q:
+            return float(len(self.scope_question_markers))
+        return float(sum(1 for m in self.scope_question_markers if m in q))
+
     def scope_template(self) -> dict[str, str]:
         return {
             "population": "BRENDA subset: ~400 enzymes across 6 EC classes",
