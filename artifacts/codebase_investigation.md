@@ -32,13 +32,14 @@
 | Artifact gate + evidence binding, scoped_claim | core | partial (A1-A3) |
 | Domain layer: base defaults, registry, plugins, adapters | core | partial (D1-D3) |
 | Numerical seeds, synthesis_diversity, belief_promotion | core | partial |
-| Orchestrator loop: campaign_loop.py (2369) | services/orchestrator | partial |
-| Generation: hypotheses, seed_validation, hypothesis_ranking, anomaly_seeds | orch | survey |
-| Domain layer: base, registry, plugins, adapters, profiles | core | spot-check |
-| Lifetime learning: lifetime_knowledge, knowledge_graph, meta_science, policy_* | mixed | pending |
-| Paper: paper_compiler, paper_sections, paper_gate, research_quality | core | pending |
+| Orchestrator loop: campaign_loop.py (2369) | services/orchestrator | partial (O1-O3) |
+| Generation: hypotheses, seed_validation, hypothesis_ranking, anomaly_seeds | orch | partial (G1-G2) |
+| Domain layer: base, registry, plugins, adapters, profiles | core | partial (D1-D3); adapters pending |
+| Lifetime learning: lifetime_knowledge, knowledge_graph, meta_science, policy_* | mixed | survey (wired; L8 quality pending) |
+| Paper: paper_compiler, paper_sections, paper_gate, research_quality | core | survey (P1 honest); assembly pending |
+| Tools registry | core/tools | survey (T1/T2 — verify significance tools compute) |
 | API + events + persistence: routes, stream, events, db, campaign_db | services | pending |
-| Tools registry | core/tools | pending |
+| config.py / llm.py | core | pending |
 | Literature service | services/literature | **owner-known** (done, 0.77) |
 
 Legend for the loop: pending = not yet read; survey = grepped/skimmed; partial =
@@ -322,7 +323,68 @@ validation; verify these don't quietly inject boilerplate that then passes as a
 real hypothesis (the `is_boilerplate_scope` check at line 548 suggests this failure
 mode is known — confirm it's fully closed).
 
-## LAYERS PENDING DEEP AUDIT (loop continues — do not treat absence as clean)
+## LAYER 5 — Orchestrator loop (`campaign_loop.py`, 2369) [partial]
+
+**O1 · MED · OPEN · VERIFIED — breakthrough metric extraction hardcodes ML metric
+names.** `_extract_metric_from_result` (line 508) regexes for
+`val_accuracy|accuracy|test_accuracy` as a fallback. For a non-ML domain (math,
+physics, econ) the metric isn't "accuracy"; only the generic `metric_value` JSON
+path works, and if the worker doesn't emit that exact key, breakthrough detection
+misses — another ML/demo-domain assumption baked in.
+
+**O2 · MED · OPEN · SUSPECTED — several `except Exception: pass` swallow errors
+in the loop** (lines ~373, 507, 515, 733, 1369, 1404, 1469-74). Salvage/preflight
+ones are intentionally best-effort (fine), but the others need a read to confirm
+none hide a real failure (e.g. a synthesis or dispatch error swallowed so the
+round looks empty rather than errored). PENDING targeted read.
+
+**O3 · MED · OPEN · SUSPECTED — "success" stop reasons mask zero-finding
+campaigns.** A campaign that confirms nothing still finalizes with a normal
+`HYPOTHESIS_CAP_REACHED` / `TIME_BUDGET_EXHAUSTED` and writes a paper — presenting
+as a completed run. This is the "every layer reports success" half of the CENTRAL
+THESIS at the orchestrator level. Not a crash bug, but it's why broken campaigns
+looked fine. A stop-reason (or health flag) for "finalized with 0 confirmed
+findings" should exist and be surfaced loudly.
+
+## LAYER 8 — Lifetime learning [survey — wired, quality unverified]
+`ingest_campaign` writes; `lifetime_context_for_seeds` (lifetime_knowledge.py:125)
+is read back into seed generation (campaign_loop.py:1696). So the read-back loop
+EXISTS (not write-only). **L8 open question (PENDING):** whether the injected
+context measurably improves later campaigns or is inert prose; JSON last-writer-
+wins is fine at one-writer-per-campaign. No wiring bug found yet.
+
+## LAYER 11 — Tools registry [survey — appears real]
+Per-domain tool dirs exist (`mathematics/`, `statistics/`, `deep_learning/`,
+`materials/`, `mandrake/`, `ml_research/`, `general_computation/`) — not obvious
+stubs. `model_registry.py` and `registry.py` carry placeholder-detection (the LLM
+copying `"x"`/`"dummy"` model ids; spec `example_params`) — same self-attestation
+theme as W1. **T1 · PENDING:** read a representative tool (e.g.
+`statistics/statistical_significance`) to confirm it computes rather than echoes,
+and check `registry.py:154` where `example_params` are injected as defaults (could
+be the very source of the spec-example values W1 tries to detect — circular).
+
+## LAYER 9 — Paper compiler [survey — honest, positive]
+**P1 · CLEARED (positive) — the paper layer does NOT over-claim.**
+`paper_compiler._effective_verdict` (line 211) applies an evidence bar before a
+finding reaches the paper: a DB "confirmed" with no metric is presented as
+"inconclusive" ("cannot claim without evidence"); unknown verdicts default to
+inconclusive. So the paper honestly reflects the evidence bar rather than
+laundering weak findings into results. This is the one layer that is *more*
+conservative than its inputs — good. (Full read of section assembly still pending
+for completeness, but no dishonesty found.)
+
+## LAYER 11 continued — the load-bearing significance tool is unlocated
+**T2 · HIGH · OPEN · SUSPECTED — the `statistical_significance` tool that the
+entire verdict pipeline gates on is not in `tools/statistics/`** (which contains
+only `category_counts`). The confirmation path (significance.py
+`_SIGNIFICANCE_TOOL_NAMES` = statistical_significance / bootstrap_confidence /
+literature_baseline_compare) depends on these tools existing and computing real
+p-values from real data. Their location and implementation are unconfirmed —
+if any is a spec-only stub or echoes example params (see registry.py:154), that
+directly compromises every "confirmed" verdict. **Find and verify these three
+tools compute from real inputs — highest-priority remaining read.**
+
+## LAYERS STILL PENDING (next passes — enumerated, not assumed clean)
 
 Each gets the same four-lens read (bugs / arch flaws / dishonest components /
 domain-generality blockers). Nothing below is cleared yet.
