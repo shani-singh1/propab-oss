@@ -155,9 +155,17 @@ async def main(n: int = 20, seed: int = 0, concurrency: int = 4) -> None:
     }
     record_score(out, artifacts_dir=str(REPO_ROOT / "artifacts"))
 
+    # Same OneDrive-lock tolerance as _write_partial: the score is already
+    # persisted by record_score above, so a failed final dump must not crash the
+    # run with a traceback that obscures the printed result.
     results_path = REPO_ROOT / "artifacts" / "litqa2_live_results.json"
-    results_path.write_text(json.dumps(out, indent=2), encoding="utf-8")
-    print(f"\nWrote {results_path}")
+    try:
+        tmp = results_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(out, indent=2), encoding="utf-8")
+        tmp.replace(results_path)
+        print(f"\nWrote {results_path}")
+    except OSError as exc:
+        print(f"\n(final results dump skipped: {exc}; score already recorded)")
 
 
 if __name__ == "__main__":

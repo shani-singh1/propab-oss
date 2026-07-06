@@ -67,6 +67,22 @@ guessing around a fragmented passage. Coverage is unchanged (still ~forced-
 answer). Project arc: 0.44 → 0.60 → 0.71 → **0.77 (deep-read)**, now inside the
 0.76-0.80 band and closing on the 0.84 AstaBench baseline.
 
+*Granularity is load-bearing: deep-read the ONE top paper, not two.* Extending
+the same guaranteed budget to the top **two** papers (8 chunks each) regressed
+straight back to 0.71 (n=100, seed 0) — the 2nd-ranked paper is usually not the
+source, so its deep content crowds out the true source's chunks and re-adds the
+cross-paper dilution deep-read exists to remove. Single-paper concentration is
+exactly the right unit (the same lesson as the top-3-full 0.48 regression, one
+notch finer).
+
+*And `deep_read_k=10` is a genuine sweet spot, not an arbitrary constant.*
+Pushing it to 16 (16 deep + 4 shallow, i.e. read more of the source paper at the
+cost of cross-paper backup) also regressed, to 0.69 (n=100, seed 0): the extra
+chunks 11-16 are the source paper's lower-relevance sections (methods minutiae,
+references) and the shrunken shallow pool stops covering the ~22% of cases where
+the source isn't doc[0]. 10 deep + 10 shallow balances depth-on-the-likely-source
+against breadth-as-insurance.
+
 **Honest remaining gap.** ~0.77 vs 0.84. What's left is the ~22% of questions
 where the source paper isn't surfaced by any public API at all (the retrieval-
 coverage ceiling of 0.8.0, unchanged here) plus a residual reasoning-error floor
