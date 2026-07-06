@@ -250,7 +250,11 @@ def test_cleared_plain_supporter_rejected_same_as_fabricated() -> None:
     fabricated = binding_check_statement_to_node(REDUNDANCY_TAGGED_BELIEF, FABRICATED_UNRELATED_NODE)
     assert not plain.match
     assert not fabricated.match
-    assert plain.reason == fabricated.reason == "cited_node_untyped_for_citing_claim"
+    # Both are rejected identically (the crux of the CLEARED verdict): from surface
+    # text alone the honest plain node and the fabricated node are indistinguishable.
+    # Neither shares a subject term with the redundancy/sequence belief, so both now
+    # trip the BND1 cross-subject veto with the SAME, more-specific reason.
+    assert plain.reason == fabricated.reason == "cross_subject_mismatch"
 
 
 def test_ungrounded_belief_goes_to_proposed_list() -> None:
@@ -342,7 +346,11 @@ def test_cross_domain_fabricated_node_still_rejected() -> None:
     subject-specific term and must be rejected — integrity line held."""
     result = binding_check_statement_to_node(ECON_BELIEF, FABRICATED_PHYSICS_NODE)
     assert not result.match
-    assert result.reason in ("no_subject_overlap", "both_subjects_untyped")
+    # Sharing no subject-specific term is exactly the BND1 cross-subject signature,
+    # so rejection may surface as the specific veto or the generic no-overlap reason.
+    assert result.reason in (
+        "cross_subject_mismatch", "no_subject_overlap", "both_subjects_untyped",
+    )
 
 
 def test_cross_domain_filter_keeps_supporter_strips_fabrication() -> None:
@@ -426,3 +434,82 @@ def test_biology_insufficiency_vs_lofo_still_rejected() -> None:
     result = binding_check_statement_to_node(INSUFFICIENCY_BELIEF, LOFO_NODE)
     assert not result.match
     assert "lofo" in result.reason.lower() or "insufficient" in result.reason.lower() or "overlap" in result.reason.lower()
+
+
+# --- BND1: cross-domain "genuine-for-a-different-subject" nodes that overlap the ---
+# --- belief only on GENERIC RELATIONSHIP words must NOT bind, while a genuine -------
+# --- same-subject supporter still binds (precision up, recall held at 1.0). ---------
+
+# Belief: an econometrics claim ("minimum wage reduces teen employment elasticity").
+_BND1_ECON_BELIEF = (
+    "Minimum wage increases reduce teen employment elasticity in low-density labor markets.\n"
+    "Population: teen workers in low-density counties\nDistribution: 2010-2019 county panel\n"
+    "Claimed generalization: elasticity negative across low-density counties\n"
+    "Expected failure modes: monopsony offset\nOOD test: hold out one state"
+)
+
+# Cross-domain node: a GENUINE demand-elasticity finding, but about CIGARETTE TAXES /
+# smoking, not teen wages. It overlaps the belief only on the generic relationship
+# words "reduce" and "elasticity" — no shared subject entity (no teen/wage/county).
+# Under the old ``_MIN_SHARED_SALIENT_TERMS = 2`` rule it bound on those two words;
+# the subject-discriminating rule must now reject it.
+_BND1_CROSS_DOMAIN_NODE = {
+    "id": "bnd1-cross-domain",
+    "text": (
+        "Cigarette excise taxes reduce adult smoking prevalence with a demand elasticity "
+        "of -0.4 in high-income states."
+    ),
+    "finding": {
+        "claim": "cigarette tax reduces smoking prevalence",
+        "metric_name": "elasticity",
+    },
+}
+
+# Genuine same-subject supporter: the SAME teen-wage-elasticity subject. It shares
+# the belief's real subject nouns (teen / employment / counties / low-density), so it
+# must still BIND — recall must not regress.
+_BND1_GENUINE_NODE = {
+    "id": "bnd1-genuine",
+    "text": (
+        "County panel regression finds minimum wage elasticity of teen employment is -0.12 "
+        "in low-density counties.\n"
+        "Population: teen workers in low-density counties\nDistribution: 2012-2018 county panel\n"
+        "Claimed generalization: negative elasticity across counties\n"
+        "Expected failure modes: monopsony offset\nOOD test: hold out one state"
+    ),
+    "finding": {
+        "claim": "teen employment elasticity negative under minimum wage",
+        "metric_name": "elasticity",
+    },
+}
+
+
+def test_bnd1_cross_domain_relationship_only_overlap_is_rejected() -> None:
+    """A node sharing ONLY generic relationship words ("reduce", "elasticity") with
+    the belief — but naming a different subject (cigarettes vs. teen wages) — must be
+    rejected. This is the BND1 cross-domain false-accept the fix closes."""
+    result = binding_check_statement_to_node(_BND1_ECON_BELIEF, _BND1_CROSS_DOMAIN_NODE)
+    assert not result.match, result.reason
+
+
+def test_bnd1_genuine_same_subject_supporter_still_binds() -> None:
+    """A genuine supporter of the SAME subject (teen wage elasticity) still binds on
+    the claim's real subject nouns — recall must stay 1.0."""
+    result = binding_check_statement_to_node(_BND1_ECON_BELIEF, _BND1_GENUINE_NODE)
+    assert result.match, result.reason
+
+
+def test_bnd1_filter_strips_cross_domain_keeps_genuine() -> None:
+    """On the real filter path: the genuine same-subject supporter survives, the
+    cross-domain relationship-only node is stripped — precision up, recall held."""
+    nodes = {
+        _BND1_GENUINE_NODE["id"]: _BND1_GENUINE_NODE,
+        _BND1_CROSS_DOMAIN_NODE["id"]: _BND1_CROSS_DOMAIN_NODE,
+    }
+    accepted = filter_node_citations(
+        _BND1_ECON_BELIEF,
+        [_BND1_GENUINE_NODE["id"], _BND1_CROSS_DOMAIN_NODE["id"]],
+        nodes,
+    )
+    assert _BND1_GENUINE_NODE["id"] in accepted
+    assert _BND1_CROSS_DOMAIN_NODE["id"] not in accepted

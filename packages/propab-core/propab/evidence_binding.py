@@ -75,6 +75,33 @@ _STOPWORDS: frozenset[str] = frozenset({
     "improve", "improves", "increase", "decrease", "vary", "varies",
 })
 
+# Generic RELATIONSHIP / METHODOLOGY / MAGNITUDE terms. These survive stopword
+# filtering (they are "content" words) yet name a *relationship shape*, a generic
+# methodology, or a bare magnitude/time-window — NOT the subject/entity a claim is
+# about. Two claims about DIFFERENT subjects routinely share these ("X reduces Y",
+# "A scales with B", "crosses below", "within-family", "30-day"): binding on them
+# alone is exactly the cross-domain false-accept (BND1). They therefore do NOT
+# count toward the shared-salient-term threshold and do NOT count as a shared
+# subject when checking for a cross-subject mismatch. A genuine same-subject
+# supporter still shares the claim's real subject nouns/identifiers (e.g.
+# "mandrake", "sidon", "riblet", "teen wage", "saas cohort") and binds on those.
+_RELATIONSHIP_TERMS: frozenset[str] = frozenset({
+    # relationship / effect-direction verbs (the SHAPE of an effect, not its subject)
+    "reduce", "reduces", "reduced", "reduction", "increase", "increases",
+    "increasing", "increased", "scales", "scale", "scaling", "lift", "lifts",
+    "lifted", "add", "adds", "adding", "added", "crosses", "cross", "crossing",
+    "collapse", "collapses", "offset", "confound", "confounds", "confounded",
+    "raise", "raises", "lower", "lowers", "drop", "drops", "dropped",
+    # comparison / magnitude adverbs and bare quantity words
+    "below", "above", "near", "high", "low", "higher", "lower", "large",
+    "small", "moderate", "strong", "weak",
+    # generic methodology / scope scaffolding (shared across unrelated subjects)
+    "within-family", "within-group", "split", "holdout", "grid", "decade",
+    "identity", "variance", "family", "families", "group", "groups",
+    # generic quantifiers / time windows / bare dimensions
+    "one", "new", "30-day", "spacing",
+})
+
 
 @dataclass(frozen=True)
 class ClaimSubject:
@@ -336,7 +363,44 @@ def _tags_incompatible(a: frozenset[str], b: frozenset[str]) -> str | None:
 # never binds on its own, so unrelated claims that happen to share one noun are
 # still rejected. Genuine supporters of the SAME claim share the claim's subject
 # nouns/identifiers and clear this bar.
+#
+# Crucially, only SUBJECT-DISCRIMINATING terms count toward this bar: generic
+# relationship/methodology/magnitude words (``_RELATIONSHIP_TERMS``) are excluded
+# first. A node about a DIFFERENT subject that overlaps the belief only on
+# relationship words ("reduce", "scales", "below", "within-family", "30-day", …)
+# therefore falls below the bar and is rejected (BND1), while a genuine
+# same-subject supporter still clears it on the claim's real subject nouns.
 _MIN_SHARED_SALIENT_TERMS = 2
+
+
+def _subject_terms(terms: frozenset[str]) -> frozenset[str]:
+    """Keep only subject/entity-like terms: drop generic relationship words.
+
+    ``_salient_terms`` already strips stopwords/scope scaffolding; this additionally
+    removes generic relationship/methodology/magnitude words so what remains names
+    WHAT a claim is about (its subject entities/identifiers), not the SHAPE of its
+    effect. Two claims about different subjects share relationship words but not
+    subject terms — that difference is what discriminates a genuine same-subject
+    supporter from a cross-domain "genuine-for-a-different-subject" node.
+    """
+    return frozenset(t for t in terms if t not in _RELATIONSHIP_TERMS)
+
+
+def _subject_mismatch(citing: ClaimSubject, cited: ClaimSubject) -> bool:
+    """True iff the two claims name clearly DIFFERENT subjects.
+
+    Fires only when we can positively establish disagreement: both sides carry
+    subject terms (after dropping relationship words), yet share NONE of them.
+    That is the cross-domain signature — genuine supporters (same subject) always
+    share at least the claim's subject nouns, so this never fires for them. When
+    either side has no subject terms to compare, we stay silent (return False) and
+    defer to the other, already-precise, acceptance/rejection paths.
+    """
+    citing_subj = _subject_terms(citing.salient_terms | citing.scope_terms)
+    cited_subj = _subject_terms(cited.salient_terms | cited.scope_terms)
+    if not citing_subj or not cited_subj:
+        return False
+    return not (citing_subj & cited_subj)
 
 
 def _structured_overlap(citing: ClaimSubject, cited: ClaimSubject) -> str | None:
@@ -361,17 +425,22 @@ def _structured_overlap(citing: ClaimSubject, cited: ClaimSubject) -> str | None
 
     # 2) The belief's salient terms appearing in the cited node's finding/claim
     #    OR in the node's structured scope subject. This is the general analogue
-    #    of the biology tag path: same specific subject, any domain.
+    #    of the biology tag path: same specific subject, any domain. Only
+    #    SUBJECT-DISCRIMINATING terms count toward the threshold — shared generic
+    #    relationship words alone ("reduce"+"scales", "below"+"density", …) do NOT
+    #    bind (BND1 cross-domain false-accept), while the claim's real subject
+    #    nouns still do.
     cited_content = cited.salient_terms | cited.scope_terms
     if citing.salient_terms and cited_content:
-        shared_salient = citing.salient_terms & cited_content
+        shared_salient = _subject_terms(citing.salient_terms & cited_content)
         if len(shared_salient) >= _MIN_SHARED_SALIENT_TERMS:
             return f"shared_claim_terms:{sorted(shared_salient)[:6]}"
 
     # 3) Structured scope-to-scope subject overlap (population / distribution /
-    #    transfer target described the same thing), requiring ≥2 subject terms.
+    #    transfer target described the same thing), requiring ≥2 SUBJECT terms
+    #    (relationship words excluded, same reasoning as (2)).
     if citing.scope_terms and cited.scope_terms:
-        shared_scope = citing.scope_terms & cited.scope_terms
+        shared_scope = _subject_terms(citing.scope_terms & cited.scope_terms)
         if len(shared_scope) >= _MIN_SHARED_SALIENT_TERMS:
             return f"shared_scope_subject:{sorted(shared_scope)[:6]}"
 
@@ -380,6 +449,16 @@ def _structured_overlap(citing: ClaimSubject, cited: ClaimSubject) -> str | None
 
 def binding_check(citing: ClaimSubject, cited: ClaimSubject) -> BindingResult:
     """Return match if cited evidence plausibly bears on citing claim's subject."""
+    # Cross-subject veto (BND1): if BOTH sides name subject entities yet share NONE
+    # of them, the node is a "genuine-for-a-different-subject" citation. Reject even
+    # when generic relationship tags/words overlap — e.g. a within-family/confound
+    # finding about perovskite CRYSTALS must not bind a claim about mandrake ENZYMES
+    # merely because both say "within-family". Silent (no veto) when either side
+    # lacks subject terms, so legacy/tag-only callers are unaffected and genuine
+    # same-subject supporters (which always share the claim's subject nouns) bind.
+    if _subject_mismatch(citing, cited):
+        return BindingResult(False, "cross_subject_mismatch")
+
     shared_tags = citing.test_targets & cited.test_targets
     if shared_tags:
         return BindingResult(True, f"shared_test_targets:{sorted(shared_tags)}")
