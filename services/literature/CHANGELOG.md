@@ -83,12 +83,37 @@ references) and the shrunken shallow pool stops covering the ~22% of cases where
 the source isn't doc[0]. 10 deep + 10 shallow balances depth-on-the-likely-source
 against breadth-as-insurance.
 
-**Honest remaining gap.** ~0.77 vs 0.84. What's left is the ~22% of questions
-where the source paper isn't surfaced by any public API at all (the retrieval-
-coverage ceiling of 0.8.0, unchanged here) plus a residual reasoning-error floor
-on genuinely ambiguous options — both requiring capability beyond single-pass
-retrieval + one answer call (a snippet index or a true multi-hop read-search
-agent), which is a separate build, not another tuning pass.
+*The whole configuration is a tight local optimum — every perturbation
+regresses to ~0.70.* Once deep-read made "is `full_docs[0]` the true source?"
+the binding decision, two attempts to improve that selection were both measured
+and both regressed:
+- **Choice-aware doc-fetch ranking** (rank which paper to deep-read by
+  question + options): 0.69 (n=100, seed 0). The options include distractor
+  entities, which pull a *distractor-matching* paper to rank #1, so deep-read
+  then reads the wrong paper in depth. The bare question is the only unbiased
+  signal for the deep-read target.
+- **LLM source-paper selection** (a cheap flash call picks which candidate
+  abstract is the source, promoted to the deep-read slot): 0.70 (n=100, seed 0).
+  BM25 on title+abstract is a *better* source-identifier than the LLM's judgment
+  over truncated abstracts — the model's second opinion moves a correct BM25 #1
+  away more often than it rescues a wrong one.
+
+Four independent perturbations of the committed config (deep-read top-2,
+`deep_read_k`=16, choice-aware doc rank, LLM source select) all land at
+0.69-0.71 — i.e. right back at the pre-deep-read plateau. That is strong
+evidence the committed config (deep-read the single BM25-top paper, k=10, bare-
+question doc rank) is a real optimum for this architecture, and that the
+deep-read-top-1 step is precisely the thing worth +6pp.
+
+**Honest remaining gap.** ~0.77 vs 0.84, and the loop above is why it is honest:
+the gap is not un-tuned prompt/chunk knobs (those are exhausted and documented),
+it is the ~22% of questions whose source paper no public API surfaces in its top
+results at all (the retrieval-coverage ceiling of 0.8.0, unchanged here) plus a
+residual reasoning-error floor on genuinely ambiguous options. Both need
+capability beyond single-pass public retrieval + one answer call — a proprietary
+full-text snippet index (how AI2 reaches 0.82) or a true multi-hop read-search
+agent that iteratively reads different candidate papers (how PaperQA2 does) —
+which is a separate, larger build, not another pass over this pipeline's knobs.
 
 ## 0.8.0 — breaking the 0.60 ceiling: read the pattern, force the answer (+11pp)
 
