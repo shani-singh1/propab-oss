@@ -339,6 +339,30 @@ def train_model(
         param_count = int(base_info.get("param_count") or 0)
         if not param_count:
             param_count = sum(dims[i] * dims[i + 1] + dims[i + 1] for i in range(len(dims) - 1))
+
+        # Persist the TRAINED weights and a held-out eval split so downstream tools
+        # (evaluate_model, inspect_gradients) can re-evaluate the *actual* trained
+        # network instead of a random-initialized rebuild. Without this, those tools
+        # were forced to fabricate metrics (random-net loss / jitter-of-one-number),
+        # which then flowed into statistical_significance as fake "eval variance".
+        # Stored as JSON-serializable nested lists so the Redis slow-path (which
+        # json.dumps the whole info dict) keeps working.
+        #
+        # The eval split is X_val / Y_val — genuinely held out from the training
+        # loop (train samples are drawn only from X_train / Y_train). We cap the
+        # persisted eval set so large datasets (MNIST: 500×784) don't bloat Redis;
+        # the cap is still large enough for bootstrap eval variance.
+        _EVAL_CAP = 256
+        n_persist = min(int(X_val.shape[0]), _EVAL_CAP)
+        state_dict = {k: v.detach().cpu().tolist() for k, v in net.state_dict().items()}
+        eval_x = X_val[:n_persist].detach().cpu().tolist()
+        eval_y = Y_val[:n_persist].detach().cpu().tolist()
+        loss_kind = (
+            "bce" if isinstance(loss_fn, nn.BCEWithLogitsLoss)
+            else "cross_entropy" if isinstance(loss_fn, nn.CrossEntropyLoss)
+            else "mse"
+        )
+
         put_model(tid, {
             "kind": "mlp_trained",
             "base": model_id,
@@ -347,6 +371,9 @@ def train_model(
             "param_count": param_count,
             "val_losses": val_losses,
             "final_val_loss": final_val,
+            # Real trained weights + held-out eval data for honest re-evaluation.
+            "state_dict": state_dict,
+            "eval_data": {"x": eval_x, "y": eval_y, "loss_kind": loss_kind},
         })
 
         output = {
