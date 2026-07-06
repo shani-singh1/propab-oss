@@ -210,7 +210,7 @@ is the load-bearing assumption of the whole system; this doesn't enforce it.
 **Fix:** require metric values to carry provenance from a sandbox-executed run;
 generalize the fabrication check.
 
-**W1b · HIGH · OPEN · VERIFIED — provenance is recorded but NOT enforced.** The round-2 fix records `evidence["stat_input_provenance"]` = computed/agent_literal/unknown and `inputs_from_sandbox`, and generalizes the spec-example guard by VALUE (closes the 3-array denylist), but the signal is ADVISORY: the verdict pipeline does not yet refuse to confirm on `agent_literal` inputs. Also it's a value-fingerprint match (not true taint) and only covers the think-act/heuristic worker paths (the mandrake/materials/plugin fast paths return before it). **Fix (small, core):** in `verdict_pipeline` (or the artifact gate), treat `stat_input_provenance=="agent_literal"` as fail-closed for a statistical confirm, so a p-value computed on agent-typed numbers cannot confirm. Pairs with A1.
+**W1b · CRITICAL · FIXED (fix/w1b-provenance-enforce, verified — pending merge) — provenance is now ENFORCED.** Fix (`verdict_pipeline.py:174`, inside the `evidence_type=="statistical"` branch, BEFORE the artifact gate): when `evidence["stat_input_provenance"]=="agent_literal"` the statistical confirm fails closed → inconclusive (`stat_inputs_agent_literal_untrusted`). Scoped strictly to the statistical branch — deterministic-proof and LOFO paths (which compute in-sandbox) are untouched. Policy: fail-closed ONLY on the KNOWN-untrusted `agent_literal`; `computed`/`unknown`/absent proceed (absence ≠ fabrication; blocking `unknown` would falsely downgrade legit legacy/third-party paths). **Verified by me:** guard confirmed imported from the worktree core (not main checkout); 56 verdict/artifact/provenance tests pass; my own independent adversarial run through the real `artifact_gate_stage` with a PASSING null (perm_p=0.001, n=160) → `agent_literal`=inconclusive, `computed`/`unknown`/absent=confirmed. Together with D2/A1 this closes the loop: a statistical result confirms only with a real null at n≥100 AND non-fabricated inputs. Was: recorded but read by nothing (repo-wide grep confirmed). The round-2 fix records `evidence["stat_input_provenance"]` = computed/agent_literal/unknown and `inputs_from_sandbox`, and generalizes the spec-example guard by VALUE (closes the 3-array denylist), but the signal is ADVISORY: the verdict pipeline does not yet refuse to confirm on `agent_literal` inputs. Also it's a value-fingerprint match (not true taint) and only covers the think-act/heuristic worker paths (the mandrake/materials/plugin fast paths return before it). **Fix (small, core):** in `verdict_pipeline` (or the artifact gate), treat `stat_input_provenance=="agent_literal"` as fail-closed for a statistical confirm, so a p-value computed on agent-typed numbers cannot confirm. Pairs with A1.
 
 **W2 · SUSPECTED · OPEN — description-only → deterministic no-op stub** runs
 in-process (not Docker) when the agent supplies a code description but no source
@@ -264,7 +264,7 @@ Needs a rejection-reason histogram from real data; the health metric warns if it
 runs 50+ times with zero rejections (too loose) but nothing warns on *too strict*.
 Trace `filter_node_citations`.
 
-**A4 · HIGH · OPEN · VERIFIED — evidence binding's acceptance criterion is hardcoded biology/mandrake vocab, so beliefs can't form for other domains.** (Found while VERIFYING the A2 audit — the subagent correctly cleared "binding wrongly over-rejects for its designed inputs" but missed this.) `infer_test_targets`/`infer_population_scope` (evidence_binding.py ~40-127) match only hardcoded regexes — `_LOFO_RE`, `_REDUND_RE` (sequence identity), `_CONFOUND_RE` (plate id), `_FAMILY_CAT_RE` (evolutionary family), and `_FEATURE_TOKEN_RE` which literally lists mandrake feature names (`triad_best_rmsd`, `sp_motif_found`, `D2_D3_dist`). For ANY non-biology domain a node's text matches none → it gets no tags → `binding_check` returns `cited_node_untyped_for_citing_claim` → EVERY citation is rejected → `apply_synthesis_beliefs` sends the belief to `proposed_ungrounded_beliefs`, it stays `unclear`, and the branch trends to exhausted. So belief formation is starved for every domain outside the demo biology vocab — a CENTRAL-THESIS domain-lock, now made VISIBLE by the symmetric over-strict health warning A2 added. **Fix:** binding acceptance must use STRUCTURED finding fields (verdict, metric name/direction, claim_scope, scope_delta) — which the code currently ignores — not hardcoded text regexes, so a genuine supporter in any domain can be matched to a belief while fabricated/irrelevant nodes are still rejected.
+**A4 · HIGH · FIXED (fix/binding-general, merged+verified — structured overlap requires shared mechanism/feature id OR scope subject term OR ≥2 salient content terms, `_MIN_SHARED_SALIENT_TERMS=2`; biology tag path preserved; 17 tests) — evidence binding's acceptance criterion WAS hardcoded biology/mandrake vocab, so beliefs couldn't form for other domains.** (Found while VERIFYING the A2 audit — the subagent correctly cleared "binding wrongly over-rejects for its designed inputs" but missed this.) `infer_test_targets`/`infer_population_scope` (evidence_binding.py ~40-127) match only hardcoded regexes — `_LOFO_RE`, `_REDUND_RE` (sequence identity), `_CONFOUND_RE` (plate id), `_FAMILY_CAT_RE` (evolutionary family), and `_FEATURE_TOKEN_RE` which literally lists mandrake feature names (`triad_best_rmsd`, `sp_motif_found`, `D2_D3_dist`). For ANY non-biology domain a node's text matches none → it gets no tags → `binding_check` returns `cited_node_untyped_for_citing_claim` → EVERY citation is rejected → `apply_synthesis_beliefs` sends the belief to `proposed_ungrounded_beliefs`, it stays `unclear`, and the branch trends to exhausted. So belief formation is starved for every domain outside the demo biology vocab — a CENTRAL-THESIS domain-lock, now made VISIBLE by the symmetric over-strict health warning A2 added. **Fix:** binding acceptance must use STRUCTURED finding fields (verdict, metric name/direction, claim_scope, scope_delta) — which the code currently ignores — not hardcoded text regexes, so a genuine supporter in any domain can be matched to a belief while fabricated/irrelevant nodes are still rejected.
 
 **A3 · HIGH · PENDING · SUSPECTED — LOFO assumes grouped/family data most domains
 lack.** Label-shuffle-LOFO is a leave-one-*group*-out control; it presupposes the
@@ -288,12 +288,28 @@ least need it (materials implements it) and waves through exactly the new/unknow
 domains that most need a power check. **Fix:** default preflight should fail-closed
 (or at least WARN loudly) when the domain provides no verification path.
 
-**D2 · CRITICAL · OPEN · VERIFIED — `run_verification` raises NotImplementedError
-by default**, and the worker's evidence builder is LOFO-shaped (`_build_evidence`
-reads `mean_r2`/`lofo_r2`, sub_agent_loop.py:429). A domain that doesn't implement
-a verification path (or a LOFO adapter) produces no confirmable evidence — its
-experiments error to `inconclusive`. There is no generic "run experiment → get
-statistics → confirm with a permutation null" path. See CENTRAL THESIS.
+**D2 · CRITICAL · FIXED (fix/generic-verification, merged+verified) — the generic
+worker path now produces a real, confirmable statistical null.** Was: `_build_evidence`
+is LOFO-shaped (reads `mean_r2`/`lofo_r2`), so a domain without a LOFO adapter had
+no "run experiment → get statistics → confirm with a permutation null" path and
+errored to `inconclusive` forever. Fix (Agent G, `services/worker/permutation_null.py`
++ wiring in `sub_agent_loop.py`): when the agent runs a two-group significance
+comparison on real outcome arrays (`results_a/results_b`, `treatment/baseline`),
+a genuine label-permutation null (`|mean(a)-mean(b)|`, ≥1000 perms, unbiased
+`(ge+1)/(n+1)` p, fixed seed) is computed from the SAME arrays and attached as
+`permutation_p`+`n_samples`, which the merged A1 gate (`_survives_permutation`)
+requires (`p<0.01` at `n≥100`). **Integrity (verified by reading + independent
+end-to-end run against the real core gate):** null is only ever written by the
+permutation fn from arrays captured via `extract_two_group_arrays(call_params)`
+(both-arrays-or-`None`, bools/short/mixed rejected → fail-closed); group-mean
+`metric_value` filled only when no real metric exists (never overwrites, flagged
+`metric_from_permutation_groups`); `stat_input_provenance` left intact for W1b;
+LOFO fast paths `return` before the attach (untouched). My independent check:
+real effect n=160→p=0.0005→**confirms**; no effect→p=0.36→refuses; real effect
+n=40→refuses (n<100); no null→refuses. Tests: 16 new + core integrity green.
+Closes the statistical-evidence arm of the CENTRAL THESIS. **NB → bumps W1b:**
+generic domains can now confirm on real *or* agent-typed arrays until W1b enforces
+the provenance tag — W1b is now the last gate keeping fabricated inputs out.
 
 **D3 · MED · FIXED (fix/domain-preflight, merged+verified — has_scope_template/has_artifact_models added) — `artifact_models`, `extract_numerical_seeds`,
 `scope_template` default to empty/None.** Individually safe, but together they mean
@@ -329,12 +345,24 @@ mode is known — confirm it's fully closed).
 
 ## LAYER 5 — Orchestrator loop (`campaign_loop.py`, 2369) [partial]
 
-**O1 · MED · OPEN · VERIFIED — breakthrough metric extraction hardcodes ML metric
-names.** `_extract_metric_from_result` (line 508) regexes for
-`val_accuracy|accuracy|test_accuracy` as a fallback. For a non-ML domain (math,
-physics, econ) the metric isn't "accuracy"; only the generic `metric_value` JSON
-path works, and if the worker doesn't emit that exact key, breakthrough detection
-misses — another ML/demo-domain assumption baked in.
+**O1 · MED · FIXED (fix/o1-general-metric, verified — pending merge) — breakthrough
+metric extraction WAS hardcoded to ML metric names.** Correction: the fn is
+`_extract_primary_metric_from_worker_result` (campaign_loop.py; the registry's
+`_extract_metric_from_result` name was wrong — it doesn't exist). It regexed
+`val_accuracy|accuracy|test_accuracy`, so a non-ML domain (math/physics/econ) whose
+worker didn't emit the exact `metric_value` key missed breakthrough detection.
+Fix: new `_find_declared_metric` extracts the campaign's DECLARED `metric_name`
+first (own key → `metric_value`+matching `metric_name` → common sub-dicts
+`metrics/scores/results/evidence/output`); ML accuracy fallbacks fire ONLY when
+`_is_accuracy_metric(metric_name)`; otherwise fail-closed `None` (never substitutes
+a differently-named value). Core `is_breakthrough` was already declared-metric-aware
+(`finding.get("metric_value") or finding.get(self.metric_name)`) — no core edit
+needed. **Verified by me:** helpers confirmed imported from the worktree; 15 tests
+pass (non-ML metric drives `is_breakthrough`; ML `val_accuracy` regression intact;
+fail-closed on missing/wrong-name metric). One pre-existing unrelated failure
+(`test_gold_corpus_enforcement`, empty gold-corpus data file) — the subagent
+verified via `git stash` it fails identically on base; to be re-confirmed by the
+post-merge full suite.
 
 **O2 · MED · FIXED (fix/loop-honesty, merged+verified) · VERIFIED — several `except Exception: pass` swallow errors
 in the loop** (lines ~373, 507, 515, 733, 1369, 1404, 1469-74). Salvage/preflight
@@ -421,8 +449,16 @@ domain-generality blockers). Nothing below is cleared yet.
   `meta_science.py`, `policy_*`) — JSON last-writer-wins; does prior knowledge
   improve later campaigns or just accumulate? Is any of it read back and used?
 - **L9 Paper** (`paper_compiler.py`, `paper_sections.py`, `paper_gate.py`,
-  `research_quality.py`) — does the paper reflect the real trace, or can it
-  present inconclusive/absent findings as results?
+  `research_quality.py`) — **SURVEYED (read-only): honest.** `_effective_verdict`
+  (paper_compiler.py:211) is the single source of truth for outcome counts and
+  downgrades before the reader: 0 steps → `unexecuted` (excluded); `confirmed`
+  with no metric AND no verified-true-steps → `inconclusive`; a `confirmed`
+  CONTROL hypothesis → `inconclusive`; plus `_enrich_finding_row`→None /
+  `paper_eligible_finding` filtering (P5.1). So absent/unsupported "confirmed"
+  verdicts cannot be presented as results. Residual **PAPER1 · LOW** — the LLM
+  writes prose over the (correctly-bucketed) findings and could soft-embellish
+  within an already-gated confirmed finding; counts/verdicts themselves are
+  deterministic. Not opened as an actionable issue (low, structural gate sound).
 - **L10 API + events + persistence** (`routes/*`, `stream.py`, `events.py`,
   `db.py`, `campaign_db.py`) — SSE/event integrity, resume correctness.
 - **L11 Tools registry** (`tools/*`) — are the STEM tools real computations or
