@@ -4,13 +4,27 @@ from __future__ import annotations
 from propab.verdict_pipeline import run_verdict_pipeline
 
 
-def test_ml_evidence_confirms():
+def test_ml_evidence_with_permutation_null_confirms():
+    """A statistical result confirms ONLY when it carries a passing, independent
+    adversarial null. This case supplies an outcome-permutation null (p<0.01) at
+    large n, so it survives the artifact gate and confirms.
+
+    (Replaces the old ``test_ml_evidence_confirms``, which asserted the V2 bug:
+    a bare ``verified_true_steps>=2`` counter with no proof method and no null
+    used to bypass the artifact gate and "confirm". That is no longer honest —
+    such evidence is now routed through the gate and fails closed.)
+    """
     evidence = {
         "metric_value": 0.94,
         "baseline_value": 0.90,
-        "p_value": 0.01,
+        "p_value": 0.001,
         "effect_size": 0.8,
-        "verified_true_steps": 3,
+        "delta": 0.04,
+        "relevance_score": 0.5,
+        "n_metric_steps": 3,
+        "permutation_p": 0.002,
+        "n_samples": 400,
+        "verified_true_steps": 0,
         "verified_false_steps": 0,
         "metric_direction": "higher_is_better",
         "verdict_reason": "significance gate passed",
@@ -18,6 +32,61 @@ def test_ml_evidence_confirms():
     verdict, confidence, reason = run_verdict_pipeline(evidence)
     assert verdict == "confirmed"
     assert confidence >= 0.85
+
+
+def test_bare_counter_no_longer_bypasses_artifact_gate():
+    """V2: verified_true_steps>=2 with method 'significance' (or no method) must
+    NOT be treated as deterministic and must NOT bypass the artifact gate. With
+    no adversarial null present, it fails closed to inconclusive."""
+    evidence = {
+        "metric_value": 0.94,
+        "baseline_value": 0.90,
+        "p_value": 0.01,
+        "effect_size": 0.8,
+        "verified_true_steps": 3,
+        "verified_false_steps": 0,
+        "verification_method": "significance",
+        "metric_direction": "higher_is_better",
+    }
+    verdict, _confidence, _reason = run_verdict_pipeline(evidence)
+    assert verdict != "confirmed"
+    assert verdict == "inconclusive"
+
+
+def test_statistical_with_permutation_null_absent_stays_inconclusive():
+    """A statistical result WITHOUT any real null stays inconclusive (fail-closed):
+    a bare significance p-value can never confirm on its own."""
+    evidence = {
+        "metric_value": 0.94,
+        "baseline_value": 0.90,
+        "p_value": 0.001,
+        "effect_size": 0.8,
+        "delta": 0.04,
+        "relevance_score": 0.5,
+        "n_metric_steps": 3,
+        "verified_true_steps": 0,
+        "verified_false_steps": 0,
+    }
+    verdict, _confidence, reason = run_verdict_pipeline(evidence)
+    assert verdict == "inconclusive"
+    assert "holdout" in reason.lower() or "null" in reason.lower()
+
+
+def test_statistical_permutation_null_small_n_stays_inconclusive():
+    """Even a strict permutation p fails closed when n is too small to trust it."""
+    evidence = {
+        "metric_value": 0.94,
+        "p_value": 0.001,
+        "delta": 0.04,
+        "relevance_score": 0.5,
+        "n_metric_steps": 3,
+        "permutation_p": 0.001,
+        "n_samples": 30,
+        "verified_true_steps": 0,
+        "verified_false_steps": 0,
+    }
+    verdict, _confidence, _reason = run_verdict_pipeline(evidence)
+    assert verdict == "inconclusive"
 
 
 def test_deterministic_math_proof_confirms():
