@@ -48,6 +48,49 @@ def test_dedup_allows_scope_narrowing_but_rejects_rephrasing() -> None:
     assert dup2 is True
 
 
+def test_deepening_confirmed_bypasses_type_diversity_force() -> None:
+    """The anti-monoculture type-diversity force must NOT reject the narrowing of
+    a CONFIRMED finding — deepening one finding is inherently single-type and is
+    exactly convergence. Without this the diversity force rejected 8/8 narrowing
+    children and the search stalled at depth ~4 (investigation report §6e)."""
+    from propab.campaign_synthesis import _is_deepening_confirmed
+    from propab.hypothesis_tree import HypothesisNode
+
+    confirmed = HypothesisNode(id="p", text="finding", parent_id=None, depth=1, verdict="confirmed")
+    inconclusive = HypothesisNode(id="q", text="other", parent_id=None, depth=1, verdict="inconclusive")
+    by_id = {"p": confirmed, "q": inconclusive}
+    # narrowing (boundary) of a confirmed parent -> exempt from diversity force
+    assert _is_deepening_confirmed({"expansion_type": "boundary", "parent_id": "p"}, by_id) is True
+    # a lateral/alternative expansion is not a deepening move -> still subject to it
+    assert _is_deepening_confirmed({"expansion_type": "alternative", "parent_id": "p"}, by_id) is False
+    # deepening an inconclusive parent is not convergence of a finding -> subject to it
+    assert _is_deepening_confirmed({"expansion_type": "boundary", "parent_id": "q"}, by_id) is False
+
+
+def test_narrowing_child_survives_high_relevance_gate() -> None:
+    """A narrowing child's lexical question-relevance drops as it narrows, so a
+    child (refinement of an in-tree, on-topic parent) must bypass the lexical
+    relevance THRESHOLD — else the search can't narrow past level 1 (report §6d).
+    Even at a punishing threshold the child is kept."""
+    from propab.belief_state import CampaignBeliefState
+    from propab.campaign_synthesis import apply_synthesis_to_frontier
+    from propab.hypothesis_tree import HypothesisTree
+
+    tree = HypothesisTree()
+    parent = tree.add_seeds([{"text": "crossing near n=35000", "test_methodology": "numeric_sweep"}], generation=0)[0]
+    tree.update_node(parent.id, "confirmed", 0.9, 'evidence={"verdict_reason": "sweep"};')
+    parsed = {"beliefs": [], "frontier_candidates": [{
+        "id": "c1", "parent_id": parent.id, "expansion_type": "boundary",
+        "text": "crossing within n in [34500,35500]", "test_methodology": "numeric_sweep",
+    }], "direction_exhausted": False}
+    added, metrics = apply_synthesis_to_frontier(
+        tree, CampaignBeliefState(), parsed, question="Where does the ratio cross 0.60 for n in [10000,50000]?",
+        generation=1, relevance_threshold=0.99,
+    )
+    assert len(added) == 1  # kept despite threshold 0.99, because it's a child refinement
+    assert metrics.get("n_rejected_low_relevance", 0) == 0
+
+
 def test_methodology_filter_rejects_simulated_annealing() -> None:
     kw = MathCombinatoricsPlugin().implementable_methodologies()
     assert not methodology_implementable(

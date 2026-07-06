@@ -67,6 +67,24 @@ def text_similarity(a: str, b: str) -> float:
     return max(full, core)
 
 
+def _text_similarity_ge(a_norm: str, a_key: str, b_text: str, floor: float) -> float:
+    """`text_similarity` with the same result whenever it is ≥ ``floor``, but it
+    skips the O(n²) ``ratio()`` when difflib's O(1) ``real_quick_ratio`` upper
+    bound already proves the pair is below ``floor``. The dedup compares every
+    candidate against every existing node (O(N²) per round), so at 130 nodes a
+    synthesis round took ~16s and grew quadratically — enough to make a long
+    campaign crawl (investigation report §6f). ``real_quick_ratio`` is a true
+    upper bound on ``ratio``, so pruning below ``floor`` is exact for the only
+    decisions that use this value (≥ threshold, and the ≥0.98 duplicate test).
+    Returns 0.0 when provably below ``floor`` (i.e. not similar)."""
+    b_norm = _norm_text(b_text)
+    sm = SequenceMatcher(None, a_norm, b_norm)
+    full = sm.ratio() if sm.real_quick_ratio() >= floor else 0.0
+    sk = SequenceMatcher(None, a_key, _dedup_key(b_text))
+    core = sk.ratio() if sk.real_quick_ratio() >= floor else 0.0
+    return max(full, core)
+
+
 def _distinct_parameters(cand_nums: frozenset[str], existing_text: str, similarity: float) -> bool:
     """True when a textually-similar candidate is actually a DISTINCT experiment
     (different numeric parameters) — a narrowing step, not a rephrasing — so it
@@ -89,10 +107,13 @@ def _is_duplicate_frontier_candidate(
     threshold: float = FRONTIER_DEDUP_SIMILARITY,
 ) -> tuple[bool, str]:
     cand_nums = _numeric_signature(text)
+    a_norm = _norm_text(text)
+    a_key = _dedup_key(text)
+    floor = min(threshold, 0.98)
     for existing in tree.nodes.values():
         existing_text = existing.text if hasattr(existing, "text") else str(existing.get("text", ""))
         existing_id = existing.id if hasattr(existing, "id") else str(existing.get("id", "?"))
-        similarity = text_similarity(text, existing_text)
+        similarity = _text_similarity_ge(a_norm, a_key, existing_text, floor)
         if allowed_parent_id and existing_id == allowed_parent_id and similarity < 0.98:
             continue
         if similarity >= threshold and _distinct_parameters(cand_nums, existing_text, similarity):
@@ -100,7 +121,7 @@ def _is_duplicate_frontier_candidate(
         if similarity >= threshold:
             return True, f"tree_node:{existing_id}"
     for sibling in same_round_texts:
-        sim = text_similarity(text, sibling)
+        sim = _text_similarity_ge(a_norm, a_key, sibling, floor)
         if sim >= threshold and _distinct_parameters(cand_nums, sibling, sim):
             continue
         if sim >= threshold:
@@ -197,6 +218,23 @@ def _candidate_parent_ids(item: dict[str, Any]) -> list[str]:
             seen.add(node_id)
             out.append(node_id)
     return out
+
+
+_DEEPENING_EXPANSION_TYPES = frozenset({"boundary", "mechanistic", "generalization", "refinement"})
+
+
+def _is_deepening_confirmed(item: dict[str, Any], eligible_by_id: dict[str, HypothesisNode]) -> bool:
+    """True when a candidate refines (narrows) a CONFIRMED parent — the
+    convergence move. Such candidates must bypass the anti-monoculture type-
+    diversity force, which otherwise rejects the deepening of any single finding
+    (a confirmed lineage is inherently one problem type)."""
+    if str(item.get("expansion_type") or "").lower() not in _DEEPENING_EXPANSION_TYPES:
+        return False
+    for pid in _candidate_parent_ids(item):
+        parent = eligible_by_id.get(pid)
+        if parent is not None and getattr(parent, "verdict", None) == "confirmed":
+            return True
+    return False
 
 
 def _preferred_parent_verdicts(item: dict[str, Any]) -> tuple[str, ...]:
@@ -399,6 +437,7 @@ def apply_synthesis_to_frontier(
     candidate_dicts: list[dict[str, Any]] = []
     same_round_texts: list[str] = []
     eligible_parents = _eligible_expansion_parents(tree)
+    _eligible_by_id = {p.id: p for p in eligible_parents}
     critical_raw: list[dict[str, Any]] = []
     other_raw: list[dict[str, Any]] = []
     for item in _candidate_dicts(parsed):
@@ -421,7 +460,17 @@ def apply_synthesis_to_frontier(
             continue
         bucket = classify_hypothesis_bucket(raw_text, methodology)
         problem_type = bucket.get("problem_type")
-        if forced_type and problem_type != forced_type:
+        # The forced-type (anti-monoculture) diversity filter governs BREADTH —
+        # it stops the tree becoming all-one-problem-type of ROOT hypotheses. It
+        # must NOT reject a candidate that DEEPENS a confirmed finding: narrowing
+        # a real result is inherently single-type ("monoculture" of that finding)
+        # and is exactly convergence. Without this exemption the diversity force
+        # rejected every narrowing child once a finding was being pursued
+        # (measured: n_rejected_diversity=8/8, search stalls at depth ~4 even with
+        # every experiment confirming; investigation report §6e). Deepening
+        # refinements of a confirmed parent bypass the type-diversity force;
+        # breadth/root candidates still face it.
+        if forced_type and problem_type != forced_type and not _is_deepening_confirmed(item, _eligible_by_id):
             metrics["n_rejected_diversity"] = int(metrics.get("n_rejected_diversity") or 0) + 1
             logger.debug(
                 "Rejected non-forced problem type %s (need %s): %s",
@@ -582,10 +631,25 @@ def apply_synthesis_to_frontier(
             strip_question_suffix = lambda t: t  # type: ignore[misc, assignment]
 
         core = strip_question_suffix(node.text)
-        node.question_relevance_score = _question_relevance(question, snippets, core)
-        if node.parent_id:
+        rel = _question_relevance(question, snippets, core)
+        # The lexical question-relevance gate is for ROOT bootstrap hypotheses.
+        # A synthesis CHILD is a refinement of an in-tree parent and has already
+        # passed the on-topic check + scope validation + dedup, so it is relevant
+        # by construction — yet its lexical relevance DROPS as it narrows (its
+        # specific region/values drift from the question's original wording).
+        # Measured: full region 0.43 passes, any narrowed sub-region 0.33 fails
+        # the 0.35 gate → the search could never narrow past level 1 (investigation
+        # report §6d). So children bypass the lexical threshold (topicality is
+        # already enforced), and inherit their parent's relevance floor for
+        # frontier RANKING so deep refinements aren't down-ranked into oblivion.
+        is_child = bool(node.parent_id)
+        if is_child:
             node.lineage_length = tree.lineage_length(node.parent_id) + 1
-        if (node.question_relevance_score or 0) >= relevance_threshold:
+            parent = tree.nodes.get(node.parent_id)
+            parent_rel = float(getattr(parent, "question_relevance_score", 0) or 0) if parent else 0.0
+            rel = max(rel, parent_rel)
+        node.question_relevance_score = rel
+        if is_child or rel >= relevance_threshold:
             filtered.append(node)
         else:
             # Count it — a candidate that passed dedup/scope but is dropped here
