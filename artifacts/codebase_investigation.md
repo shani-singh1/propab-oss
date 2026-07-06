@@ -276,7 +276,7 @@ Files: `domain_modules/base.py`, `registry.py`, plugins, `domain_adapters/*`,
 `domain_profiles/*`. Core imports no domain constant — architecturally clean — but
 the *defaults* decide what happens for an unsupported domain:
 
-**D1 · CRITICAL · OPEN · VERIFIED — `preflight()` defaults to `passed=True`.**
+**D1 · CRITICAL · FIXING (agent: fix/domain-preflight) · VERIFIED — `preflight()` defaults to `passed=True`.**
 (base.py:170) The "fail-fast power check" that is supposed to refuse an
 underpowered domain in seconds **fails open**: any domain that doesn't override
 preflight launches a full campaign. So the gate protects only the domains that
@@ -291,7 +291,7 @@ a verification path (or a LOFO adapter) produces no confirmable evidence — its
 experiments error to `inconclusive`. There is no generic "run experiment → get
 statistics → confirm with a permutation null" path. See CENTRAL THESIS.
 
-**D3 · MED · PENDING — `artifact_models`, `extract_numerical_seeds`,
+**D3 · MED · FIXING (agent: fix/domain-preflight) — `artifact_models`, `extract_numerical_seeds`,
 `scope_template` default to empty/None.** Individually safe, but together they mean
 a generic domain gets: no artifact vocabulary (gate has nothing domain-specific),
 no numerical-seed compounding, no scope templates → the scope/OOD gates degrade to
@@ -332,13 +332,13 @@ physics, econ) the metric isn't "accuracy"; only the generic `metric_value` JSON
 path works, and if the worker doesn't emit that exact key, breakthrough detection
 misses — another ML/demo-domain assumption baked in.
 
-**O2 · MED · OPEN · SUSPECTED — several `except Exception: pass` swallow errors
+**O2 · MED · FIXING (agent: fix/loop-honesty) · SUSPECTED — several `except Exception: pass` swallow errors
 in the loop** (lines ~373, 507, 515, 733, 1369, 1404, 1469-74). Salvage/preflight
 ones are intentionally best-effort (fine), but the others need a read to confirm
 none hide a real failure (e.g. a synthesis or dispatch error swallowed so the
 round looks empty rather than errored). PENDING targeted read.
 
-**O3 · MED · OPEN · SUSPECTED — "success" stop reasons mask zero-finding
+**O3 · MED · FIXING (agent: fix/loop-honesty) · SUSPECTED — "success" stop reasons mask zero-finding
 campaigns.** A campaign that confirms nothing still finalizes with a normal
 `HYPOTHESIS_CAP_REACHED` / `TIME_BUDGET_EXHAUSTED` and writes a paper — presenting
 as a completed run. This is the "every layer reports success" half of the CENTRAL
