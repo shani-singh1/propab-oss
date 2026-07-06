@@ -265,3 +265,164 @@ def test_ungrounded_belief_goes_to_proposed_list() -> None:
     assert len(state.active_beliefs) == 0
     assert len(state.proposed_ungrounded_beliefs) == 1
     assert metrics.ungrounded_belief_count == 1
+
+
+# --- A4: domain-general binding — genuine cross-domain supporters bind, ----------
+# --- fabricated/irrelevant ones are still rejected, using NONE of the ------------
+# --- hardcoded biology tag vocab (LOFO / within-family / feature tokens). --------
+
+ECON_BELIEF = (
+    "Binding minimum wage floors reduce teenage employment in low-income urban labor "
+    "markets; the disemployment effect strengthens as the wage floor becomes binding."
+)
+
+# Genuine economics supporter. Its structured claim_scope + finding are about the
+# SAME subject as the belief, yet it matches none of the biology tag regexes, so
+# under the old surface-tag-only logic it produced empty test_targets and was
+# rejected as ``cited_node_untyped_for_citing_claim`` / ``both_subjects_untyped``.
+ECON_SUPPORT_NODE = {
+    "id": "econ-support-1",
+    "text": (
+        "Does a binding minimum wage floor reduce teenage employment in urban labor markets? "
+        "Population: 240 metropolitan labor markets. OOD test: hold out one census region."
+    ),
+    "verdict": "confirmed",
+    "claim_scope": {
+        "population": "240 metropolitan low-income labor markets",
+        "distribution": "urban teenage employment records",
+        "claimed_generalization": "binding minimum wage floors reduce teenage employment",
+        "ood_test": "hold out one census region",
+    },
+    "finding": {
+        "claim": "Binding minimum wage floors reduced teenage employment by 3.1% in low-income urban markets.",
+        "metric_name": "employment_elasticity",
+    },
+    "mechanism_id": "minimum_wage_disemployment",
+}
+
+# Fabricated / unrelated node cited for the SAME econ belief — an unrelated physics
+# claim. It shares NO subject-specific term with the belief, only generic scope
+# scaffolding ("hold out one ...", "Population:"), which is stripped before
+# comparison, so it must stay rejected.
+FABRICATED_PHYSICS_NODE = {
+    "id": "phys-fab-1",
+    "text": (
+        "Does increasing lattice temperature raise superconductor critical current? "
+        "Population: 40 niobium samples. OOD test: hold out one fabrication batch."
+    ),
+    "verdict": "confirmed",
+    "claim_scope": {
+        "population": "40 niobium thin-film samples",
+        "distribution": "cryogenic transport measurements",
+        "claimed_generalization": "lattice temperature raises critical current",
+        "ood_test": "hold out one fabrication batch",
+    },
+    "finding": {
+        "claim": "Critical current fell 12% per kelvin of lattice temperature increase.",
+        "metric_name": "critical_current",
+    },
+    "mechanism_id": "cooper_pair_breaking",
+}
+
+
+def test_cross_domain_supporter_binds_via_structured_overlap() -> None:
+    """(a) A genuine economics supporter binds through structured overlap,
+    despite using none of the biology tag vocab (both sides have empty tags)."""
+    citing = extract_subject_from_statement(ECON_BELIEF)
+    assert not citing.test_targets, "econ belief must have no biology tags"
+    result = binding_check_statement_to_node(ECON_BELIEF, ECON_SUPPORT_NODE)
+    assert result.match, result.reason
+    # Bound on shared claim/scope subject terms, not on any biology tag path.
+    assert result.reason.startswith(("shared_claim_terms", "shared_scope_subject",
+                                     "shared_mechanism_or_feature"))
+
+
+def test_cross_domain_fabricated_node_still_rejected() -> None:
+    """(b) A fabricated physics node cited for the econ belief shares no
+    subject-specific term and must be rejected — integrity line held."""
+    result = binding_check_statement_to_node(ECON_BELIEF, FABRICATED_PHYSICS_NODE)
+    assert not result.match
+    assert result.reason in ("no_subject_overlap", "both_subjects_untyped")
+
+
+def test_cross_domain_filter_keeps_supporter_strips_fabrication() -> None:
+    """(a)+(b) together on the real filter path: the genuine supporter survives,
+    the fabricated node is stripped, no biology vocab involved."""
+    nodes = {
+        ECON_SUPPORT_NODE["id"]: ECON_SUPPORT_NODE,
+        FABRICATED_PHYSICS_NODE["id"]: FABRICATED_PHYSICS_NODE,
+    }
+    metrics = BindingMetrics()
+    accepted = filter_node_citations(
+        ECON_BELIEF,
+        [ECON_SUPPORT_NODE["id"], FABRICATED_PHYSICS_NODE["id"]],
+        nodes,
+        metrics=metrics,
+    )
+    assert ECON_SUPPORT_NODE["id"] in accepted
+    assert FABRICATED_PHYSICS_NODE["id"] not in accepted
+    assert metrics.binding_accepted_count >= 1
+    assert metrics.binding_rejected_count >= 1
+
+
+def test_single_shared_word_is_incidental_not_a_bind() -> None:
+    """A node sharing only ONE content word with the belief (and no scope /
+    mechanism / feature overlap) is incidental and must NOT bind — this is what
+    keeps loosely-related citations out."""
+    belief = "Rising interest rates cool housing demand in coastal metros."
+    # Shares only the single content word 'housing' — nothing else in common.
+    incidental_node = {
+        "id": "incidental-1",
+        "text": (
+            "Does solar panel efficiency degrade with rooftop housing age? "
+            "Population: 500 rooftop installations. OOD test: hold out one manufacturer."
+        ),
+        "verdict": "confirmed",
+        "claim_scope": {
+            "population": "500 rooftop solar installations",
+            "claimed_generalization": "panel efficiency degrades with age",
+            "ood_test": "hold out one manufacturer",
+        },
+        "finding": {"claim": "Rooftop housing panels lost 0.5% efficiency per year."},
+    }
+    result = binding_check_statement_to_node(belief, incidental_node)
+    assert not result.match, result.reason
+
+
+def test_shared_mechanism_id_binds_across_domain() -> None:
+    """A node sharing an explicit mechanism_id with a belief that names that
+    mechanism binds — an unambiguous, domain-general subject anchor."""
+    belief = "The credit-channel mechanism amplifies monetary tightening on small firms."
+    node = {
+        "id": "mech-1",
+        "text": "Bank lending contracts sharply after rate hikes for small firms.",
+        "verdict": "confirmed",
+        "claim_scope": {
+            "population": "small firms",
+            "claimed_generalization": "credit channel amplifies tightening",
+            "ood_test": "hold out one lending region",
+        },
+        "mechanism_id": "credit-channel",
+        "feature_subset": ["credit-channel"],
+    }
+    result = binding_check_statement_to_node(belief, node)
+    assert result.match, result.reason
+    # 'credit-channel' appears in both statement salient terms and node ids, so it
+    # binds either on shared_mechanism_or_feature or shared_claim_terms.
+    assert "credit" in result.reason or result.reason.startswith("shared")
+
+
+def test_biology_tagged_supporter_still_binds() -> None:
+    """(c) Existing biology behavior preserved: the within-family redundancy
+    belief still binds to the within-family node via the tag path."""
+    result = binding_check_statement_to_node(REDUNDANCY_BELIEF, WITHIN_FAMILY_NODE)
+    assert result.match
+
+
+def test_biology_insufficiency_vs_lofo_still_rejected() -> None:
+    """(c) Existing biology behavior preserved: the unfalsifiable feature-
+    insufficiency belief still rejects the cross-family LOFO node (the structured
+    path must not override the incompatible-tag guard)."""
+    result = binding_check_statement_to_node(INSUFFICIENCY_BELIEF, LOFO_NODE)
+    assert not result.match
+    assert "lofo" in result.reason.lower() or "insufficient" in result.reason.lower() or "overlap" in result.reason.lower()
