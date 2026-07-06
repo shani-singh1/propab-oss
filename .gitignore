@@ -43,6 +43,9 @@ artifacts/*
 !artifacts/ap_free_preflight_n50000.json
 !artifacts/econometrics_discoverybench_hms.json
 
+# Codebase investigation report (living map of architecture + failure analysis)
+!artifacts/codebase_investigation.md
+
 # Literature service artifacts (agent3.md "Artifacts to maintain")
 !artifacts/literature_coverage.json
 !artifacts/literature_misses.json
