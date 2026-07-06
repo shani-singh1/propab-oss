@@ -196,6 +196,63 @@ def test_synthesis_pass_rejects_fabricated_citation_before_persist() -> None:
     assert int(metrics.get("binding_rejected_count") or 0) >= 1
 
 
+# --- Audit A2: binding is conservative-by-design (CLEARED), pinned on examples ---
+#
+# The binding is surface-lexical: it accepts a citation only when it can find
+# shared deterministic subject tags / population scope. The audit asked whether a
+# genuinely-supporting node with few surface words in common is WRONGLY rejected.
+# The answer is that such a node is indeed rejected — but so is a fabricated node,
+# and the two are INDISTINGUISHABLE from surface text alone. Loosening the
+# "untyped cited node" rule to admit the plain-language supporter would necessarily
+# admit fabricated citations too, breaking the integrity contract ("empty honest
+# fields beat populated false ones"). So the behavior is left unchanged; these
+# tests pin the correct accept/reject outcomes.
+
+REDUNDANCY_TAGGED_BELIEF = (
+    "Sequence redundancy inflates apparent within-family predictive performance."
+)
+
+# A node that genuinely supports the belief AND happens to contain the subject
+# vocabulary (redundancy / clustered split) → shares a real tag → accepted.
+REAL_SUPPORT_TAGGED_NODE = {
+    "id": "n-real-support-tagged",
+    "text": (
+        "Ridge regression on a single evolutionary family collapses to near-zero R2 once "
+        "nearest-neighbor sequence identity is capped below 50 percent under clustered split."
+    ),
+    "verdict": "confirmed",
+}
+
+# A node that genuinely supports the belief but is written in PLAIN language with
+# none of the trigger vocabulary → no tags → rejected as untyped-for-claim. This
+# is the conservative default: from surface text alone it cannot be told apart
+# from a fabricated node, so binding must not admit it.
+REAL_SUPPORT_PLAIN_NODE = {
+    "id": "n-real-support-plain",
+    "text": "We grouped homologous proteins, held one group out entirely, and the model did no better than chance.",
+    "verdict": "confirmed",
+}
+
+
+def test_cleared_tagged_supporter_is_accepted() -> None:
+    result = binding_check_statement_to_node(REDUNDANCY_TAGGED_BELIEF, REAL_SUPPORT_TAGGED_NODE)
+    assert result.match
+    assert "sequence_redundancy" in result.reason
+
+
+def test_cleared_plain_supporter_rejected_same_as_fabricated() -> None:
+    """A plain-language supporter and a fabricated node are rejected identically.
+
+    This is the crux of the CLEARED verdict: both are 'untyped for the claim', so
+    admitting the honest one would admit the fabricated one. Behavior is correct.
+    """
+    plain = binding_check_statement_to_node(REDUNDANCY_TAGGED_BELIEF, REAL_SUPPORT_PLAIN_NODE)
+    fabricated = binding_check_statement_to_node(REDUNDANCY_TAGGED_BELIEF, FABRICATED_UNRELATED_NODE)
+    assert not plain.match
+    assert not fabricated.match
+    assert plain.reason == fabricated.reason == "cited_node_untyped_for_citing_claim"
+
+
 def test_ungrounded_belief_goes_to_proposed_list() -> None:
     """Beliefs with zero supporting nodes cannot enter active_beliefs."""
     state = CampaignBeliefState()
