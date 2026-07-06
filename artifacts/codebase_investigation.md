@@ -199,7 +199,7 @@ to 7), confirmed nodes 1.3→17.3, narrowing-dedup reject 0.32→0.001.
 Files: `sub_agent_loop.py` (2418), `think_act.py` (585), `sandbox_code_rewrite.py`.
 Produces the raw evidence every verdict trusts. Highest-leverage remaining layer.
 
-**W1 · HIGH · OPEN · VERIFIED — the anti-fabrication guard is a 3-item denylist.**
+**W1 · HIGH · FIXING (agent: fix/worker-provenance) · VERIFIED — the anti-fabrication guard is a 3-item denylist.**
 `think_act._is_spec_example_params` (line 350) detects an agent using placeholder
 numbers only by exact-matching three hardcoded tool-spec example arrays
 (`[0.9,0.88,0.91]`, `[0.1,0.2,0.15,0.18]`, `[0.42,0.44,0.41]`). Any *other*
@@ -253,7 +253,7 @@ recompute the null from raw per-sample data (require the worker to return the ra
 arrays / a reproducible artifact), or at minimum FAIL-closed when the strong null
 stats are absent instead of falling back to `lofo>0`.
 
-**A2 · HIGH · PENDING — does evidence binding reject genuine support?**
+**A2 · HIGH · FIXING (agent: fix/evidence-binding) — does evidence binding reject genuine support?**
 `evidence_binding.filter_node_citations` runs at write time and is credited with
 "belief citation integrity." If it is too strict, beliefs never accrue supporting
 nodes → beliefs stay `unclear` → (with the exhaustion logic) the branch trends to
