@@ -291,16 +291,25 @@ turns confirmed findings into narrower confirmed findings substantially more,
 instead of adding shallow roots. This is the convergence analog of the literature
 n=100 eval: same "measure, don't guess" discipline.
 
-**Iter 2 [NEXT] — synthesis should DERIVE, not infer, lineage (§3.2).** Make the
-synthesis prompt require each candidate to name the `parent_id` it refines + the
-specific open uncertainty it closes; code prefers explicit derivation, falls back
-to similarity-inference only when the LLM declines; log the explicit-vs-inferred
-ratio.
+**Iter 2 [DONE] — lineage-derivation quality is now measured (§3.2).** Correction
+from first-pass audit: `prompts/synthesis_task.md` *already* requires each
+candidate to set `parent_id` to a listed target and to "reduce uncertainty
+relative to its parent" (boundary/mechanism/generalization for confirmed
+parents), and `_resolve_synthesis_parent` already prefers explicit over inferred.
+So derivation is *requested*; what was missing was knowing whether the LLM
+*complies*. `apply_synthesis_to_frontier` now emits `lineage_derivation_rate`
+(+ `n_lineage_explicit`/`n_lineage_inferred`) — of candidates that became
+children, the fraction that named an explicit parent vs. fell back to
+similarity-inference. A low rate on a real campaign = structural depth with
+arbitrary edges → then (and only then) strengthen the prompt/parsing. The
+`_parent_mode` was previously computed and discarded; now surfaced.
 
-**Iter 3 [NEXT] — wire `confirmed_lineage_depth` into per-round health logging**
-(`health_metrics.py` / `campaign_synthesis_events`) so a non-converging campaign
-is *visible* and later *steerable*, closing the "debug by which number is out of
-range" loop for convergence specifically.
+**Iter 3 [DONE] — `confirmed_lineage_depth` wired into per-round metrics.**
+Emitted on the `campaign.synthesis` progress event alongside the lineage metrics,
+so a non-converging campaign (flat confirmed-lineage depth) is now *visible* —
+closing the "debug by which number is out of range" loop for convergence.
+Both metric methods read node fields defensively so they can never raise into a
+campaign (ARCHITECTURE §11).
 
 **Validation plan (the analog of the literature n=100 eval).** A full live
 campaign needs the whole stack (postgres/redis/celery/workers), so convergence is
