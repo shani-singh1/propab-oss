@@ -722,7 +722,8 @@ graph_invariants (registered first) → verified against synthetic SNAP data (DO
 domains proliferate, an older plugin shadows a correctly-authored newer one. **Fix:**
 `matches()` returns a score; pick max; emit a routing-ambiguity event on a near tie.
 
-**DOM4 (was L7-4) · MED · VERIFIED-by-auditor — graph_invariants `from_hypothesis`
+**DOM4/DOM2b · MED · FIXED (fix/dom4-dom2b-graph-honesty-v2, merged+verified: `_plugin_verification_path` calls `hypothesis_on_topic` (fail-OPEN guard) → off-topic short-circuits to inconclusive; `from_hypothesis` raises `GraphInvariantNotIdentified` instead of defaulting; DOM2b modularity is now real Newman-Q on a Fiedler bipartition [not a fn of clustering — verified within-family |corr|≤0.29] + fixed a bonus `algebraic_connectivity==spectral_gap` identity; 15 tests). Original finding below.**
+**DOM4 (was L7-4) · MED · (was VERIFIED-by-auditor) — graph_invariants `from_hypothesis`
 defaults to `spectral_gap→clustering` for ANY text, and the worker never re-checks
 on-topic.** `_plugin_verification_path` calls `run_verification` directly without
 `hypothesis_on_topic`, so an off-topic/misrouted hypothesis is verified against a fixed
