@@ -57,8 +57,14 @@ logs/
 # Upstream clone — clone separately and apply scripts/patch_astabench_windows.py
 asta-bench/
 
-# Ad-hoc session scratch scripts
+# Ad-hoc session scratch scripts (node/question-specific investigation one-offs)
 scripts/_*.py
+scripts/export_node_*.py
+scripts/reconstruct_*.py
+scripts/watch_*.py
+
+# TypeScript incremental build cache (frontend)
+*.tsbuildinfo
 
 # Mandrake demo dataset wiring (requires private mandrake-data/)
 demo/mandrake/
