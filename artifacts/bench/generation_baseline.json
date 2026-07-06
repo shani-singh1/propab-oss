@@ -1,0 +1,86 @@
+{
+  "metrics": {
+    "duplicate_pass_rate": 0.0,
+    "narrowing_survival_rate": 1.0,
+    "offtopic_rejection_rate": 1.0,
+    "relevance_precision": 1.0,
+    "methodology_implementable_rate": 1.0,
+    "scope_validity_rate": 1.0
+  },
+  "counts": {
+    "n_duplicates": 7,
+    "n_narrowing_children": 6,
+    "n_offtopic_with_gate": 6,
+    "n_unimplementable_with_filter": 3,
+    "n_ungrounded_scope": 5,
+    "n_survivors_full_chain": 9
+  },
+  "n_seeds": 5,
+  "config": {
+    "banks": [
+      "bank_math_sidon",
+      "bank_biology_mandrake",
+      "bank_genomics",
+      "bank_graph_invariants",
+      "bank_generic_econ"
+    ],
+    "domains": [
+      "math_combinatorics",
+      "mandrake",
+      "genomics",
+      "graph_invariants",
+      "generic(none)"
+    ],
+    "offtopic_domains_with_gate": 3,
+    "implementable_filtered_domains": 2,
+    "dedup_threshold": 0.85,
+    "relevance_threshold_e2e": 0.0,
+    "scope": "deterministic post-generation filters only; raw LLM candidate creativity out of scope (measured by campaign outcomes)"
+  },
+  "end_to_end_cross_check": {
+    "math_combinatorics": {
+      "n_rejected_duplicate": 2,
+      "n_rejected_off_topic": 0,
+      "n_rejected_unimplementable": 4,
+      "n_added": 5
+    },
+    "mandrake": {
+      "n_rejected_duplicate": 2,
+      "n_rejected_off_topic": 0,
+      "n_rejected_unimplementable": 0,
+      "n_added": 3
+    },
+    "genomics": {
+      "n_rejected_duplicate": 1,
+      "n_rejected_off_topic": 0,
+      "n_rejected_unimplementable": 3,
+      "n_added": 3
+    },
+    "graph_invariants": {
+      "n_rejected_duplicate": 1,
+      "n_rejected_off_topic": 2,
+      "n_rejected_unimplementable": 0,
+      "n_added": 3
+    },
+    "generic": {
+      "n_rejected_duplicate": 1,
+      "n_rejected_off_topic": 0,
+      "n_rejected_unimplementable": 0,
+      "n_added": 3
+    }
+  },
+  "sanity_check": {
+    "duplicate_pass_rate": {
+      "baseline": 0.0,
+      "dedup_disabled": 1.0,
+      "moved": true
+    },
+    "offtopic_rejection_rate": {
+      "baseline": 1.0,
+      "relevance_disabled": 0.0,
+      "moved": true
+    }
+  },
+  "git_sha": "253cc3a76e0602951acabadff10767b29aaf8380",
+  "timestamp": "2026-07-06T20:25:11.166161+00:00"
+}
