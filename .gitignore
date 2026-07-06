@@ -46,6 +46,10 @@ artifacts/*
 # Codebase investigation report (living map of architecture + failure analysis)
 !artifacts/codebase_investigation.md
 
+# Bench-harness baselines (regression-catchable engineering metrics)
+!artifacts/bench/
+!artifacts/bench/*.json
+
 # Literature service artifacts (agent3.md "Artifacts to maintain")
 !artifacts/literature_coverage.json
 !artifacts/literature_misses.json
