@@ -1924,6 +1924,11 @@ async def run_campaign_loop(
             campaign.question,
             prior_snippets,
             theme_saturation_penalty=theme_penalty,
+            # LL2: thread the loaded learned policy into live frontier scoring so
+            # per-theme boosts/penalties and blocked failure signatures actually
+            # steer which hypotheses the engine dispatches next (bounded nudge —
+            # see HypothesisTree._policy_score_multiplier).
+            policy=search_policy,
         )
         await emitter.emit(
             session_id=campaign.id,
