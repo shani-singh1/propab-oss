@@ -513,7 +513,7 @@ Mann-Whitney, real bootstrap, correct Cohen's d — W1/W1b guards hold). The rot
 the deep-learning / algorithm-optimization tools, several of which fabricate
 measurement-shaped output.
 
-**TOOL1 · CRITICAL · VERIFIED (read myself) — `evaluate_model` fabricates the exact
+**TOOL1 · CRITICAL · FIXED (fix/tool1-real-eval, merged+verified: read diff + 7 new tests + 54 tool-suite pass; train_model persists state_dict+held-out split, evaluate_model bootstraps REAL eval over held-out set or fails closed) — WAS: `evaluate_model` fabricated the exact
 variance the significance gate consumes, with `computed` provenance that W1b trusts.**
 `tools/deep_learning/evaluate_model.py:68-72`: `eval_losses` = one stored
 `final_val_loss` + `torch.randn(n)*max(0.002, val*0.02)` (manufactured 2% jitter), and
@@ -574,7 +574,7 @@ Auditor produced a write-site/read-site map; I verified the top mechanisms.
 baseline → candidate accept/reject, ARE genuinely wired. The dishonesty is the NUMERIC
 policy-learning story.
 
-**LL1 · HIGH · VERIFIED-mechanism (premise pending `add_claim` trace) — `theme_success_rates`
+**LL1 · HIGH · FIXED (fix/ll1-ll3-lifetime, merged+verified) — `theme_success_rates`
 is structurally always 1.0.** `knowledge_graph.py:184-192` computes fraction-confirmed
 over `self.claims`, but `graph.claims` is written only from `extract_confirmed_claims`
 (so it holds ONLY confirmed rows; refuted/inconclusive become `failures`). Every theme
@@ -595,7 +595,7 @@ application (`layer05/policy_dispatch.py`) is called ONLY from offline replay. S
 into `_information_gain_score`. (LL4 · MED — `blocked_failure_signatures` etc. reported
 as enforced but are advisory only.)
 
-**LL3 · MED-HIGH · VERIFIED (read myself) — a single drifted record silently WIPES the
+**LL3 · MED-HIGH · FIXED (fix/ll1-ll3-lifetime, merged+verified: from_dict now field-filters every record; load() re-raises loudly on genuine corruption instead of returning empty-that-overwrites) — WAS: a single drifted record silently WIPES the
 entire lifetime store.** `knowledge_graph.py:212-221` builds records with unfiltered
 `Claim(**v)`/`MechanismRecord(**v)`/…; any persisted key not in the current dataclass
 raises `TypeError`; `load()` (:252-254) catches `TypeError` and returns an EMPTY graph;
@@ -616,7 +616,7 @@ confidence-0 claims with `paper_ids:[]`** (no confidence/replication gate, no pr
 
 ## LAYER 12 — config / llm (audited 2026-07-07) [deep]
 
-**CFG2 · HIGH · VERIFIED (read myself) — LLM client returns a hardcoded PLACEHOLDER
+**CFG2/CFG3 · HIGH · FIXED (fix/cfg2-llm-failclosed, merged+verified: SUPPORTED_LLM_PROVIDERS + LLMConfigError + _validate_llm_config, both placeholder returns removed, config errors non-transient; 58 llm/hypotheses tests pass) — WAS: LLM client returns a hardcoded PLACEHOLDER
 hypothesis on unsupported-provider or missing-key, silently treated as real output.**
 `llm.py:112-130`: after handling ollama/gemini/openai, `if prov != "openai" or not
 self.api_key: return json.dumps([{...placeholder hypothesis...}])` (mirror for gemini
@@ -683,7 +683,7 @@ the primary `campaign-convergence` tree. Its "D1 not present" note is a FALSE AL
 — `base.py:212-270` has `has_verification_capability()` + fail-closed `preflight()`;
 D1 is intact. Do not re-chase. The rest verified real:
 
-**DOM1 (was L7-1) · HIGH · VERIFIED (read myself on primary) — a domain PROFILE
+**DOM1 (was L7-1) · HIGH · FIXED (fix/dom1-profile-preflight, merged+verified: _enforce_domain_preflight now fails closed when a profile resolves but no plugin owns it, finalize STOP_REASON_DOMAIN_PREFLIGHT_FAILED; generic path preserved; 28 tests pass) — WAS: a domain PROFILE
 without a PLUGIN launches with no verification capability and no preflight, yet the
 artifact gate applies its standards.** `econometrics` has a `domain_profiles/econometrics.py`
 profile but NO plugin dir (verified: `ls domain_modules/` has no econ). So
