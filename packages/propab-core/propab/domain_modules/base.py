@@ -106,8 +106,34 @@ class DomainPlugin(ABC):
         registry before this is called; a plugin may additionally recognize its
         own domain from question content here. Content-based heuristics belong
         in the plugin — never in core routing.
+
+        This is the *gate* (owns it or not). When two plugins both gate True on
+        the same question, the registry breaks the tie by :meth:`match_score`
+        rather than registration order — so a plugin should implement
+        ``match_score`` when its markers can collide with another domain's.
         """
         return False
+
+    def match_score(self, *, question: str = "", payload: dict[str, Any] | None = None) -> float:
+        """
+        How strongly this plugin claims the campaign, as a non-negative float.
+
+        The registry uses this to resolve keyword collisions: when several plugins
+        all :meth:`matches` the same question, the one with the highest score wins
+        (registration order is only the final tie-break). Score 0 means "not
+        mine".
+
+        Default: ``1.0`` when :meth:`matches` is True, else ``0.0`` — so a plugin
+        that only overrides ``matches`` keeps working (it just carries no
+        collision-breaking signal beyond "I match"). A plugin whose markers can
+        overlap another domain's should override this to count *how many* of its
+        own specific markers appear, so the better-matching domain is preferred
+        over whichever happened to be registered first.
+        """
+        try:
+            return 1.0 if self.matches(question=question, payload=payload) else 0.0
+        except Exception:  # noqa: BLE001 — a broken matcher must not break scoring
+            return 0.0
 
     # --- Feature space ------------------------------------------------------
     @abstractmethod

@@ -46,6 +46,17 @@ class GraphInvariantsPlugin(DomainPlugin):
         hits = sum(1 for m in self.scope_question_markers if m in q)
         return hits >= 2 or "[domain_profile:graph_invariants]" in q
 
+    def match_score(self, *, question: str = "", payload: dict[str, Any] | None = None) -> float:
+        # Score = number of distinct graph-invariant markers present. Lets the
+        # registry prefer this domain over a colliding one only when more of its
+        # own specific vocabulary appears.
+        if payload and str(payload.get("domain") or payload.get("domain_profile") or "") == "graph_invariants":
+            return float(len(self.scope_question_markers))
+        q = (question or "").lower()
+        if "[domain_profile:graph_invariants]" in q:
+            return float(len(self.scope_question_markers))
+        return float(sum(1 for m in self.scope_question_markers if m in q))
+
     def scope_template(self) -> dict[str, str]:
         return {
             "population": "SNAP subset: 160 graphs × 4 families (ER, BA, WS, lattice)",

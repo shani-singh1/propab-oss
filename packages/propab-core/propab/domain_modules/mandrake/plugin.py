@@ -68,13 +68,23 @@ class MandrakePlugin(DomainPlugin):
             "ood_test": "LOFO on held-out family; label-shuffle permutation p<0.05 required before confirm",
         }
 
+    # Distinct RT-family campaign markers (mirrors the historical
+    # is_mandrake_campaign). Two are required to gate; the count feeds
+    # match_score so a mandrake-vs-enzyme_kinetics collision breaks on marker
+    # density, not registration order.
+    _MATCH_MARKERS = ("rt activity", "reverse transcriptase", "evolutionary family", "biophysical propert")
+
     def matches(self, *, question: str = "", payload: dict[str, Any] | None = None) -> bool:
-        # Mirrors the historical is_mandrake_campaign.
         if payload and str(payload.get("domain") or "") == "mandrake":
             return True
         q = (question or "").lower()
-        markers = ("rt activity", "reverse transcriptase", "evolutionary family", "biophysical propert")
-        return sum(1 for m in markers if m in q) >= 2
+        return sum(1 for m in self._MATCH_MARKERS if m in q) >= 2
+
+    def match_score(self, *, question: str = "", payload: dict[str, Any] | None = None) -> float:
+        if payload and str(payload.get("domain") or "") == "mandrake":
+            return float(len(self._MATCH_MARKERS))
+        q = (question or "").lower()
+        return float(sum(1 for m in self._MATCH_MARKERS if m in q))
 
     def available_features(self) -> list[str]:
         from propab.domain_adapters.mandrake_adapter import _KNOWN_FEATURES

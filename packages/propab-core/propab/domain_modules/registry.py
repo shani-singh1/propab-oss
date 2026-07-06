@@ -4,7 +4,11 @@ Domain plugin registry — the only place core resolves a domain.
 Resolution order (explicit before heuristic):
 1. ``payload["domain"]`` / ``payload["domain_profile"]`` exact id match.
 2. ``[domain_profile:<id>]`` tag in the question.
-3. Each plugin's own ``matches(question, payload)`` (domain-owned heuristics).
+3. Heuristic: every plugin that ``matches(question, payload)`` is scored via
+   ``match_score(...)`` and the HIGHEST-scoring plugin wins. Registration order
+   is only the final, deterministic tie-break — an older plugin can no longer
+   silently shadow a better-matching one on a keyword collision. Near-ties (top
+   two scores within a small margin) are logged as a routing ambiguity.
 
 Core code calls :func:`resolve_domain_plugin` / :func:`get_domain_plugin`; it
 must not import a specific plugin module or inspect question text for domain
@@ -12,16 +16,25 @@ keywords itself.
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
 from propab.domain_modules.base import DomainPlugin
+
+logger = logging.getLogger(__name__)
 
 _TAG = re.compile(r"\[domain_profile:([a-z0-9_]+)\]", re.IGNORECASE)
 
 _PLUGINS: list[DomainPlugin] = []
 _BY_ID: dict[str, DomainPlugin] = {}
 _LOADED = False
+
+# Two matching plugins whose scores differ by no more than this are treated as a
+# genuine routing ambiguity: the higher score still wins (deterministically), but
+# the near-tie is logged so a real collision is visible instead of silently
+# resolved on registration order.
+_AMBIGUITY_MARGIN = 1.0
 
 
 def register_plugin(plugin: DomainPlugin) -> None:
@@ -100,13 +113,47 @@ def resolve_domain_plugin(
         if tagged in _BY_ID:
             return _BY_ID[tagged]
 
-    for plugin in _PLUGINS:
+    # Heuristic routing: ask every plugin how strongly it claims the campaign and
+    # pick the MAX score — not the first match. Collisions (two plugins whose
+    # keyword sets overlap) now resolve to the better-matching domain instead of
+    # whichever was registered first. Registration order survives only as the
+    # final, deterministic tie-break (enumerate index), so behaviour is identical
+    # when exactly one plugin matches.
+    scored: list[tuple[float, int, DomainPlugin]] = []
+    for idx, plugin in enumerate(_PLUGINS):
         try:
-            if plugin.matches(question=question, payload=payload):
-                return plugin
+            if not plugin.matches(question=question, payload=payload):
+                continue
+            score = float(plugin.match_score(question=question, payload=payload))
         except Exception:  # noqa: BLE001 — a broken matcher must not break routing
             continue
-    return None
+        # A plugin that gates True but scores 0 still owns the question (base
+        # default scores 1.0 on match); clamp so it can never lose to a non-match.
+        scored.append((max(score, 1.0), idx, plugin))
+
+    if not scored:
+        return None
+
+    # Highest score wins; ties break on registration order (lowest index first).
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    best_score, _best_idx, best = scored[0]
+
+    if len(scored) > 1:
+        runner_score, _runner_idx, runner = scored[1]
+        if best_score - runner_score <= _AMBIGUITY_MARGIN:
+            logger.warning(
+                "domain routing ambiguity: %r resolved to '%s' (score=%.1f) over "
+                "'%s' (score=%.1f); near-tie within margin %.1f. matched=%s",
+                (question or "")[:160],
+                best.domain_id,
+                best_score,
+                runner.domain_id,
+                runner_score,
+                _AMBIGUITY_MARGIN,
+                [(p.domain_id, s) for s, _i, p in scored],
+            )
+
+    return best
 
 
 def hypothesis_is_on_topic(

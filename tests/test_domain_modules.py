@@ -265,3 +265,84 @@ def test_d3_scope_and_artifact_queries_are_observable():
     # network_diffusion supplies a scope template but no artifact models (no profile).
     assert nd.has_scope_template() is True
     assert nd.has_artifact_models() is False
+
+
+# ── DOM3: keyword collisions route by MATCH SCORE, not registration order ─────
+
+def test_dom3_collision_routes_to_higher_scoring_plugin():
+    """
+    A question that matches two domains routes to the HIGHER-scoring one, not the
+    one registered first. graph_invariants is registered BEFORE math_combinatorics,
+    so under the old first-match logic the graph plugin always won a collision. Here
+    the question is combinatorics-dominant (5 math markers vs 2 graph markers), so
+    the later-registered plugin must win.
+    """
+    q = (
+        "sidon cap set sumset ap-free additive combinatorics "
+        "with a spectral gap on a network family"
+    )
+    gi = get_domain_plugin("graph_invariants")
+    mc = get_domain_plugin("math_combinatorics")
+    # Both gate True — a genuine collision.
+    assert gi.matches(question=q) is True
+    assert mc.matches(question=q) is True
+    # math_combinatorics scores strictly higher.
+    assert mc.match_score(question=q) > gi.match_score(question=q)
+    # Routing follows the score, not registration order.
+    assert resolve_domain_plugin(question=q).domain_id == "math_combinatorics"
+
+
+def test_dom3_registration_first_still_wins_when_it_scores_higher():
+    """The graph plugin should still win when the question is graph-dominant."""
+    q = "spectral gap clustering coefficient network family with a lone sidon set"
+    gi = get_domain_plugin("graph_invariants")
+    mc = get_domain_plugin("math_combinatorics")
+    assert gi.matches(question=q) is True
+    assert mc.matches(question=q) is True
+    assert gi.match_score(question=q) > mc.match_score(question=q)
+    assert resolve_domain_plugin(question=q).domain_id == "graph_invariants"
+
+
+def test_dom3_single_domain_match_is_unchanged():
+    """When exactly one plugin matches, routing is identical to before."""
+    # Pure enzyme question (>=2 enzyme markers, no other domain vocabulary).
+    q = "does kcat rise with enzyme catalytic turnover across brenda ec class families"
+    matching = [p for p in all_plugins() if p.matches(question=q)]
+    assert [p.domain_id for p in matching] == ["enzyme_kinetics"]
+    assert resolve_domain_plugin(question=q).domain_id == "enzyme_kinetics"
+
+
+def test_dom3_explicit_tag_fast_path_still_wins_over_score():
+    """The [domain_profile:X] fast path must beat any heuristic score."""
+    # Question body is graph-heavy, but the explicit tag names math_combinatorics.
+    q = "[domain_profile:math_combinatorics] spectral gap clustering coefficient network family"
+    assert resolve_domain_plugin(question=q).domain_id == "math_combinatorics"
+    # Explicit payload likewise wins.
+    p = resolve_domain_plugin(question=q, payload={"domain": "graph_invariants"})
+    assert p.domain_id == "graph_invariants"
+
+
+def test_dom3_near_tie_emits_routing_ambiguity_log(caplog):
+    """A near-tie (top two scores within the margin) is surfaced as a warning."""
+    import logging
+
+    q = "sidon cap set with spectral gap clustering coefficient network family"
+    with caplog.at_level(logging.WARNING, logger="propab.domain_modules.registry"):
+        resolved = resolve_domain_plugin(question=q)
+    # Higher score still wins deterministically (graph: 3 vs math: 2).
+    assert resolved.domain_id == "graph_invariants"
+    # ...but the near-tie is visible, not silently resolved.
+    assert any("domain routing ambiguity" in r.message for r in caplog.records)
+
+
+def test_dom3_no_ambiguity_log_on_clear_winner(caplog):
+    """A clear winner (score gap beyond the margin) does NOT log an ambiguity."""
+    import logging
+
+    q = (
+        "sidon cap set sumset ap-free additive combinatorics "
+        "with a spectral gap on a network family"
+    )
+    with caplog.at_level(logging.WARNING, logger="propab.domain_modules.registry"):
+        resolve_domain_plugin(question=q)
+    assert not any("domain routing ambiguity" in r.message for r in caplog.records)
