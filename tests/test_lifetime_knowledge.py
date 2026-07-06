@@ -172,3 +172,119 @@ def test_theories_need_min_support():
     theories = form_theories_from_claims(claims, min_support=2)
     assert len(theories) == 1
     assert "spectral" in theories[0].name
+
+
+def _spectral_claims():
+    return extract_confirmed_claims("cid", [
+        {"claim": "a", "verdict": "confirmed", "primary_theme": "spectral", "node_role": "DISCOVERY"},
+        {"claim": "b", "verdict": "confirmed", "primary_theme": "spectral", "node_role": "DISCOVERY"},
+    ])
+
+
+def test_ll5_non_network_theme_is_domain_neutral():
+    """A `spectral` theme in a math/materials campaign gets no contagion framing."""
+    theories = form_theories_from_claims(
+        _spectral_claims(), min_support=2, domain="math_combinatorics",
+    )
+    assert len(theories) == 1
+    th = theories[0]
+    assert th.name == "spectral_theory"
+    blob = " ".join([th.name, *th.assumptions]).lower()
+    assert "contagion" not in blob
+    assert "diffusion" not in blob
+
+
+def test_ll5_no_domain_defaults_to_domain_neutral():
+    """Without a domain hint, a non-diffusion theme still avoids contagion wording."""
+    theories = form_theories_from_claims(_spectral_claims(), min_support=2)
+    th = theories[0]
+    blob = " ".join([th.name, *th.assumptions]).lower()
+    assert "contagion" not in blob and "diffusion" not in blob
+
+
+def test_ll5_network_diffusion_theme_keeps_framing():
+    """A genuine network-diffusion campaign still gets contagion/diffusion framing."""
+    theories = form_theories_from_claims(
+        _spectral_claims(), min_support=2, domain="network_diffusion",
+    )
+    th = theories[0]
+    assert th.name == "spectral_contagion_theory"
+    blob = " ".join(th.assumptions).lower()
+    assert "diffusion" in blob
+
+
+def test_ll5_diffusion_theme_keeps_framing_without_domain():
+    """A theme that is itself about diffusion keeps network framing even w/o domain."""
+    claims = extract_confirmed_claims("cid", [
+        {"claim": "a", "verdict": "confirmed", "primary_theme": "diffusion_dynamics", "node_role": "DISCOVERY"},
+        {"claim": "b", "verdict": "confirmed", "primary_theme": "diffusion_dynamics", "node_role": "DISCOVERY"},
+    ])
+    theories = form_theories_from_claims(claims, min_support=2)
+    assert theories[0].name == "diffusion_dynamics_contagion_theory"
+
+
+def test_ll6_underevidenced_claim_not_promoted():
+    """A T1, confidence-0 single-campaign claim is NOT an established fact."""
+    graph = KnowledgeGraph()
+    graph.add_claim(Claim(
+        id="weak-1",
+        text="Weak unreplicated claim",
+        verdict="confirmed",
+        theme="spectral",
+        confidence=0.0,
+        replication_level="T1",
+        campaign_id="camp-weak",
+    ))
+    assert graph.established_fact_texts() == []
+
+
+def test_ll6_replicated_claim_promoted_with_provenance():
+    """A T2 (replicated) claim IS promoted and carries traceable provenance."""
+    graph = KnowledgeGraph()
+    graph.add_claim(Claim(
+        id="strong-1",
+        text="Replicated claim",
+        verdict="confirmed",
+        theme="spectral",
+        confidence=0.3,  # low confidence but replicated → still promoted
+        replication_level="T2",
+        campaign_id="camp-strong",
+    ))
+    facts = graph.established_fact_texts()
+    assert len(facts) == 1
+    assert facts[0]["paper_ids"]  # non-empty provenance, not []
+    assert "camp-strong" in facts[0]["paper_ids"]
+    assert facts[0]["campaign_id"] == "camp-strong"
+    assert facts[0]["claim_id"] == "strong-1"
+
+
+def test_ll6_high_confidence_t1_promoted():
+    """A T1 claim above the confidence floor is still promoted (OR-gate)."""
+    graph = KnowledgeGraph()
+    graph.add_claim(Claim(
+        id="hc-1",
+        text="High-confidence single-run claim",
+        verdict="confirmed",
+        theme="spectral",
+        confidence=0.85,
+        replication_level="T1",
+        campaign_id="camp-hc",
+    ))
+    facts = graph.established_fact_texts()
+    assert len(facts) == 1
+    assert "camp-hc" in facts[0]["paper_ids"]
+
+
+def test_ll6_gate_filters_mix():
+    """Established facts exclude the weak claim and include the strong one."""
+    graph = KnowledgeGraph()
+    graph.add_claim(Claim(
+        id="weak", text="weak", verdict="confirmed", theme="t",
+        confidence=0.0, replication_level="T1", campaign_id="cw",
+    ))
+    graph.add_claim(Claim(
+        id="strong", text="strong", verdict="confirmed", theme="t",
+        confidence=0.9, replication_level="T3", campaign_id="cs",
+    ))
+    texts = {f["text"] for f in graph.established_fact_texts()}
+    assert texts == {"strong"}
