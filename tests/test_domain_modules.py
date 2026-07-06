@@ -17,6 +17,31 @@ def test_builtin_plugins_registered():
     assert {"materials", "mandrake", "enzyme_kinetics", "graph_invariants"} <= ids
 
 
+def test_uses_synthetic_data_flag_per_domain():
+    """DOM2: synthetic-data domains report True; real-data domains report False.
+
+    The genomics / graph_invariants / enzyme_kinetics demo domains run on
+    seed-generated frames (adapter meta ``synthetic: True``) presented under real
+    dataset names; materials and mandrake use real data.
+    """
+    for did in ("genomics", "graph_invariants", "enzyme_kinetics"):
+        plugin = get_domain_plugin(did)
+        assert plugin is not None, f"{did} plugin not registered"
+        assert plugin.uses_synthetic_data() is True, f"{did} should report synthetic data"
+    for did in ("mandrake", "materials"):
+        plugin = get_domain_plugin(did)
+        assert plugin is not None, f"{did} plugin not registered"
+        assert plugin.uses_synthetic_data() is False, f"{did} should report real data"
+    # The base-class default is honest-by-omission: False.
+    class _Bare(DomainPlugin):
+        domain_id = "bare"
+
+        def available_features(self):
+            return []
+
+    assert _Bare().uses_synthetic_data() is False
+
+
 def test_get_domain_plugin_by_id():
     assert get_domain_plugin("materials").domain_id == "materials"
     assert get_domain_plugin("MANDRAKE").domain_id == "mandrake"

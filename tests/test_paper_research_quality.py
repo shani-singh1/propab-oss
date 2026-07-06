@@ -102,6 +102,31 @@ def _confirmed_control_row(hid: str, rank: int, round_n: int = 0) -> dict:
     }
 
 
+def _confirmed_synthetic_row(hid: str, rank: int, round_n: int = 0) -> dict:
+    """A confirmed finding whose evidence carries data_provenance='synthetic'.
+
+    This mirrors the plugin verification path (genomics/graph_invariants/enzyme),
+    which stores evidence_summary as a bare json.dumps(output) with no ``evidence=``
+    prefix and stamps ``data_provenance``.
+    """
+    return {
+        "id": hid,
+        "rank": rank,
+        "text": "Tissue-specificity tau predicts cross-tissue expression on the GTEx subset",
+        "verdict": "confirmed",
+        "confidence": 0.88,
+        # Bare JSON object (plugin path), including data_provenance and a verified step.
+        "evidence_summary": (
+            '{"lofo_r2": 0.42, "verification_method": "leave_tissue_out", '
+            '"verified_true_steps": 1, "metric_value": 0.42, "data_provenance": "synthetic"}'
+        ),
+        "key_finding": "Tau index carries cross-tissue signal (synthetic GTEx)",
+        "tool_trace_id": None,
+        "round_number": round_n,
+        "step_count": 2,
+    }
+
+
 def _unexecuted_row(hid: str, rank: int, round_n: int = 2) -> dict:
     return {
         "id": hid,
@@ -321,3 +346,113 @@ def test_narrative_honest_when_zero_confirmed(monkeypatch) -> None:
     # No figure claims a confirmed metric when there are no gated confirmations.
     specs = build_figure_specs(findings, reasoning_trace=_REASONING_TRACE)
     assert not [s for s in specs if s["kind"] == "metric_vs_baseline"]
+
+
+# ── DOM2: synthetic-data provenance labelled honestly end-to-end ─────────────
+
+_SYNTH_LABEL = "synthetic dataset (illustrative)"
+
+
+def test_parse_evidence_extracts_synthetic_provenance() -> None:
+    """Both the plugin bare-JSON path and the evidence= path surface provenance."""
+    bare = (
+        '{"lofo_r2": 0.42, "verified_true_steps": 1, "metric_value": 0.42, '
+        '"data_provenance": "synthetic"}'
+    )
+    assert pc.parse_evidence(bare)["data_provenance"] == "synthetic"
+    prefixed = 'evidence={"n_metric_steps": 3, "metric_value": 0.5, "data_provenance": "synthetic"}; steps=3.'
+    assert pc.parse_evidence(prefixed)["data_provenance"] == "synthetic"
+    # A real-data finding carries no provenance marker.
+    real = 'evidence={"n_metric_steps": 3, "metric_value": 0.87, "verified_true_steps": 3}; steps=4.'
+    assert pc.parse_evidence(real)["data_provenance"] is None
+
+
+def test_synthetic_finding_is_gated_confirmed_and_carries_provenance(monkeypatch) -> None:
+    """A confirmed synthetic finding still passes the honesty gate (labelling, not blocking)."""
+    rows = [_confirmed_synthetic_row("hsyn", 1)]
+    findings = _gated_findings(monkeypatch, rows)
+    assert findings["counts"]["confirmed"] == 1
+    f = findings["confirmed"][0]
+    assert f["id"] == "hsyn"
+    # provenance rides on both the finding dict and its parsed stats
+    assert f.get("data_provenance") == "synthetic"
+    assert (f.get("stats") or {}).get("data_provenance") == "synthetic"
+
+
+def test_synthetic_finding_labelled_in_table_narrative_and_methods(monkeypatch) -> None:
+    from propab.paper_compiler import compile_session_methods_latex
+
+    rows = [_confirmed_synthetic_row("hsyn", 1)]
+    findings = _gated_findings(monkeypatch, rows)
+
+    # (1) Findings TABLE: row marked + caption disclosure.
+    ftab = findings_table(findings, baseline=None)
+    assert _SYNTH_LABEL in ftab
+    assert "illustrative" in ftab.lower()
+
+    # (2) NARRATIVE: dedicated synthetic-provenance limitations paragraph.
+    narrative = research_narrative_section(findings, reasoning_trace=_REASONING_TRACE, question="Q?")
+    assert "Data provenance" in narrative
+    assert "synthetic" in narrative.lower()
+
+    # (3) METHODS/limitations: discloses the synthetic dataset limitation.
+    async def _fake_fetch(session_factory, session_id):  # noqa: ANN001
+        return rows
+
+    async def _fake_agg(session_factory, session_id):  # noqa: ANN001
+        return {"tools": {"genomics_verification": 1}, "rounds": 1, "code_steps": 0}
+
+    monkeypatch.setattr(pc, "_fetch_result_rows", _fake_fetch)
+    monkeypatch.setattr(pc, "_aggregate_tool_usage", _fake_agg)
+    methods = asyncio.run(compile_session_methods_latex(None, "sid"))["combined_latex"]
+    assert _SYNTH_LABEL in methods
+    assert "Data provenance and limitations" in methods
+
+
+def test_real_data_finding_is_not_labelled_synthetic(monkeypatch) -> None:
+    """A real-data confirmed finding must NOT be tagged synthetic anywhere."""
+    from propab.paper_compiler import compile_session_methods_latex, compile_session_results_latex
+
+    rows = [_confirmed_metric_row("hreal", 1)]
+    findings = _gated_findings(monkeypatch, rows)
+    assert findings["confirmed"][0].get("data_provenance") is None
+
+    ftab = findings_table(findings, baseline=0.80)
+    assert _SYNTH_LABEL not in ftab
+
+    narrative = research_narrative_section(findings, reasoning_trace=_REASONING_TRACE, question="Q?")
+    assert "Data provenance (synthetic)" not in narrative
+
+    async def _fake_fetch(session_factory, session_id):  # noqa: ANN001
+        return rows
+
+    async def _fake_agg(session_factory, session_id):  # noqa: ANN001
+        return {"tools": {"train_model": 1}, "rounds": 1, "code_steps": 0}
+
+    monkeypatch.setattr(pc, "_fetch_result_rows", _fake_fetch)
+    monkeypatch.setattr(pc, "_aggregate_tool_usage", _fake_agg)
+    methods = asyncio.run(compile_session_methods_latex(None, "sid"))["combined_latex"]
+    assert _SYNTH_LABEL not in methods
+
+    monkeypatch.setattr(pc, "_fetch_result_rows", _fake_fetch)
+    results = asyncio.run(
+        compile_session_results_latex(None, "sid", baseline=0.80, findings=findings)
+    )
+    assert _SYNTH_LABEL not in results
+
+
+def test_synthetic_label_appears_in_results_prose(monkeypatch) -> None:
+    """The Results 'Supported findings' prose sentence marks a synthetic finding."""
+    from propab.paper_compiler import compile_session_results_latex
+
+    rows = [_confirmed_synthetic_row("hsyn", 1)]
+    findings = _gated_findings(monkeypatch, rows)
+
+    async def _fake_fetch(session_factory, session_id):  # noqa: ANN001
+        return rows
+
+    monkeypatch.setattr(pc, "_fetch_result_rows", _fake_fetch)
+    results = asyncio.run(
+        compile_session_results_latex(None, "sid", baseline=None, findings=findings)
+    )
+    assert _SYNTH_LABEL in results

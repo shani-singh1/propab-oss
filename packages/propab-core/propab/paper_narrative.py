@@ -31,6 +31,28 @@ from typing import Any
 from propab.paper_compiler import _latex_escape
 
 
+# ── synthetic-data provenance (DOM2) ─────────────────────────────────────────
+
+SYNTHETIC_LABEL = "synthetic dataset (illustrative)"
+
+
+def _is_synthetic(f: dict[str, Any]) -> bool:
+    """True if a finding is backed by a seed-generated (illustrative) dataset.
+
+    DOM2 honesty fix: a finding whose evidence carries
+    ``data_provenance == "synthetic"`` must be labelled as illustrative in every
+    paper section — never presented as a real-world result.
+    """
+    return str((f.get("stats") or {}).get("data_provenance") or f.get("data_provenance") or "").lower() == "synthetic"
+
+
+def _any_synthetic(findings: dict[str, Any]) -> bool:
+    for verdict in ("confirmed", "refuted", "inconclusive"):
+        if any(_is_synthetic(f) for f in findings.get(verdict) or []):
+            return True
+    return False
+
+
 # ── gated verdict lookup ─────────────────────────────────────────────────────
 
 def gated_verdict_by_id(findings: dict[str, Any]) -> dict[str, str]:
@@ -118,12 +140,24 @@ def findings_table(
     ordered = [("Confirmed", f) for f in confirmed] + [("Refuted", f) for f in refuted]
     if not ordered:
         return ""
+    # DOM2: if any listed finding runs on a synthetic (illustrative) dataset, the
+    # caption must say so and each such row must be marked, so the table cannot
+    # read as a set of real-world results.
+    synthetic_present = any(_is_synthetic(f) for _, f in ordered[:max_rows])
+    caption = (
+        "Decisive findings and their evidence. `Metric vs baseline' reports the "
+        "measured metric against the campaign baseline where one exists; otherwise the "
+        "within-experiment effect. Inconclusive directions are excluded by construction."
+    )
+    if synthetic_present:
+        caption += (
+            " Rows marked [synthetic dataset (illustrative)] were computed on a "
+            "seed-generated dataset and are illustrative of the pipeline, not real-world results."
+        )
     lines = [
         "\\begin{table}[ht]",
         "\\centering",
-        "\\caption{Decisive findings and their evidence. `Metric vs baseline' reports the "
-        "measured metric against the campaign baseline where one exists; otherwise the "
-        "within-experiment effect. Inconclusive directions are excluded by construction.}",
+        f"\\caption{{{caption}}}",
         "\\label{tab:findings}",
         "\\small",
         "\\begin{tabular}{p{0.34\\linewidth} l p{0.20\\linewidth} l l}",
@@ -135,6 +169,8 @@ def findings_table(
     for verdict_label, f in ordered[:max_rows]:
         claim = (f.get("key_finding") or f.get("text") or "").strip().rstrip(".")
         cell = _latex_escape(claim[:140])
+        if _is_synthetic(f):
+            cell += f" [{_latex_escape(SYNTHETIC_LABEL)}]"
         mvb = _metric_vs_baseline_cell(f, baseline)
         ev = _evidence_type_cell(f)
         repl = _latex_escape(str(f.get("replication_level") or "--"))
@@ -338,6 +374,39 @@ def _rival_paragraph(findings: dict[str, Any]) -> str:
     )
 
 
+def _synthetic_provenance_paragraph(findings: dict[str, Any]) -> str:
+    """State plainly that reported findings rest on a synthetic (illustrative) dataset.
+
+    DOM2 honesty fix: findings whose evidence carries
+    ``data_provenance == "synthetic"`` run on a locally seed-generated dataset (the
+    genomics / graph-invariants / enzyme-kinetics demo domains present under real
+    dataset names such as GTEx, SNAP, and BRENDA). Such a finding must never read as
+    a real-world result; this limitations paragraph makes the illustrative status
+    explicit in the narrative.
+    """
+    synth = [
+        f
+        for verdict in ("confirmed", "refuted")
+        for f in (findings.get(verdict) or [])
+        if _is_synthetic(f)
+    ]
+    if not synth:
+        return ""
+    claims = "; ".join(
+        f"``{_latex_escape((f.get('key_finding') or f.get('text') or '')[:120].rstrip('.'))}''"
+        for f in synth[:3]
+    )
+    return (
+        "\\paragraph{Data provenance (synthetic).} "
+        f"{len(synth)} of the reported finding{'s' if len(synth) != 1 else ''} were computed on a "
+        "\\emph{synthetic dataset (illustrative)} --- a locally seed-generated frame produced by "
+        "the domain adapter, not the real public dataset whose name it borrows. These results "
+        "demonstrate the pipeline end-to-end but must not be read as real-world scientific claims, "
+        "and any relationship they exhibit may reflect the data generator rather than nature. "
+        f"Affected finding(s): {claims}."
+    )
+
+
 def research_narrative_section(
     findings: dict[str, Any],
     *,
@@ -378,6 +447,13 @@ def research_narrative_section(
         f"tested, {counts.get('confirmed', 0)} cleared the evidence bar, "
         f"{n_ref} {ref_verb}, and {n_inc} remained inconclusive."
     )
+
+    # DOM2: if any reported finding rests on a synthetic (seed-generated) dataset,
+    # state that plainly in the narrative before any lineage/rival discussion, so a
+    # reader can never mistake an illustrative result for a real-world one.
+    synth = _synthetic_provenance_paragraph(findings)
+    if synth:
+        parts.append(synth)
 
     lin = _lineage_paragraph(rt, gv)
     if lin:
