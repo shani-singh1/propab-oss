@@ -432,5 +432,76 @@ domain-generality blockers). Nothing below is cleared yet.
 
 ---
 
-*Audit loop status: LAYERS 1–2 deep; 3 partial; 4–12 pending. Continue reading
-files, add issues with IDs, keep this the source of truth.*
+## External report triage — `fixes.md` (weaker-model audit, 2026-07-07)
+
+A separate lower-capability agent mapped the codebase and produced `fixes.md`
+(3 sub-audits: core / services / tests-config). Every claim was verified against
+the actual code. **Result: ~90% false or already-covered; 2 genuinely-new items,
+both LOW / arguably by-design.** Recorded here so these are never re-investigated.
+
+**FALSE (invented behavior — the model did not read the code):**
+- *"Dedup is an LLM call" (1a)* — FALSE. `campaign_synthesis` dedup is
+  `difflib.SequenceMatcher` structural + scope/param signatures
+  (`campaign_synthesis.py:79-97`). No `_deduplicate_candidates`/`_is_near_duplicate`
+  LLM fn exists; it was invented.
+- *"Evidence-binding is an LLM call" (1b)* — FALSE. `evidence_binding.py` is pure
+  regex/structural (`re.compile`, `_structured_overlap`); no LLM anywhere.
+- *"Sandbox is subprocess, not Docker" (services 2c)* — FALSE. It is Docker
+  (`services/worker/sandbox.py:29` `docker.from_env`, `containers.run`, image +
+  bounded wait + kill). The model misread the `"subprocess"` token in a *denylist*
+  of blocked identifiers.
+- *"Literature prior is 100% LLM hallucination, no real DB" (3b / services 1a,2b)* —
+  FALSE, and this was its headline claim. `build_prior` queries arXiv/PMC over
+  httpx, runs hybrid retrieval, gates corpus quality, and either synthesizes from
+  **real** papers or returns `insufficient_prior(skipped_llm=True)`
+  (`literature.py:884-901`). Never silently falls back to a hallucinated prior.
+- *"enzyme/graph plugins are stubs; preflight hardcoded True" (1e)* — FALSE. Both
+  have real `scope_template`, overridden `run_verification`, `domain_profile`,
+  `adapter.py`/`verifier.py`, and a `preflight()` that runs a real LOFO/invariant
+  timing check and returns `PreflightResult(False,…)` on failure.
+- *"Worker domain routing is a hardcoded table; new domain needs a code edit"
+  (services 3a)* — FALSE. `_worker_verification_paths` (`sub_agent_loop.py:1464`)
+  is a fast-path for the two LOFO domains only; all others fall through to
+  `_plugin_verification_path` (generic) with no edit. (That generic path is what
+  D2/Agent-G is hardening.)
+- *"Dispatch failures silently skipped, no retry" (services 4a)* — FALSE. Baseline
+  `.delay()` except logs (`campaign_loop.py:856`); frontier refill has explicit
+  retry (`:1954`, `:1983`).
+- *"Synthesis parse failure silently succeeds" (4a)* — FALSE. Detected + flagged:
+  `metrics["parse_error"]=True`, returns empty (`campaign_synthesis.py:391`).
+- *"Breakthrough = LLM enthusiasm" (services 2a)* — FALSE. `is_breakthrough`
+  (`campaign.py:74`) is metric-vs-baseline gated by replications + confirmed-count.
+
+**ALREADY COVERED (duplicates of existing registry issues):**
+- Binding relevance is a judgment call (1b-impact) → **A4** (structured-overlap
+  integrity guard, FIXED).
+- Generic/stub domain verification produces no real null → **D1** (fail-closed
+  preflight, FIXED) + **D2** (real permutation null, in flight).
+- `.env.example` OpenAI default (config 1d) → **CFG1** (OPEN LOW).
+- Lifetime JSON last-writer-wins (5a) → **L8** (known, documented).
+- ML metric trust upstream of breakthrough (2a) → **O1** / **W1b**.
+- Verdict stages short-circuit without a skip-log (1c) → partial overlap **V2**;
+  the deterministic-bypass hole it gestures at is already closed.
+
+**GENUINELY NEW (both LOW; recorded, not assigned — do not burn an opus agent):**
+- **HM1 · LOW · VERIFIED** — No code halts a campaign on a collapsed health metric;
+  health metrics are observability-only (no `should_stop`/abort reads them). This
+  is *honest* (architecture states metrics are observational) — a candidate
+  circuit-breaker *feature*, not a dishonesty bug. Related to the A2 symmetric
+  rejection-rate warning (which warns but does not gate). Status: WONTFIX-ish /
+  backlog.
+- **BUD1 · LOW · VERIFIED** — `Campaign.compute_budget_seconds` measures
+  **wall-clock** (`campaign.py:270-277` prefers `started_at` elapsed), so the
+  `compute_` name overstates it. For a continuously-running single campaign
+  wall ≈ compute, so impact is minimal; a rename/comment would improve honesty.
+  Status: backlog LOW.
+
+*Triage takeaway: the report validated the "verify regardless of who reports it"
+rule in the opposite direction — a weaker model's confident claims were mostly
+hallucinated code that does not exist. No claim rose to subagent-worthy.*
+
+---
+
+*Audit loop status: LAYERS 1–2 deep; 3 partial; 4–12 pending. `fixes.md` triaged
+(2/23 real, both LOW). Continue reading files, add issues with IDs, keep this the
+source of truth.*
