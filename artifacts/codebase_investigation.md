@@ -199,7 +199,7 @@ to 7), confirmed nodes 1.3→17.3, narrowing-dedup reject 0.32→0.001.
 Files: `sub_agent_loop.py` (2418), `think_act.py` (585), `sandbox_code_rewrite.py`.
 Produces the raw evidence every verdict trusts. Highest-leverage remaining layer.
 
-**W1 · HIGH · FIXING (agent: fix/worker-provenance) · VERIFIED — the anti-fabrication guard is a 3-item denylist.**
+**W1 · HIGH · FIXED (fix/worker-provenance, merged+verified — guard generalized to all tool specs by value; stat_input_provenance now recorded) · VERIFIED — the anti-fabrication guard is a 3-item denylist.**
 `think_act._is_spec_example_params` (line 350) detects an agent using placeholder
 numbers only by exact-matching three hardcoded tool-spec example arrays
 (`[0.9,0.88,0.91]`, `[0.1,0.2,0.15,0.18]`, `[0.42,0.44,0.41]`). Any *other*
@@ -209,6 +209,8 @@ inputs to a real stat tool → real-looking p-value → confirmed. Evidence inte
 is the load-bearing assumption of the whole system; this doesn't enforce it.
 **Fix:** require metric values to carry provenance from a sandbox-executed run;
 generalize the fabrication check.
+
+**W1b · HIGH · OPEN · VERIFIED — provenance is recorded but NOT enforced.** The round-2 fix records `evidence["stat_input_provenance"]` = computed/agent_literal/unknown and `inputs_from_sandbox`, and generalizes the spec-example guard by VALUE (closes the 3-array denylist), but the signal is ADVISORY: the verdict pipeline does not yet refuse to confirm on `agent_literal` inputs. Also it's a value-fingerprint match (not true taint) and only covers the think-act/heuristic worker paths (the mandrake/materials/plugin fast paths return before it). **Fix (small, core):** in `verdict_pipeline` (or the artifact gate), treat `stat_input_provenance=="agent_literal"` as fail-closed for a statistical confirm, so a p-value computed on agent-typed numbers cannot confirm. Pairs with A1.
 
 **W2 · SUSPECTED · OPEN — description-only → deterministic no-op stub** runs
 in-process (not Docker) when the agent supplies a code description but no source
