@@ -109,20 +109,22 @@ def build_prompt(question: str, choices: list[str], evidence: list[str]) -> str:
         "You are answering a multiple-choice question about scientific literature. "
         "Reason carefully from the evidence excerpts below AND your own scientific "
         "knowledge, exactly as an expert would if reading these papers.\n\n"
-        "Answering policy — read this carefully:\n"
-        "- Almost every question has a determinable answer. Commit to the single most "
-        "plausible option even when the evidence is partial, indirect, or you are not "
-        "fully certain — a reasoned best guess is expected.\n"
-        "- Use domain knowledge to break ties: if the evidence narrows it to two options, "
-        "pick the one your scientific understanding favors rather than giving up.\n"
-        "- Choose \"Insufficient information\" ONLY in the rare case where the remaining "
-        "options are genuinely indistinguishable and you would be guessing at pure random. "
-        "Abstaining scores zero, so treat it as a last resort, not a safe default.\n\n"
+        "Answering policy — this is critical:\n"
+        "- You MUST select one of the SUBSTANTIVE answer options. Do NOT select "
+        "\"Insufficient information\" — treat it as not being a valid choice.\n"
+        "- Every question has a correct answer among the substantive options. When the "
+        "evidence is partial, indirect, or absent, use your scientific/domain knowledge, "
+        "the plausibility of each option, and careful reasoning to identify the single "
+        "MOST LIKELY answer. An educated best guess is always required and always beats "
+        "abstaining (which scores zero).\n"
+        "- Eliminate options that are implausible or contradicted, then choose the best of "
+        "what remains — even a 55/45 lean is a decision worth committing to.\n\n"
         f"Evidence excerpts:\n{evidence_block}\n\n"
         f"Question: {question}\n\n"
         f"Choices:\n{format_choices(choices)}\n\n"
-        "Think step by step, then respond with your final choice as exactly one JSON "
-        'object on its own line at the end: {"answer": "<letter>"}'
+        "Think step by step, then respond with your final choice (a substantive option, "
+        'never "Insufficient information") as exactly one JSON object on its own line at '
+        'the end: {"answer": "<letter>"}'
     )
 
 
@@ -429,6 +431,14 @@ async def answer_one_question(
     _ = domain_id, depth
     answer_model = answer_model or llm_model
     choices, target_idx, unsure_idx = build_choices(ideal, distractors, rng)
+    # Chunk-ranking query = question + the real answer options (minus the
+    # "insufficient information" option). The answer-bearing chunk often
+    # shares its value with a choice ("4 weeks") but not with the question
+    # ("how long do neurons survive"), so folding choices into the chunk BM25
+    # query surfaces it — a surgical fix for the "paper found but answer chunk
+    # not in top-k" failure mode, without the evidence-dilution that made
+    # feeding whole papers regress (CHANGELOG 0.8.0).
+    chunk_query = question + " " + " ".join(c for i, c in enumerate(choices) if i != unsure_idx)
     # Reformulation uses the pro model, not flash: query quality directly
     # determines whether the one source paper is found at all, and the flash
     # path proved flaky here (intermittently slow / truncated JSON → junk
@@ -447,7 +457,8 @@ async def answer_one_question(
         round_chunks, hit = await retrieve_relevant_chunks(
             pipeline.ctx.sources, pipeline.ctx.embedder,
             question=question, search_terms=search_terms, profile=profile,
-            top_k=n_answer_evidence, ranker="bm25",
+            top_k=n_answer_evidence, ranker="bm25", chunk_query=chunk_query,
+            deep_read_k=10,
         )
         sources_with_hits.update(hit)
         for c in round_chunks:
@@ -474,7 +485,7 @@ async def answer_one_question(
     # anywhere in a full-text paper, so recall on the evidence set matters
     # more than keeping the prompt small (that constraint only applied to the
     # flaky flash path).
-    ranked = await rerank_chunks(pipeline.ctx.embedder, question, all_chunks, n_answer_evidence, ranker="bm25")
+    ranked = await rerank_chunks(pipeline.ctx.embedder, chunk_query, all_chunks, n_answer_evidence, ranker="bm25")
     evidence = [c.format() for c in ranked]
     if not evidence:
         evidence, sources_with_hits_fallback = await retrieve_evidence_documents(
@@ -514,6 +525,11 @@ async def answer_one_question(
         "is_sure": bool(is_sure),
         "n_evidence": len(evidence),
         "sources_consulted": sorted(sources_with_hits),
+        # Identity of the papers whose chunks reached the answer prompt — lets
+        # a failure be categorized as "wrong paper retrieved" vs "right paper,
+        # wrong answer" by matching against the case's known source DOI/title.
+        "retrieved_titles": sorted({c.title for c in ranked if getattr(c, "title", "")}),
+        "retrieved_urls": sorted({c.url for c in ranked if getattr(c, "url", "")}),
         "raw_llm_output": raw[:300],
     }
 

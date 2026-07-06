@@ -64,11 +64,24 @@ async def main(n: int = 20, seed: int = 0, concurrency: int = 4) -> None:
     total = len(questions)
 
     def _write_partial() -> None:
+        # Best-effort progress dump: a transient write failure (OneDrive sync
+        # locks the file with [Errno 22] under frequent writes) must NOT kill a
+        # 30-minute run mid-flight — it's called after every question under the
+        # results lock, and an unhandled OSError here propagates out of the
+        # gather and aborts every in-flight question. Write to a temp file then
+        # atomically replace, and swallow any OSError (the final write at the
+        # end, plus the recorded score, are what actually matter).
         partial = {"subtask": "litqa2_live_partial", "n_cases": len(results), **score_results(results)}
-        (REPO_ROOT / "artifacts" / "litqa2_live_results.json").write_text(
-            json.dumps({**partial, "per_case": [{k: v for k, v in r.items() if k != "choices"} for r in results]}, indent=2),
-            encoding="utf-8",
+        payload = json.dumps(
+            {**partial, "per_case": [{k: v for k, v in r.items() if k != "choices"} for r in results]}, indent=2
         )
+        dest = REPO_ROOT / "artifacts" / "litqa2_live_results.json"
+        try:
+            tmp = dest.with_suffix(".json.tmp")
+            tmp.write_text(payload, encoding="utf-8")
+            tmp.replace(dest)
+        except OSError:
+            pass
 
     async def _run_one(idx: int, q: dict) -> None:
         # Each question gets its own rng, seeded deterministically from the
@@ -101,6 +114,7 @@ async def main(n: int = 20, seed: int = 0, concurrency: int = 4) -> None:
             }
         result["id"] = q["id"]
         result["sources"] = q["sources"]
+        result["key_passage"] = q.get("key_passage")  # gold answer-supporting text (diagnostic only)
         elapsed = time.monotonic() - t0
         if result.get("error"):
             status = "ERROR"
@@ -141,9 +155,17 @@ async def main(n: int = 20, seed: int = 0, concurrency: int = 4) -> None:
     }
     record_score(out, artifacts_dir=str(REPO_ROOT / "artifacts"))
 
+    # Same OneDrive-lock tolerance as _write_partial: the score is already
+    # persisted by record_score above, so a failed final dump must not crash the
+    # run with a traceback that obscures the printed result.
     results_path = REPO_ROOT / "artifacts" / "litqa2_live_results.json"
-    results_path.write_text(json.dumps(out, indent=2), encoding="utf-8")
-    print(f"\nWrote {results_path}")
+    try:
+        tmp = results_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(out, indent=2), encoding="utf-8")
+        tmp.replace(results_path)
+        print(f"\nWrote {results_path}")
+    except OSError as exc:
+        print(f"\n(final results dump skipped: {exc}; score already recorded)")
 
 
 if __name__ == "__main__":

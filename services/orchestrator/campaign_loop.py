@@ -1900,6 +1900,7 @@ async def run_campaign_loop(
                                     generation=generation,
                                     question=campaign.question,
                                     prior_snippets=prior_snippets,
+                                    belief_state=campaign.belief_state,
                                 )
                                 if added:
                                     logger.info(

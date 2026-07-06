@@ -89,6 +89,96 @@ def compress_node_history(
     return "\n\n".join(blocks) if blocks else "(no completed nodes yet)"
 
 
+def _lineage_path(tree: HypothesisTree, node: HypothesisNode) -> list[str]:
+    path: list[str] = []
+    cur: str | None = node.id
+    seen: set[str] = set()
+    while cur and cur not in seen:
+        seen.add(cur)
+        path.append(cur)
+        parent = tree.nodes.get(cur)
+        if parent is None:
+            break
+        cur = parent.parent_id
+    path.reverse()
+    return path
+
+
+def _sibling_summary(tree: HypothesisTree, node: HypothesisNode, *, max_siblings: int = 4) -> str:
+    if not node.parent_id:
+        return "n/a"
+    parent = tree.nodes.get(node.parent_id)
+    if parent is None:
+        return "n/a"
+    siblings: list[str] = []
+    for sid in parent.children:
+        if sid == node.id:
+            continue
+        sibling = tree.nodes.get(sid)
+        if sibling is None:
+            continue
+        text = (sibling.text or "").replace("\n", " ")[:120]
+        siblings.append(f"{sibling.id}:{sibling.verdict}:{text}")
+        if len(siblings) >= max_siblings:
+            break
+    return " | ".join(siblings) if siblings else "none"
+
+
+def _suggested_expansion(node: HypothesisNode) -> str:
+    if node.verdict == "confirmed":
+        return "boundary, mechanism, generalization, or downstream utility child"
+    if node.verdict == "refuted":
+        return "alternative child that changes the variable implicated by refutation"
+    if node.verdict == "inconclusive":
+        return "better-powered retest or diagnostic child that resolves the failure"
+    return "do not expand pending nodes"
+
+
+def format_expansion_targets(tree: HypothesisTree, *, max_targets: int = 16) -> str:
+    """Branch-aware target list for synthesis: every new candidate should choose one."""
+    candidates = [
+        n for n in tree.nodes.values()
+        if n.verdict in ("confirmed", "refuted", "inconclusive")
+        and n.depth < 8
+        and n.id not in tree.exhausted
+        and len(n.children) < 5
+    ]
+    if not candidates:
+        return "(no completed expansion targets yet; bootstrap root hypotheses only if frontier is empty)"
+
+    verdict_rank = {"confirmed": 0, "inconclusive": 1, "refuted": 2}
+    candidates.sort(
+        key=lambda n: (
+            len(n.children),
+            verdict_rank.get(n.verdict, 9),
+            -int(n.generation or 0),
+            -int(n.depth or 0),
+        )
+    )
+    blocks: list[str] = []
+    for node in candidates[:max_targets]:
+        ev = _parse_evidence_blob(node.evidence_summary)
+        path = " > ".join(_lineage_path(tree, node))
+        text = (node.text or "").replace("\n", " ")[:260]
+        blocks.append(
+            "\n".join([
+                (
+                    f"target_id={node.id} verdict={node.verdict} conf={node.confidence:.2f} "
+                    f"depth={node.depth} children={len(node.children)} generation={node.generation}"
+                ),
+                f"  parent_id: {node.parent_id or 'ROOT'}",
+                f"  branch_path: {path}",
+                f"  suggested_expansion: {_suggested_expansion(node)}",
+                f"  verdict_reason: {ev.get('verdict_reason') or node.mechanism or 'n/a'}",
+                f"  inconclusive_reason: {node.inconclusive_reason or 'n/a'}",
+                f"  failure_signature: {node.failure_signature or 'n/a'}",
+                f"  siblings: {_sibling_summary(tree, node)}",
+                f"  hypothesis: {text}",
+            ])
+        )
+    return "\n\n".join(blocks)
+
+
 def format_pinned_beliefs(belief_state: CampaignBeliefState) -> str:
     parts: list[str] = []
     if belief_state.active_beliefs:
@@ -117,6 +207,7 @@ def format_confirmed_artifacts(tree: HypothesisTree) -> str:
         if ag.get("verdict") == "survived" or node.verdict == "confirmed":
             lines.append(format_node_compact(node, include_prose=True))
     return "\n\n".join(lines) if lines else "(none yet)"
+
 
 
 def compose_synthesis_prompt(
@@ -152,6 +243,7 @@ def compose_synthesis_prompt(
         human_block,
         format_pinned_beliefs(belief_state),
         f"## Artifact-verified confirmed findings\n{format_confirmed_artifacts(tree)}",
+        f"## Open expansion targets (choose parent_id from target_id)\n{format_expansion_targets(tree)}",
         f"## Completed nodes (structured fields pinned; prose compressed by recency)\n"
         f"{compress_node_history(tree, since_node_ids=since_node_ids)}",
         recent_block,

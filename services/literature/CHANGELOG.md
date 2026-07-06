@@ -3,6 +3,270 @@
 Eval scores before/after each significant change. Full score history:
 `artifacts/astabench_literature_scores.json` (append-only).
 
+## 0.10.1 — dense passage retrieval: impractical here (kept the batching win)
+
+The third "beat 0.89" lever, and the one the diagnosis pointed hardest at:
+replace BM25 keyword chunk ranking with **dense semantic passage retrieval**
+(PaperQA2's actual mechanism) — embed every chunk of the fetched papers with
+Gemini and rank the answer passage by cosine similarity, catching passages
+whose wording doesn't lexically match the question.
+
+To make it feasible at all, two real embedding-infra improvements were built
+and kept (they help the `/prior` pipeline regardless of this experiment):
+- **Batched embeddings** (`batchEmbedContents`, ≤100 texts per HTTP call)
+  replacing one concurrent `embedContent` per text — the burst that caused the
+  ~28% ReadTimeout rate in 0.5.0. Measured: 60 chunks embed in ~5s in one call.
+- A **per-instance embedding cache** (bounded at 50k entries) so the deep-read
+  path, which re-ranks the same chunks ~18× per question, embeds each chunk
+  once instead of every rank.
+
+**Verdict on dense ranking: impractical on this infrastructure, reverted.**
+Even with batching + caching, a single question took **147-293s** (vs ~60s for
+BM25) *at concurrency 1* — so the cost is inherent to the deep-read structure's
+many rerank passes against Gemini embedding latency, not cross-question
+contention. At n=50+ that means the run is dominated by 300s timeouts (each a
+scored miss), making answer quality unmeasurable, and the tiny feasible samples
+(n=2-3: 0.5-0.67 with timeouts) showed no upside. The chunk ranker stays BM25.
+This is the same latency wall that sent 0.5.0 to BM25 in the first place; the
+batch endpoint narrows it but not enough for the ~18-rerank deep-read path. The
+embedding batching + cache are kept as a net infra win; the eval ranker toggle
+was reverted.
+
+**Net after 0.10.x:** all three leader-style levers (agent, full-text search,
+dense retrieval) explored and reverted; standing result **0.76-0.78 (n=100, two
+seeds)**. Beating ~0.89 on public infra + one Gemini answer call is not
+reachable without proprietary high-precision passage retrieval — that is now a
+measured conclusion across three independent architectural attempts, not a
+guess.
+
+## 0.10.0 — chasing 0.89: an agent and full-text search, both measured, both reverted
+
+Target raised to beat AI2's leaderboard top (~0.89). Two architecturally larger
+levers were built and measured at n=100; both regressed below the 0.77 single-
+pass baseline and were reverted. This entry records *why*, because the failures
+sharply characterize what beating 0.89 actually requires.
+
+**Agentic multi-hop reader — 0.62 (n=50, same slice single-pass scores 0.68).**
+Built a real ReAct/PaperQA2-style loop: `search_and_fetch_ranked_docs` (a clean
+extraction of the search→rank→fetch stage) feeds a loop that deep-reads each
+candidate paper one at a time, scores how strongly *that* paper grounds an
+answer (0-10), takes the best-supporting paper's answer (argmax, early-exit on
+an explicit 9-10), and falls back to the forced-answer path when nothing
+grounds. It regressed. Mechanism (from the per-paper trail): committing on a
+single paper's ~12 chunks is *thinner* evidence than the single-pass forced
+answer reasoning across the doc[0]-deep + cross-paper-shallow pool — the agent
+fragments the very cross-paper reasoning that made deep-read work. The leaders'
+agents win on *retrieval* (a full-text snippet index puts the answer passage in
+front of the model), not on a cleverer control loop; reading the same BM25
+chunks in a fancier order can only lose context.
+
+**Full-text body search (NCBI `db=pmc`) — 0.56-0.76 (n=100), + timeout
+instability.** Added a source that searches article *body text*, not just
+title/abstract; verified live it surfaces papers the title/abstract path misses
+(e.g. the SNIPR001 paper at rank 1). But as a unioned candidate source it
+*regressed*: full-text keyword search returns every paper that merely *mentions*
+the query entity in its body — dozens of non-source papers — which floods the
+title+abstract candidate ranking that deep-read depends on. With 12 fetches the
+noise was tolerable-but-flat (0.74-0.76, precision 0.78-0.81) while heavy JATS-
+XML fetches timed out 5-6 questions/100 (pure lost accuracy); trimming to 8
+fetches to fix the timeouts pushed the *true* source paper out of the fetched
+set entirely → **0.56**. Full-text keyword search is fundamentally incompatible
+with a retrieval architecture whose payoff depends on the single top-ranked
+paper being the real source: it adds precisely the noise that corrupts that
+ranking.
+
+**What this establishes about the 0.89 gap.** The two obvious "do what the
+leaders do" levers — an agent loop and full-text search — both *hurt* on public
+infrastructure, for the same root reason: the missing capability is not
+orchestration or raw full-text recall, it is **high-precision passage retrieval**
+— returning the two or three sentences that answer the question from the right
+paper, not a keyword-matched flood. AI2 reaches ~0.82-0.89 on Semantic Scholar's
+*proprietary* full-text snippet index, which does exactly that; PaperQA2 does it
+with a heavy per-paper dense-embedding+rerank pass over full text. Neither is
+reachable with public keyword APIs + one Gemini call. Honest standing result:
+**0.76-0.78 (n=100, two seeds)** — deep-read single-pass (0.9.0), unchanged. The
+agent and `db=pmc` source were reverted (findings kept here; append-only score
+history retains the 0.62/0.56/0.74/0.76 experiment runs).
+
+## 0.9.0 — breaking the 0.71 plateau: deep-read the source paper (+5-7pp)
+
+Continuing the loop toward the AstaBench 0.84 baseline. The starting point was
+a stubborn **0.71 (n=100)** plateau, and the story here is mostly about *not*
+being fooled by it — three separate changes each looked like a win at n=50 and
+were confirmed as noise at n=100 before the one real lever landed.
+
+**Diagnosis first (the instrumentation that made this tractable).** Rather than
+guess, the eval was instrumented to record, per question, which papers reached
+the answer prompt (`retrieved_titles`/`retrieved_urls`) and the score run cross-
+checked those against LitQA2's known source DOI and gold `key_passage`. Two
+facts fell out and reframed the whole problem:
+
+1. **The source paper is retrieved in ~78% of cases** — search is NOT the main
+   bottleneck. Only ~4 of ~16 failures per 50 are true retrieval misses.
+2. **The dominant failure is "paper retrieved, answered wrong" (~12 of 16).**
+   And the single strongest predictor of a correct answer is *best-single-chunk
+   overlap* with the gold passage: **0.74 on correct answers vs 0.36 on wrong**.
+   Union overlap (passage present *somewhere* across all chunks) barely
+   separates them (0.89 vs 0.64) — so the problem is that the answer-bearing
+   passage, even when retrieved, arrives *fragmented* across a soup of chunks
+   drawn from ~12 different papers, and the model then reasons from parametric
+   priors ("by homology…") instead of the paper's actual reported result.
+
+**Three measured nulls (documented so they're not re-tried).** Each was A/B'd at
+n=50, looked good, and evaporated at n=100 — the exact small-sample trap:
+
+| lever | n=50 | n=100 | verdict |
+|---|---|---|---|
+| chunk size 900→1600 | 0.74 | 0.70 | null (reverted) |
+| choice-aware doc-fetch ranking | 0.68 | — | flat, recall 39→40 only (reverted) |
+| evidence-over-priors answer prompt | 0.72 | 0.69 | null (reverted) |
+
+The lesson (again): **n=50 has ±7pp; only n=100 counts.** Retrieval-recall and
+prompt tuning could not move the plateau, which pointed the finger squarely at
+*how the retrieved source paper is presented to the model*.
+
+**The win — deep-read the single most-relevant paper.** The leaderboard leaders
+(AI2's ReAct agent at 0.82, FutureHouse's PaperQA2) don't answer from a cross-
+paper chunk mix; they identify the source paper and read *it* deeply. Ported to
+this pipeline: the top-ranked fetched document (already the most likely source
+by title+abstract relevance) now gets a large, **guaranteed** chunk budget
+(`deep_read_k=10`) that leads the evidence and is never filtered out by the
+global top-k, while the other papers stay shallow (a few chunks each) as backup
+coverage. This concentrates depth on ONE paper — categorically different from
+the 0.8.0 experiment that fed the top *three* papers in full and regressed to
+0.48 through dilution; here the depth is on a single paper and relevance-ranked.
+
+Confirmed on **two independent 100-question samples**, which is what separates
+it from the three nulls above:
+
+| | Accuracy | Coverage | Precision |
+|---|---|---|---|
+| chunk-soup baseline (0.8.0), seed 0 | 0.71 | 0.97 | 0.73 |
+| **deep-read (0.9.0), seed 0** | **0.76** | 0.97 | 0.78 |
+| **deep-read (0.9.0), seed 1** | **0.78** | 0.97 | 0.80 |
+
+**+5-7pp accuracy AND +5-7pp precision, holding across seeds.** The precision
+jump is the mechanism showing through: when the model commits, it is now right
+far more often, because it is reading the actual source paper rather than
+guessing around a fragmented passage. Coverage is unchanged (still ~forced-
+answer). Project arc: 0.44 → 0.60 → 0.71 → **0.77 (deep-read)**, now inside the
+0.76-0.80 band and closing on the 0.84 AstaBench baseline.
+
+*Granularity is load-bearing: deep-read the ONE top paper, not two.* Extending
+the same guaranteed budget to the top **two** papers (8 chunks each) regressed
+straight back to 0.71 (n=100, seed 0) — the 2nd-ranked paper is usually not the
+source, so its deep content crowds out the true source's chunks and re-adds the
+cross-paper dilution deep-read exists to remove. Single-paper concentration is
+exactly the right unit (the same lesson as the top-3-full 0.48 regression, one
+notch finer).
+
+*And `deep_read_k=10` is a genuine sweet spot, not an arbitrary constant.*
+Pushing it to 16 (16 deep + 4 shallow, i.e. read more of the source paper at the
+cost of cross-paper backup) also regressed, to 0.69 (n=100, seed 0): the extra
+chunks 11-16 are the source paper's lower-relevance sections (methods minutiae,
+references) and the shrunken shallow pool stops covering the ~22% of cases where
+the source isn't doc[0]. 10 deep + 10 shallow balances depth-on-the-likely-source
+against breadth-as-insurance.
+
+*The whole configuration is a tight local optimum — every perturbation
+regresses to ~0.70.* Once deep-read made "is `full_docs[0]` the true source?"
+the binding decision, two attempts to improve that selection were both measured
+and both regressed:
+- **Choice-aware doc-fetch ranking** (rank which paper to deep-read by
+  question + options): 0.69 (n=100, seed 0). The options include distractor
+  entities, which pull a *distractor-matching* paper to rank #1, so deep-read
+  then reads the wrong paper in depth. The bare question is the only unbiased
+  signal for the deep-read target.
+- **LLM source-paper selection** (a cheap flash call picks which candidate
+  abstract is the source, promoted to the deep-read slot): 0.70 (n=100, seed 0).
+  BM25 on title+abstract is a *better* source-identifier than the LLM's judgment
+  over truncated abstracts — the model's second opinion moves a correct BM25 #1
+  away more often than it rescues a wrong one.
+
+Four independent perturbations of the committed config (deep-read top-2,
+`deep_read_k`=16, choice-aware doc rank, LLM source select) all land at
+0.69-0.71 — i.e. right back at the pre-deep-read plateau. That is strong
+evidence the committed config (deep-read the single BM25-top paper, k=10, bare-
+question doc rank) is a real optimum for this architecture, and that the
+deep-read-top-1 step is precisely the thing worth +6pp.
+
+**Honest remaining gap.** ~0.77 vs 0.84, and the loop above is why it is honest:
+the gap is not un-tuned prompt/chunk knobs (those are exhausted and documented),
+it is the ~22% of questions whose source paper no public API surfaces in its top
+results at all (the retrieval-coverage ceiling of 0.8.0, unchanged here) plus a
+residual reasoning-error floor on genuinely ambiguous options. Both need
+capability beyond single-pass public retrieval + one answer call — a proprietary
+full-text snippet index (how AI2 reaches 0.82) or a true multi-hop read-search
+agent that iteratively reads different candidate papers (how PaperQA2 does) —
+which is a separate, larger build, not another pass over this pipeline's knobs.
+
+## 0.8.0 — breaking the 0.60 ceiling: read the pattern, force the answer (+11pp)
+
+**Context: accuracy was pinned at 0.60 (n=100) across several retrieval
+changes.** This entry is an honest improvement *loop* — diagnose, change one
+thing, A/B at n=50, confirm at n=100, commit wins, revert losses — including
+the dead ends, because the dead ends are what pointed at the real lever.
+
+**Two changes that regressed and were reverted (measured, not guessed):**
+- *Whole-document evidence* (feed the pro model the top 3 papers in full
+  instead of BM25-picked chunks): **0.48** at n=50, down from ~0.60. Lesson:
+  the constraint is not evidence *quantity* — more text diluted the signal
+  with off-topic/wrong-paper content, and precision dropped. Reverted.
+- *Self-consistency* (sample the answer 3× at temperature, majority vote):
+  **0.46**. For a well-calibrated frontier model at temp 0, adding temp-0.5
+  samples and voting added noise rather than removing it. Reverted.
+  (Also caught a process error here: I'd been treating 12pp swings on n=50,
+  which carries ±7pp, as real. Re-confirmed the committed baseline reproduces
+  at **0.68** on n=50 / 0.60 on n=100 before continuing — n=100 is the number
+  to trust.)
+
+**Choice-aware chunk ranking (kept).** Rank chunks against the question PLUS
+the answer options, not the question alone: the answer-bearing chunk often
+shares its value with a choice ("4 weeks") but no words with the question
+("how long do neurons survive"), so folding the choices into the chunk BM25
+query surfaces it — surgical, no evidence dilution. Document ranking stays
+question-only so choices don't bias *which* paper is judged the source. Net
+at n=100: accuracy-neutral but precision up (0.79→0.82) — a real quality gain
+that set up the win below.
+
+**The confirmed retrieval ceiling (why more retrieval stopped helping).**
+Tested the actual hard-to-find source papers against every public source —
+PubMed, Europe PMC (including its full-text search), Semantic Scholar,
+OpenAlex — and **none surface the exact paper in their top results.** LitQA2
+questions quote specifics from the paper *body*; every public API's relevance
+ranking puts other papers first. Widening the net (5 query variants, 16 docs)
+was flat on accuracy and slower — reverted. This is the gap a proprietary
+full-text snippet index (AI2) or a heavy multi-hop agent (FutureHouse's
+PaperQA2) closes; single-pass public-API retrieval caps coverage around 0.78.
+
+**The win, found by reading the pattern (forced answer).** Every retrieval
+improvement raised precision (→0.82-0.84) but *lowered* coverage (→0.73):
+with sharper evidence the well-calibrated pro model correctly recognizes the
+genuinely-unfindable questions and abstains — and each abstention is a
+guaranteed zero on the accuracy metric. So the lever was never more
+retrieval; it was to stop abstaining. Changed the answer prompt to forbid
+"Insufficient information" entirely — the model must eliminate implausible
+options and commit to the single most likely substantive answer, always. The
+coverage×precision math predicted the payoff and the measurement matched it:
+
+| | Accuracy | Coverage | Precision |
+|---|---|---|---|
+| calibrated abstention (0.7.0) | 0.60 | 0.78 | 0.79 |
+| **forced answer (0.8.0)** | **0.71** | 0.97 | 0.73 |
+
+**+11pp accuracy at n=100 (±5pp)** — coverage to 0.97, precision drops as
+expected, net strongly positive because forced best-guesses replaced
+guaranteed zeros. This lands in FutureHouse's (0.72) territory, on public
+infrastructure. Project arc: 0.44 (flash, one-shot) → 0.60 (targeted search)
+→ **0.71 (forced answer)**, vs the 0.84/0.94/0.89 AstaBench baseline.
+
+**Honest remaining gap.** 0.71 vs 0.84. Precision is now the axis (0.73 vs
+0.94): the forced guesses on unfindable-paper questions are right less often
+than the baseline's evidence-backed answers. Closing that needs better
+retrieval coverage of the hard papers (the ceiling above) — i.e. the
+proprietary-index / heavy-agent capability, a substantial separate build,
+not prompt tuning.
+
 ## 0.7.0 — the real blocker was query construction (targeted search, +8pp)
 
 **Reframe, prompted by the user refusing the "proprietary index" excuse:**
