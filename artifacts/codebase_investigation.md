@@ -272,5 +272,39 @@ Concrete plan for that layer (to be validated before/while implementing):
 4. Validate on a real math_combinatorics campaign (the numerical-crossing path
    just committed is the cleanest place to measure depth growth).
 
-> Next step in this doc: line-by-line read of `next_dispatch_candidate` and the
-> synthesis candidate-generation prompt to confirm §3.3 before writing code.
+## 7. Convergence fix — iteration log (branch `campaign-convergence`)
+
+**Iter 1 [DONE] — frontier now deepens confirmed findings (§3.3).**
+`_information_gain_score` rebalanced: a scope-narrowing child of a *confirmed*
+parent gets uncertainty 0.80 (was 0.45) + an `exploit_bonus` (≤0.30, scales with
+confirmed-ancestry depth); inconclusive parent lowered 0.85→0.75; lateral
+(non-narrowing) children of confirmed nodes stay 0.45. Added
+`confirmed_lineage_depth()` metric + `_confirmed_ancestry_depth()` helper.
+Behavioral change locked by `test_convergence_prefers_deepening_confirmed_over_
+inconclusive_breadth` (deepening a confirmed finding now outranks inconclusive
+breadth). 52 tree/campaign tests pass. *Mechanism proven at unit level; the
+downstream convergence gain still to be quantified (see validation plan).*
+
+**Iter 2 [NEXT] — synthesis should DERIVE, not infer, lineage (§3.2).** Make the
+synthesis prompt require each candidate to name the `parent_id` it refines + the
+specific open uncertainty it closes; code prefers explicit derivation, falls back
+to similarity-inference only when the LLM declines; log the explicit-vs-inferred
+ratio.
+
+**Iter 3 [NEXT] — wire `confirmed_lineage_depth` into per-round health logging**
+(`health_metrics.py` / `campaign_synthesis_events`) so a non-converging campaign
+is *visible* and later *steerable*, closing the "debug by which number is out of
+range" loop for convergence specifically.
+
+**Validation plan (the analog of the literature n=100 eval).** A full live
+campaign needs the whole stack (postgres/redis/celery/workers), so convergence is
+measured two ways: (a) unit tests on the frontier ranking (done for iter 1);
+(b) a lightweight **search simulation** — seed a tree, loop generations picking
+`next_dispatch_candidate`, mock verdicts + narrowing/breadth children, and track
+`confirmed_lineage_depth` over generations under old-vs-new scoring. "Substantially
+improved" = mean confirmed-lineage depth rises materially across generations where
+before it stayed flat. To build next.
+
+---
+*Prior note (resolved): line-by-line read of `next_dispatch_candidate` and
+`_information_gain_score` is done — it drove the iter-1 fix above.*
