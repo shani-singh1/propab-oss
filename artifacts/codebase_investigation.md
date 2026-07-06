@@ -495,10 +495,145 @@ since the pre-crash verdict never entered the tree. **Clean fix (if we invest):*
 node whose DB row already carries a terminal verdict the tree lacks, apply it via
 `update_node` before dispatching, so completed work isn't recomputed and step rows
 aren't duplicated. Not a campaign-blocker; batch with other L10 items.
-- **L11 Tools registry** (`tools/*`) — are the STEM tools real computations or
-  spec stubs? (ties to W1.)
-- **L12 config.py / llm.py** — ret/timeout defaults, provider fallbacks that
-  silently degrade.
+## LAYER 11 — Tools (audited 2026-07-07; the dishonesty hot-spot) [deep]
+
+Auditor mapped all 30 tool modules; I verified the top findings by reading the code.
+**The significance/statistics tools are REAL and correct** (scipy t-test/Wilcoxon/
+Mann-Whitney, real bootstrap, correct Cohen's d — W1/W1b guards hold). The rot is in
+the deep-learning / algorithm-optimization tools, several of which fabricate
+measurement-shaped output.
+
+**TOOL1 · CRITICAL · VERIFIED (read myself) — `evaluate_model` fabricates the exact
+variance the significance gate consumes, with `computed` provenance that W1b trusts.**
+`tools/deep_learning/evaluate_model.py:68-72`: `eval_losses` = one stored
+`final_val_loss` + `torch.randn(n)*max(0.002, val*0.02)` (manufactured 2% jitter), and
+the summary literally says "use with statistical_significance." Fed to
+`statistical_significance` these pass the zero-variance guard and yield tight
+"significant" CIs. Because the jitter is computed IN-SANDBOX, `stat_input_provenance`
+= `"computed"` (trusted) → the W1b guard (which only blocks `agent_literal`) does NOT
+catch it → **a DL hypothesis can confirm on fabricated variance.** This partially
+defeats the V1/A1/W1b confirm-gate honesty work for the ML domain. Fallback path
+(:98-121) is also fake: rebuilds the net from `dims` with RANDOM init (no `state_dict`
+is ever persisted by `train_model`) and evaluates on RANDOM labels. **Fix:** run real
+independent eval passes on persisted weights + held-out data, or stop emitting
+`eval_losses` and don't advertise them for significance. **This is the top L11 fix.**
+
+**TOOL2 · HIGH · VERIFIED — `inspect_gradients` reports gradients of a fresh RANDOM
+net.** `evaluate_model.py:98-123` + `inspect_gradients.py:33-46`: both rebuild from
+`dims` on random-init weights because `train_model` never writes a `state_dict` (the
+only `state_dict` ref in the tools tree is the READ in inspect_gradients). Any
+gradient-health/eval claim on a "trained" model is meaningless. **Fix:** persist
+weights (or retrain deterministically) before inspection.
+
+**TOOL3 · HIGH · LIKELY (auditor VERIFIED; I spot-read evaluate_model, trust the rest)
+— `benchmark_algorithm` and `compare_implementations` IGNORE the agent's code/inputs
+and emit confident fake results.** `compare_implementations.py:39-100`: ignores
+`implementations`/`test_inputs`; times a fixed matmul seeded by the impl NAME hash;
+`peak_memory_mb = 12 + hash(name)%100/10`; `correctness` hardcoded `all_correct:True`.
+`benchmark_algorithm.py:30-58`: ignores `code`, benchmarks a fixed dot-product; two
+branches both return `"O(n)"` so `O(log n)`/`O(n log n)` are unreachable; `r2`
+hardcoded 0.85. A buggy O(n²) impl is certified "correct" and a false complexity is
+"confirmed." **Fix:** sandbox-execute the provided code or return `success=False`.
+
+**TOOL4 · MED · LIKELY — six DL/opt tools are seeded-RNG/formula synthetics whose
+output ignores the model architecture** (`activation_statistics`, `hyperparameter_sweep`
+[discards `n_steps`], `compare_attention_variants` [hardcodes "standard" +0.02],
+`lr_range_test` [fixed parabola → constant `suggested_lr`], `gradient_noise_scale`
+[monotonic SNR → always picks largest batch], `regularization_effect`). Labeled
+"synthetic" in spec TEXT but emit measurement-shaped numeric fields that feed narrative
+findings. None are `significance_capable` (can't drive the confirm gate directly).
+**Fix:** flag `"synthetic": true` in output so downstream refuses them as evidence, or
+make them real.
+
+**TOOL5 · MED · LIKELY — `TOOLS.md` ↔ registry drift.** 7 documented-but-missing
+(`effect_size_analysis`, `knowledge_distillation`, `pruning_analysis`,
+`quantization_analysis`, `hessian_analysis`, `loss_landscape`, `ablation_study`);
+7 implemented-but-undocumented; TOOLS.md's "all 40 discoverable via GET /tools" is
+false. Agent tool-planning may target non-existent tools. **Fix:** regenerate TOOLS.md
+from `registry.get_all_specs()`.
+
+**TOOL6 · LOW · LIKELY — `statistical_significance` bootstrap one-sided `less` tail is
+inverted** (`ml_research/statistical_significance.py:166-178`; uses `>= obs` for
+`alternative="less"`). t-test/Wilcoxon paths correct. **Fix:** use `<= obs` for `less`.
+Also TOOL7 · LOW — `compare_gradient_methods` `steps_to_1pct` hardcoded to `n_steps`.
+
+## LAYER 8 — Lifetime learning (audited 2026-07-07) [deep]
+
+Auditor produced a write-site/read-site map; I verified the top mechanisms.
+**Partially honest:** numerical-seed accumulation → seed prompt, and meta-ledger
+baseline → candidate accept/reject, ARE genuinely wired. The dishonesty is the NUMERIC
+policy-learning story.
+
+**LL1 · HIGH · VERIFIED-mechanism (premise pending `add_claim` trace) — `theme_success_rates`
+is structurally always 1.0.** `knowledge_graph.py:184-192` computes fraction-confirmed
+over `self.claims`, but `graph.claims` is written only from `extract_confirmed_claims`
+(so it holds ONLY confirmed rows; refuted/inconclusive become `failures`). Every theme
+rate = 1.0 → in `policy_mutation.py:37-54` `rate>=0.4` always true (uniform boosts) and
+the `rate<0.15` penalty/saturation branch is DEAD. "Learn what fails" doesn't exist.
+A masking test inserts a `refuted` Claim that production never creates. **Fix:** compute
+denominators from confirmed + matching `graph.failures`. (TODO: confirm add_claim only
+ever gets confirmed — I verified the rate math + established_fact filter, not the caller.)
+
+**LL2 · HIGH · LIKELY — learned policy knobs never steer live dispatch.** Live dispatch
+(`next_dispatch_candidate`→`_information_gain_score`) never references the `SearchPolicy`;
+only `saturated_themes` COUNT nudges one global scalar (`campaign_loop.py:1725`).
+`theme_boost`/per-theme `theme_penalty`/`blocked_failure_signatures`/
+`prefer_replication_t2_plus`/`closure_target` are telemetry + LLM-prose only; the numeric
+application (`layer05/policy_dispatch.py`) is called ONLY from offline replay. So
+"search-policy learning" is inert at the numeric decision layer for every domain.
+**Fix:** route live dispatch through `policy_adjusted_score`, or fold `theme_weight`
+into `_information_gain_score`. (LL4 · MED — `blocked_failure_signatures` etc. reported
+as enforced but are advisory only.)
+
+**LL3 · MED-HIGH · VERIFIED (read myself) — a single drifted record silently WIPES the
+entire lifetime store.** `knowledge_graph.py:212-221` builds records with unfiltered
+`Claim(**v)`/`MechanismRecord(**v)`/…; any persisted key not in the current dataclass
+raises `TypeError`; `load()` (:252-254) catches `TypeError` and returns an EMPTY graph;
+the next `ingest_campaign` `save()`s empty over the JSON → permanent, unlogged loss of
+all cross-campaign knowledge. Triggered by ANY schema drift (fields were added over
+time) or a mixed-version deploy. The Postgres/meta-ledger loaders DO field-filter — this
+path was missed. **Fix:** field-filter in `from_dict`; on load error, log loudly and
+REFUSE to overwrite (fail closed).
+
+**LL5 · MED · LIKELY — theory objects hardcoded to the contagion/network domain.**
+`theory_objects.py:24-33`: `name=f"{theme}_contagion_theory"`, assumption "Competing
+diffusion models apply", injected into EVERY future campaign's prior via
+`enrich_prior_from_lifetime`. A materials/number-theory campaign gets contagion-framed
+"established" priors → cross-domain contamination. **Fix:** derive from the domain
+plugin or make domain-neutral. **LL6 · LOW-MED — `established_fact_texts` promotes T1,
+confidence-0 claims with `paper_ids:[]`** (no confidence/replication gate, no provenance)
+→ future campaigns compound on under-evidenced self-generated "facts."
+
+## LAYER 12 — config / llm (audited 2026-07-07) [deep]
+
+**CFG2 · HIGH · VERIFIED (read myself) — LLM client returns a hardcoded PLACEHOLDER
+hypothesis on unsupported-provider or missing-key, silently treated as real output.**
+`llm.py:112-130`: after handling ollama/gemini/openai, `if prov != "openai" or not
+self.api_key: return json.dumps([{...placeholder hypothesis...}])` (mirror for gemini
+at :166-178). So `LLM_PROVIDER=anthropic`/`claude`/typo, OR openai/gemini with an empty
+key, yields a canned hypothesis; downstream `_parse_hypothesis_json` sees 1 valid
+hypothesis → `llm_empty=False` → the campaign "researches" one generic placeholder
+across every domain, run looks healthy, no error. **Domain-agnostic silent engine
+failure.** CFG3 (same root) — NO provider whitelist/validation anywhere. **Fix:** raise
+`LLMConfigError` on unknown provider / missing required key; never return fabricated data.
+
+**CFG4 · LOW-MED · VERIFIED (auditor said HIGH — DOWNGRADED by me) — `_parse_action`
+defaults to `stop` on a malformed decision response.** `think_act.py:603-606`. Auditor
+claimed silent zero-work sub-agents, but I read the surrounding code: `think_act.py:576-598`
+enforces a significance gate — an agent stopping without a significance tool (past
+min_steps) gets a correction prompt, then `_fallback_significance_action`. So it's NOT a
+silent empty trace in the main path; residual risk is only the pre-min_steps early-stop.
+Real but LOW-MED. **Fix:** treat unparseable decisions as error/retry, not implicit stop.
+
+**CFG5 · MED · VERIFIED — `embed_model` default assumes OpenAI, mismatches gemini.**
+`config.py:32` `embed_model="text-embedding-3-small"` (OpenAI id) but `embeddings.py:64`
+routes gemini/google to `_google_embed`. A gemini deployment that doesn't override
+`EMBED_MODEL` sends an OpenAI id to the Google endpoint → 400/throw → callers catch
+broadly and `return None` → retrieval silently drops to non-embedding ranking. Same
+class as CFG1. **Fix:** derive embed-model default from `embed_provider` or validate the
+pair. **CFG6 · LOW · VERIFIED — token usage never captured** (`llm.py:235-236`
+`input_tokens/output_tokens` hardcoded `None` though all 3 providers return counts) → no
+honest usage-based budget signal (compounds BUD1).
 
 ---
 
