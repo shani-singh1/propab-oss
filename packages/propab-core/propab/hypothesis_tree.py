@@ -680,32 +680,78 @@ class HypothesisTree:
         novelty = max(0.05, 1.0 - saturation * penalty * 3.0)
 
         parent = self.nodes.get(node.parent_id) if node.parent_id else None
+        # Does this child NARROW its parent (the convergence move — a boundary,
+        # mechanistic, or generalization refinement, or an explicit scope delta)?
+        narrows = bool(node.scope_delta) or (node.expansion_type or "").lower() in {
+            "boundary", "mechanistic", "generalization", "refinement",
+        }
+        deepening_confirmed = parent is not None and parent.verdict == "confirmed" and narrows
+
         if parent is None:
             uncertainty = 0.55
         elif parent.verdict == "inconclusive":
-            uncertainty = 0.85
+            uncertainty = 0.75
         elif parent.verdict == "refuted":
-            uncertainty = 0.70
-        elif parent.verdict == "confirmed":
-            uncertainty = 0.45
-        else:
             uncertainty = 0.60
+        elif parent.verdict == "confirmed":
+            # A confirmed result with an OPEN boundary is the most valuable thing
+            # to narrow next (convergence); a lateral re-test of an already-
+            # confirmed result is not. Previously this was a flat 0.45, which
+            # de-ranked deepening below inconclusive breadth and structurally
+            # prevented confirmed lineages from growing (CHANGELOG / investigation
+            # report §3.3 — "generation increases, depth does not").
+            uncertainty = 0.80 if narrows else 0.45
+        else:
+            uncertainty = 0.55
 
         coverage_bonus = max(0.0, 1.0 - min(1.0, theme_count / 12.0))
         lineage = float(node.lineage_length or self.lineage_length(node.id))
         lineage_bonus = min(0.15, lineage * 0.03)
 
+        # Convergence/exploit bonus: reward deepening a confirmed lineage so the
+        # search turns a real finding into a narrower one (log-style convergence)
+        # instead of spending every dispatch on fresh inconclusive breadth. Scales
+        # with how deep the confirmed ancestry already is.
+        exploit_bonus = 0.0
+        if deepening_confirmed:
+            conf_depth = self._confirmed_ancestry_depth(node)
+            exploit_bonus = min(0.30, 0.12 + 0.06 * conf_depth)
+
         info_gain = (
-            0.30 * relevance
-            + 0.25 * novelty
-            + 0.25 * uncertainty
-            + 0.10 * coverage_bonus
-            + 0.10 * min(1.0, lineage_bonus * 5)
+            0.28 * relevance
+            + 0.22 * novelty
+            + 0.22 * uncertainty
+            + 0.08 * coverage_bonus
+            + 0.08 * min(1.0, lineage_bonus * 5)
+            + exploit_bonus
         )
         closure = estimate_closure_probability(node, parent=parent)
         score = info_gain * closure
         node.frontier_score = round(score, 4)
         return score
+
+    def _confirmed_ancestry_depth(self, node: HypothesisNode) -> int:
+        """Number of CONFIRMED ancestors up the parent chain — how deep a real
+        finding has already been narrowed. Used to reward continued convergence."""
+        depth = 0
+        cur = self.nodes.get(node.parent_id) if node.parent_id else None
+        seen: set[str] = set()
+        while cur is not None and cur.id not in seen:
+            seen.add(cur.id)
+            if cur.verdict == "confirmed":
+                depth += 1
+            cur = self.nodes.get(cur.parent_id) if cur.parent_id else None
+        return depth
+
+    def confirmed_lineage_depth(self) -> float:
+        """Convergence health metric: mean confirmed-ancestry depth over confirmed
+        nodes. Rises when the search deepens real findings into narrower ones;
+        stays ~0 when it only adds shallow roots (the failure this fixes). 0 when
+        there are no confirmed nodes yet."""
+        confirmed = [n for n in self.nodes.values() if n.verdict == "confirmed"]
+        if not confirmed:
+            return 0.0
+        return sum(self._confirmed_ancestry_depth(n) + 1 for n in confirmed) / len(confirmed)
 
     def _expected_value_score(self, node: HypothesisNode) -> float:
         """Legacy alias — delegates to information-gain scoring."""
