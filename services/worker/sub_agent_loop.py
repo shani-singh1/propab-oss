@@ -33,6 +33,10 @@ from services.worker.sandbox_code_rewrite import (
     looks_like_heavy_training_code,
     rewrite_sandbox_code_after_timeout,
 )
+from services.worker.permutation_null import (
+    compute_label_permutation_null,
+    extract_two_group_arrays,
+)
 from services.worker.significance import (
     any_significance_tool_ran,
     check_significance,
@@ -538,6 +542,71 @@ def _build_evidence(
         verified_true_steps=n_verified_true,
         verified_false_steps=n_verified_false,
     )
+
+
+def attach_permutation_null_to_evidence(
+    evidence_obj: dict[str, Any],
+    sig_call_arrays: list[tuple[list[float], list[float]]],
+) -> dict[str, Any]:
+    """Compute a real label-permutation null from captured two-group arrays and
+    attach ``permutation_p`` + ``n_samples`` to ``evidence_obj`` (D2). Mutates and
+    returns ``evidence_obj``.
+
+    ``sig_call_arrays`` holds only pairs where BOTH real outcome arrays were
+    present at a successful significance-tool call (see ``extract_two_group_arrays``).
+    This is the ONLY place a generic (non-LOFO) statistical result acquires the
+    adversarial null that ``artifact_verification._survives_permutation`` requires.
+
+    Integrity invariants:
+      * Fail-closed — if ``sig_call_arrays`` is empty, or the arrays can't ground a
+        null (``compute_label_permutation_null`` returns ``None``), NOTHING is
+        attached: ``permutation_p`` stays absent and the verdict pipeline correctly
+        keeps the result inconclusive. No synthesized/self-reported null is ever
+        emitted.
+      * The p-value is a deterministic function of the SAME real arrays the observed
+        effect was measured on, under a fixed seed.
+      * The caller's ``stat_input_provenance`` field (if any) is left untouched —
+        an ``agent_literal`` tag on untrusted inputs survives so a later gate can
+        reject the verdict. Attaching a real null never launders that tag.
+      * Group-mean metric fields are filled ONLY when no real metric was found, and
+        never overwrite an existing measured ``metric_value``.
+    """
+    if not sig_call_arrays:
+        return evidence_obj
+
+    # Largest captured comparison (most observations -> most trustworthy null);
+    # ties keep the earliest call.
+    ra, rb = max(sig_call_arrays, key=lambda pair: len(pair[0]) + len(pair[1]))
+    perm = compute_label_permutation_null(ra, rb)
+    if perm is None:
+        return evidence_obj
+
+    fields = perm.to_evidence_fields()
+    if evidence_obj.get("n_samples") is None:
+        evidence_obj["n_samples"] = fields["n_samples"]
+    evidence_obj["permutation_p"] = fields["permutation_p"]
+    evidence_obj["permutation_null_n_permutations"] = fields["permutation_null_n_permutations"]
+    evidence_obj["permutation_null_observed_stat"] = fields["permutation_null_observed_stat"]
+    evidence_obj["permutation_null_group_sizes"] = fields["permutation_null_group_sizes"]
+
+    # A pure two-group outcome experiment may carry a significance p_value but no
+    # accuracy-style metric_value, so _build_evidence leaves metric fields unset
+    # and the evidence classifies as "unknown" (never reaching the artifact gate).
+    # The honest metric here is the group means of the SAME real arrays the null
+    # was computed from. Fill ONLY when no real metric was found; never overwrite
+    # a measured metric, never invent direction beyond the observed means.
+    if evidence_obj.get("metric_value") is None:
+        mean_a = sum(ra) / len(ra)
+        mean_b = sum(rb) / len(rb)
+        evidence_obj["metric_value"] = float(mean_a)
+        evidence_obj["baseline_value"] = float(mean_b)
+        evidence_obj["delta"] = float(mean_a - mean_b)
+        if mean_b != 0.0:
+            evidence_obj["delta_pct"] = float((mean_a - mean_b) / mean_b * 100.0)
+        evidence_obj["n_metric_steps"] = max(1, int(evidence_obj.get("n_metric_steps") or 0))
+        evidence_obj["metric_from_permutation_groups"] = True
+
+    return evidence_obj
 
 
 def _build_mandrake_evidence(
@@ -1733,6 +1802,12 @@ async def run_sub_agent_async(payload: dict) -> dict:
         # _classify_stat_input_provenance). Recorded from the arrays available
         # BEFORE the significance tool's own output is appended.
         sig_input_provenance: list[str] = []
+        # Two-group outcome arrays captured from successful significance-tool calls
+        # (results_a/results_b or treatment/baseline), in call order. Used AFTER
+        # the loop to compute a genuine label-permutation null from the SAME data
+        # the observed effect was measured on (D2). Only pairs where BOTH real
+        # arrays were present are recorded — see extract_two_group_arrays.
+        sig_call_arrays: list[tuple[list[float], list[float]]] = []
 
         # ── Shared tool execution helper (inline, no external function needed) ─
 
@@ -1823,6 +1898,15 @@ async def run_sub_agent_async(payload: dict) -> dict:
                 successful_tool_names.append(tool_name)
                 if isinstance(result.output, dict):
                     successful_tool_outputs.append(result.output)
+                # Capture the two real outcome arrays this significance test ran on,
+                # so a genuine label-permutation null can be computed post-loop from
+                # the SAME data as the observed effect (D2). The significance tool
+                # output does NOT echo its inputs back, so we must read them from the
+                # call params here. Fail-closed: only recorded when BOTH arrays exist.
+                if tool_name in _SIGNIFICANCE_TOOL_NAMES:
+                    _two_arrays = extract_two_group_arrays(call_params)
+                    if _two_arrays is not None:
+                        sig_call_arrays.append(_two_arrays)
                 await emitter.emit(
                     session_id=session_id,
                     event_type=EventType.TOOL_RESULT,
@@ -2378,6 +2462,39 @@ async def run_sub_agent_async(payload: dict) -> dict:
         evidence_obj["stat_input_provenance"] = agg_provenance
         evidence_obj["stat_input_provenance_calls"] = list(sig_input_provenance)
         evidence_obj["inputs_from_sandbox"] = agg_provenance == "computed"
+
+        # ── Real label-permutation null (D2) ──────────────────────────────────
+        # If the agent ran a two-group significance comparison on real outcome
+        # arrays, compute a genuine label-permutation null from that SAME data and
+        # attach `permutation_p` + `n_samples` so artifact_verification.
+        # _survives_permutation (read-only, core) can evaluate a real adversarial
+        # null. Without this, a generic statistical result carries no null and the
+        # verdict pipeline correctly keeps it inconclusive.
+        #
+        # Fail-closed integrity:
+        #   * `sig_call_arrays` only holds pairs where BOTH real arrays were present
+        #     (extract_two_group_arrays); a lone p-value or single array never lands
+        #     here, so `permutation_p` stays absent and the result stays inconclusive.
+        #   * The p-value is a deterministic function of the actual arrays under a
+        #     fixed seed — nothing is self-reported. We never write `permutation_p`
+        #     unless compute_label_permutation_null returned a real result.
+        #   * We do NOT strip or alter `stat_input_provenance`: if the significance
+        #     inputs were agent-typed (`agent_literal`), the null is still computed
+        #     on those (untrusted) numbers but the provenance tag remains on the
+        #     evidence for a later gate to reject. Attaching a real null never
+        #     launders untrusted inputs.
+        _had_perm_before = evidence_obj.get("permutation_p")
+        attach_permutation_null_to_evidence(evidence_obj, sig_call_arrays)
+        if evidence_obj.get("permutation_p") is not None and _had_perm_before is None:
+            logger.info(
+                "label-permutation null computed for %s: permutation_p=%.4f "
+                "n_samples=%s (n_perm=%s, provenance=%s)",
+                hypothesis_id,
+                float(evidence_obj["permutation_p"]),
+                evidence_obj.get("n_samples"),
+                evidence_obj.get("permutation_null_n_permutations"),
+                agg_provenance,
+            )
 
         bm_cfg = payload.get("baseline_measurement")
         if isinstance(bm_cfg, dict) and evidence_obj.get("metric_value") is None:
