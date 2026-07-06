@@ -1153,13 +1153,70 @@ async def _plugin_verification_path(
     from propab.verdict_pipeline import run_verdict_pipeline
 
     domain_id = domain_plugin.domain_id
+    hypothesis_text = str(hypothesis.get("text") or "")
+    test_methodology = str(hypothesis.get("test_methodology") or "")
     hyp_dict = {
-        "text": str(hypothesis.get("text") or ""),
-        "statement": str(hypothesis.get("text") or ""),
-        "test_methodology": str(hypothesis.get("test_methodology") or ""),
+        "text": hypothesis_text,
+        "statement": hypothesis_text,
+        "test_methodology": test_methodology,
         "feature_subset": list(hypothesis.get("feature_subset") or []),
     }
     features = list(hypothesis.get("feature_subset") or [])
+
+    # DOM4 honesty gate: before running the domain's fixed-default verification,
+    # confirm the hypothesis is actually ON-TOPIC for this domain. Without this,
+    # an off-topic / misrouted hypothesis is verified against the domain's default
+    # feature pair (e.g. graph_invariants' spectral_gap->clustering) and can yield
+    # a "confirmed" verdict decoupled from the real claim. ``hypothesis_on_topic``
+    # is defined on the DomainPlugin base (default: accept all), so every plugin
+    # has it; we still guard with getattr + a fail-OPEN except so a plugin that
+    # lacks or breaks the method is verified exactly as before (never a false
+    # refusal).
+    on_topic_check = getattr(domain_plugin, "hypothesis_on_topic", None)
+    if callable(on_topic_check):
+        try:
+            on_topic = bool(on_topic_check(hypothesis_text, methodology=test_methodology))
+        except Exception:  # noqa: BLE001 — a broken on-topic check must not block verification
+            on_topic = True
+        if not on_topic:
+            reason = "hypothesis_off_topic_for_domain"
+            off_topic_evidence = json.dumps({"reason": reason, "domain": domain_id})
+            await emitter.emit(
+                session_id=session_id,
+                event_type=EventType.AGENT_COMPLETED,
+                step=f"experiment.{hypothesis_id}.complete",
+                payload={
+                    "verdict": "inconclusive",
+                    "confidence": 0.0,
+                    "domain": domain_id,
+                    "off_topic": True,
+                    "reason": reason,
+                },
+                hypothesis_id=hypothesis_id,
+            )
+            await _update_hypothesis(
+                session_factory,
+                hypothesis_id,
+                status="completed",
+                verdict="inconclusive",
+                confidence=0.0,
+                evidence_summary=off_topic_evidence,
+                key_finding=None,
+                tool_trace_id=trace_pointer,
+            )
+            return {
+                "hypothesis_id": hypothesis_id,
+                "campaign_node_id": campaign_node_id,
+                "verdict": "inconclusive",
+                "confidence": 0.0,
+                "evidence_summary": off_topic_evidence,
+                "key_finding": None,
+                "tool_trace_id": trace_pointer,
+                "figures": [],
+                "duration_sec": round(time.perf_counter() - started, 3),
+                "failure_reason": reason,
+                "learned": reason,
+            }
 
     await emitter.emit(
         session_id=session_id,
