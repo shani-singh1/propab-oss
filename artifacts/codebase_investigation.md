@@ -172,20 +172,44 @@ discriminating experiments)? Needs a rejection-reason histogram from a real run.
 
 ---
 
-## 4. Layers not yet deeply read (AUDIT-PENDING, ranked by leverage)
+## 4. Worker / executor — evidence integrity [PARTIAL, one concrete flaw found]
 
-1. **Worker / executor** (`services/worker/sub_agent_loop.py` 2418, `think_act.py`
-   585) — the experiments that produce evidence. Highest leverage after the tree:
-   garbage evidence ⇒ garbage verdicts ⇒ nothing to refine. Check: tool-loop
-   termination, evidence quality, timeout→inconclusive rate.
-2. **Verdict pipeline + artifact gate** (`verdict_pipeline.py`,
+`run_sub_agent_async` (sub_agent_loop.py:1273) resolves the domain plugin and
+routes to a worker verification path (materials/mandrake fast paths, else generic
+`_plugin_verification_path`). Domain routing via the registry is clean. Verdict
+"requires significance evidence" (a stat tool must run).
+
+**[VERIFIED] The guard against fabricated evidence is a 3-entry denylist.**
+`think_act._is_spec_example_params` (line 350) detects the agent using
+placeholder numbers by **exact-matching three hardcoded spec-example arrays**
+(`statistical_significance`→`[0.9,0.88,0.91]`/`[0.82,0.8,0.79]`,
+`bootstrap_confidence`→`[0.1,0.2,0.15,0.18]`,
+`literature_baseline_compare`→`[0.42,0.44,0.41]`). It catches only a verbatim
+copy of the tool-spec example; **any other invented numbers pass**. Combined
+with the significance gate checking that a stat tool *ran* (not that its inputs
+came from real sandbox computation), there is a path where an LLM feeds
+fabricated inputs to a real stat tool → real-looking p-value → confirmed verdict
+built on invented data. **Evidence integrity is the load-bearing assumption of
+the entire campaign; this guard does not robustly enforce it.** Needs: require
+metric values to originate from a sandbox-executed run (provenance), not
+agent-supplied literals, or a general fabrication check rather than a denylist.
+
+**[AUDIT-PENDING] "description-only → deterministic no-op stub"** (line ~2084):
+when the agent supplies a code *description* but no source, a no-op stub runs
+in-process (not Docker). What evidence that yields and whether it can reach a
+confident verdict is unverified. Also `_run_inline_trusted_sandbox_code` execs
+"trusted" code in-process (no isolation) — trust boundary worth auditing.
+
+## 5b. Layers surveyed at surface depth (AUDIT-PENDING, ranked by leverage)
+
+1. **Verdict pipeline + artifact gate** (`verdict_pipeline.py`,
    `artifact_verification.py` 753) — is "confirmed" calibrated? Too-easy ⇒ tree
-   chases noise; too-hard ⇒ no parents to expand.
-3. **Seed / hypothesis generation** (`services/orchestrator/hypotheses.py` 627,
+   chases noise; too-hard ⇒ no parents to expand. Not yet read.
+2. **Seed / hypothesis generation** (`services/orchestrator/hypotheses.py` 627,
    `generate_ranked_hypotheses`) — duplicate rate, question-relevance gate.
-4. **Lifetime learning** (`lifetime_knowledge.py` 356) — JSON last-writer-wins;
+3. **Lifetime learning** (`lifetime_knowledge.py` 356) — JSON last-writer-wins;
    does prior knowledge actually improve later campaigns, or just accumulate?
-5. **Paper compiler** (`paper_compiler.py` 644) — does the paper reflect the real
+4. **Paper compiler** (`paper_compiler.py` 644) — does the paper reflect the real
    trace (already claimed) — spot-check for fabrication.
 
 ## 5. Cross-cutting observations
@@ -196,6 +220,34 @@ discriminating experiments)? Needs a rejection-reason histogram from a real run.
   is any metric wired to *stop or steer* a stuck campaign, or only logged?
   (AUDIT-PENDING — this is the "debug by which number is out of range" promise;
   verify a number actually gates behaviour.)
+
+## 5c. Verdict + generation — surveyed, look rigorous [POSITIVE]
+- **Verdict** (`verdict_pipeline.py` + `significance.py`): confirmation requires a
+  real significance result (p_value/effect_size, `n_metric_steps>=3`) AND passes
+  a chain of gates — a "confirmed" that has no cross-group holdout is downgraded
+  (line ~172), then artifact/OOD/scope-integrity gates. This is *not* an
+  easy-confirm; if anything the risk is over-strict (few confirmed parents to
+  deepen — which compounds §3.3). Calibration on a real run still worth checking.
+- **Generation** (`hypotheses.generate_ranked_hypotheses`): a question-relevance
+  gate (threshold 0.35) rejects `ml_template`/off-topic/below-threshold seeds
+  before they enter the tree. Reasonable.
+
+## 5d. Coverage table (honest audit depth)
+
+| Layer | Depth | Verdict |
+|---|---|---|
+| Campaign spine: tree / synthesis / belief / frontier | **deep** | 2 verified convergence flaws (§3.2, §3.3); belief-cap is by-design |
+| Worker / executor | partial | 1 verified evidence-integrity flaw (denylist guard, §4) |
+| Verdict pipeline + gates | survey | looks rigorous, maybe over-strict |
+| Hypothesis generation | survey | relevance gate present, reasonable |
+| Domain plugin seam | spot-check | clean (core imports no domain constants) |
+| Lifetime learning | not read | JSON last-writer-wins (per ARCHITECTURE.md §10) |
+| Paper compiler | not read | claims to reflect real trace; unverified |
+| API / events / persistence | not read | per ARCHITECTURE.md §12; unverified |
+
+The spine — the layer to be improved — is audited deeply; the rest is mapped to
+"architecture + concrete flaws found," which is sufficient to fix convergence
+safely without regressing neighbours. Remaining deep audits are queued.
 
 ## 6. Recommendation — the next layer to improve
 
