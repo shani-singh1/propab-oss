@@ -57,7 +57,12 @@ def chunk_document(doc: FullTextDocument, *, max_chars: int = 900, min_chars: in
     consecutive paragraphs up to ``max_chars`` so short paragraphs (common in
     PMC's per-<p> splitting — see ``sources/pubmed.py``) don't each become
     their own near-empty chunk. A lone paragraph longer than ``max_chars``
-    becomes its own chunk unsplit rather than being cut mid-sentence."""
+    becomes its own chunk unsplit rather than being cut mid-sentence.
+
+    ``max_chars`` stays at 900: raising it to 1600 was measured (CHANGELOG
+    0.9.0) as a null — +6pp at n=50 (0.68→0.74) that evaporated at n=100
+    (0.70 vs 0.71 baseline), the exact small-sample-noise trap, at a real
+    token/latency cost. Kept at 900."""
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", doc.body_text or "") if p.strip()]
     if not paragraphs:
         return []
@@ -139,6 +144,7 @@ async def retrieve_relevant_chunks(
     top_k: int = 6,
     ranker: str = "bm25",
     chunk_query: str = "",
+    deep_read_k: int = 0,
 ) -> tuple[list[Chunk], list[str]]:
     """Issue several targeted searches → rank candidate documents → fetch full
     text of the best few → chunk → rank chunks (per-document cap) by relevance
@@ -196,6 +202,12 @@ async def retrieve_relevant_chunks(
                 candidates.append((name, raw))
     if not candidates:
         return [], sources_with_hits
+    # Doc-fetch ranking stays on the bare question. Ranking by the choice-aware
+    # query instead was measured (CHANGELOG 0.9.0) as flat: it lifted source-
+    # paper fetch recall only marginally (39→40 of 50) and did not move accuracy
+    # (0.68), because the plateau is not fetch recall — the source paper is
+    # already retrieved in ~78% of cases; the failures are "paper present, answer
+    # still wrong."
     scores = _doc_relevance_scores(question, [raw for _, raw in candidates])
     top_candidates = [
         (name, raw)
@@ -225,7 +237,26 @@ async def retrieve_relevant_chunks(
     # — choices shouldn't bias *which paper* is judged the source, only which
     # chunks within it are pulled.
     cq = chunk_query or question
-    pooled: list[Chunk] = []
+    # Deep-read the single most-relevant paper. ``full_docs`` is in doc-relevance
+    # order, so ``full_docs[0]`` is the most likely source paper, and a LitQA2
+    # answer lives in ONE paper's body. When ``deep_read_k`` > 0, give that top
+    # paper a large, *guaranteed* chunk budget (it leads the evidence and isn't
+    # filtered out by the global top_k), while the remaining papers stay shallow
+    # (``max_chunks_per_doc`` each) as coverage in case doc[0] isn't the source.
+    # This concentrates depth on ONE paper — distinct from feeding the top-3
+    # papers in full, which regressed hard (0.48, dilution; CHANGELOG 0.8.0).
+    if deep_read_k > 0 and full_docs:
+        deep_chunks = await rerank_chunks(
+            embedder, cq, chunk_document(full_docs[0]), deep_read_k, ranker=ranker
+        )
+        pooled: list[Chunk] = []
+        for doc in full_docs[1:]:
+            best = await rerank_chunks(embedder, cq, chunk_document(doc), max_chunks_per_doc, ranker=ranker)
+            pooled.extend(best)
+        shallow = await rerank_chunks(embedder, cq, pooled, max(0, top_k - len(deep_chunks)), ranker=ranker)
+        return deep_chunks + shallow, sources_with_hits
+
+    pooled = []
     for doc in full_docs:
         doc_chunks = chunk_document(doc)
         best = await rerank_chunks(embedder, cq, doc_chunks, max_chunks_per_doc, ranker=ranker)

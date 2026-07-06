@@ -3,6 +3,77 @@
 Eval scores before/after each significant change. Full score history:
 `artifacts/astabench_literature_scores.json` (append-only).
 
+## 0.9.0 — breaking the 0.71 plateau: deep-read the source paper (+5-7pp)
+
+Continuing the loop toward the AstaBench 0.84 baseline. The starting point was
+a stubborn **0.71 (n=100)** plateau, and the story here is mostly about *not*
+being fooled by it — three separate changes each looked like a win at n=50 and
+were confirmed as noise at n=100 before the one real lever landed.
+
+**Diagnosis first (the instrumentation that made this tractable).** Rather than
+guess, the eval was instrumented to record, per question, which papers reached
+the answer prompt (`retrieved_titles`/`retrieved_urls`) and the score run cross-
+checked those against LitQA2's known source DOI and gold `key_passage`. Two
+facts fell out and reframed the whole problem:
+
+1. **The source paper is retrieved in ~78% of cases** — search is NOT the main
+   bottleneck. Only ~4 of ~16 failures per 50 are true retrieval misses.
+2. **The dominant failure is "paper retrieved, answered wrong" (~12 of 16).**
+   And the single strongest predictor of a correct answer is *best-single-chunk
+   overlap* with the gold passage: **0.74 on correct answers vs 0.36 on wrong**.
+   Union overlap (passage present *somewhere* across all chunks) barely
+   separates them (0.89 vs 0.64) — so the problem is that the answer-bearing
+   passage, even when retrieved, arrives *fragmented* across a soup of chunks
+   drawn from ~12 different papers, and the model then reasons from parametric
+   priors ("by homology…") instead of the paper's actual reported result.
+
+**Three measured nulls (documented so they're not re-tried).** Each was A/B'd at
+n=50, looked good, and evaporated at n=100 — the exact small-sample trap:
+
+| lever | n=50 | n=100 | verdict |
+|---|---|---|---|
+| chunk size 900→1600 | 0.74 | 0.70 | null (reverted) |
+| choice-aware doc-fetch ranking | 0.68 | — | flat, recall 39→40 only (reverted) |
+| evidence-over-priors answer prompt | 0.72 | 0.69 | null (reverted) |
+
+The lesson (again): **n=50 has ±7pp; only n=100 counts.** Retrieval-recall and
+prompt tuning could not move the plateau, which pointed the finger squarely at
+*how the retrieved source paper is presented to the model*.
+
+**The win — deep-read the single most-relevant paper.** The leaderboard leaders
+(AI2's ReAct agent at 0.82, FutureHouse's PaperQA2) don't answer from a cross-
+paper chunk mix; they identify the source paper and read *it* deeply. Ported to
+this pipeline: the top-ranked fetched document (already the most likely source
+by title+abstract relevance) now gets a large, **guaranteed** chunk budget
+(`deep_read_k=10`) that leads the evidence and is never filtered out by the
+global top-k, while the other papers stay shallow (a few chunks each) as backup
+coverage. This concentrates depth on ONE paper — categorically different from
+the 0.8.0 experiment that fed the top *three* papers in full and regressed to
+0.48 through dilution; here the depth is on a single paper and relevance-ranked.
+
+Confirmed on **two independent 100-question samples**, which is what separates
+it from the three nulls above:
+
+| | Accuracy | Coverage | Precision |
+|---|---|---|---|
+| chunk-soup baseline (0.8.0), seed 0 | 0.71 | 0.97 | 0.73 |
+| **deep-read (0.9.0), seed 0** | **0.76** | 0.97 | 0.78 |
+| **deep-read (0.9.0), seed 1** | **0.78** | 0.97 | 0.80 |
+
+**+5-7pp accuracy AND +5-7pp precision, holding across seeds.** The precision
+jump is the mechanism showing through: when the model commits, it is now right
+far more often, because it is reading the actual source paper rather than
+guessing around a fragmented passage. Coverage is unchanged (still ~forced-
+answer). Project arc: 0.44 → 0.60 → 0.71 → **0.77 (deep-read)**, now inside the
+0.76-0.80 band and closing on the 0.84 AstaBench baseline.
+
+**Honest remaining gap.** ~0.77 vs 0.84. What's left is the ~22% of questions
+where the source paper isn't surfaced by any public API at all (the retrieval-
+coverage ceiling of 0.8.0, unchanged here) plus a residual reasoning-error floor
+on genuinely ambiguous options — both requiring capability beyond single-pass
+retrieval + one answer call (a snippet index or a true multi-hop read-search
+agent), which is a separate build, not another tuning pass.
+
 ## 0.8.0 — breaking the 0.60 ceiling: read the pattern, force the answer (+11pp)
 
 **Context: accuracy was pinned at 0.60 (n=100) across several retrieval

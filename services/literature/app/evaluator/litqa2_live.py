@@ -458,6 +458,7 @@ async def answer_one_question(
             pipeline.ctx.sources, pipeline.ctx.embedder,
             question=question, search_terms=search_terms, profile=profile,
             top_k=n_answer_evidence, ranker="bm25", chunk_query=chunk_query,
+            deep_read_k=10,
         )
         sources_with_hits.update(hit)
         for c in round_chunks:
@@ -524,6 +525,11 @@ async def answer_one_question(
         "is_sure": bool(is_sure),
         "n_evidence": len(evidence),
         "sources_consulted": sorted(sources_with_hits),
+        # Identity of the papers whose chunks reached the answer prompt — lets
+        # a failure be categorized as "wrong paper retrieved" vs "right paper,
+        # wrong answer" by matching against the case's known source DOI/title.
+        "retrieved_titles": sorted({c.title for c in ranked if getattr(c, "title", "")}),
+        "retrieved_urls": sorted({c.url for c in ranked if getattr(c, "url", "")}),
         "raw_llm_output": raw[:300],
     }
 
