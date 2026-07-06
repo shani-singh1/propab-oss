@@ -69,8 +69,28 @@ class DomainPlugin(ABC):
         claimed_generalization, expected_failure_modes, ood_test) for this domain,
         or None if the domain has no template. Lives here so core's scope gate
         holds no domain-specific text.
+
+        D3 honesty note: returning ``None`` DISABLES the domain's OOD-scope
+        template — core's scope gate then has nothing to fill and the scope check
+        degrades to a no-op that reports "passed". That silent degradation is not
+        the same as "the scope check ran and passed". Callers that need to tell
+        the two apart should consult :meth:`has_scope_template` rather than
+        treating a missing template as an affirmative pass.
         """
         return None
+
+    def has_scope_template(self) -> bool:
+        """
+        True if this plugin supplies a non-empty OOD-scope template. When False,
+        the domain's scope check is effectively DISABLED (no template to enforce);
+        the pipeline should treat that as "no scope check available", not as a
+        scope check that ran and passed.
+        """
+        try:
+            tmpl = self.scope_template()
+        except Exception:  # noqa: BLE001 — a broken template means no usable check
+            return False
+        return bool(tmpl)
 
     def matches_scope(self, question: str) -> bool:
         q = (question or "").lower()
@@ -127,12 +147,34 @@ class DomainPlugin(ABC):
         return True
 
     # --- Artifact detection -------------------------------------------------
+    def has_artifact_models(self) -> bool:
+        """
+        True if this plugin can supply domain-specific artifact models (i.e. it
+        has a :class:`DomainProfile`). When False, :meth:`artifact_models` returns
+        an empty list and the artifact gate has no domain vocabulary to work with,
+        so that gate degrades to a no-op that reports "passed". Callers should use
+        this to distinguish "no artifact models available" from "the artifact gate
+        ran and found nothing".
+        """
+        try:
+            return self.domain_profile() is not None
+        except Exception:  # noqa: BLE001 — a broken profile means no usable models
+            return False
+
     def artifact_models(
         self,
         evidence: dict[str, Any] | None = None,
         hypothesis: dict[str, Any] | None = None,
     ) -> list[Any]:
-        """Ranked plausible artifact explanations for this domain (via its profile)."""
+        """
+        Ranked plausible artifact explanations for this domain (via its profile).
+
+        D3 honesty note: with no :meth:`domain_profile` this returns ``[]`` and the
+        domain contributes no artifact vocabulary; the artifact gate then has
+        nothing to check. See :meth:`has_artifact_models` to detect that a domain
+        has no artifact models rather than mistaking the empty list for a passed
+        artifact gate.
+        """
         profile = self.domain_profile()
         if profile is None:
             return []
@@ -167,9 +209,68 @@ class DomainPlugin(ABC):
         }
 
     # --- Domain preflight ---------------------------------------------------
+    def has_verification_capability(self) -> bool:
+        """
+        Return True if this plugin can actually verify a hypothesis for its
+        domain — i.e. it has a runnable verification path rather than only the
+        base :meth:`run_verification` stub (which raises ``NotImplementedError``).
+
+        A plugin has a verification capability when EITHER:
+        - it overrides :meth:`run_verification` (its own worker/adapter path), OR
+        - it exposes a :class:`DomainProfile` via :meth:`domain_profile` (the
+          profile-backed generic verification path core can drive).
+
+        This is what the default :meth:`preflight` consults to decide whether a
+        campaign for an otherwise-unconfigured domain may launch. A "scope only"
+        plugin (no ``run_verification`` override, no profile) reports False; such
+        a plugin never owns campaign routing (its ``matches`` returns False), so
+        core never calls its preflight for launch — but if it were ever resolved
+        explicitly, failing closed is the honest answer.
+        """
+        overrides_run_verification = (
+            type(self).run_verification is not DomainPlugin.run_verification
+        )
+        if overrides_run_verification:
+            return True
+        try:
+            return self.domain_profile() is not None
+        except Exception:  # noqa: BLE001 — a broken profile means no usable path
+            return False
+
     def preflight(self) -> PreflightResult:
-        """Check dataset access / feature computability / power before launch."""
-        return PreflightResult(passed=True, reason="no preflight configured")
+        """
+        Check dataset access / feature computability / power before launch.
+
+        Fail-CLOSED default: a plugin that provides no runnable verification
+        capability (see :meth:`has_verification_capability`) must NOT silently
+        wave a campaign through. Historically this returned ``passed=True`` for
+        any un-overridden plugin, so the preflight power-gate protected only the
+        domains that least needed it and launched full campaigns for genuinely
+        unsupported domains that then produced nothing. It now refuses those.
+
+        A plugin that DOES have a verification path but configures no explicit
+        power check still passes here (real domains — materials, genomics, … —
+        override this method with a genuine dataset/power check anyway), but the
+        reason is explicit rather than a silent "no preflight configured".
+        """
+        if not self.has_verification_capability():
+            return PreflightResult(
+                passed=False,
+                reason=(
+                    "default preflight: no verification capability "
+                    "(run_verification not overridden and no domain profile) "
+                    "- refusing to launch an unsupported domain"
+                ),
+                details={
+                    "domain": self.domain_id,
+                    "has_verification_capability": False,
+                },
+            )
+        return PreflightResult(
+            passed=True,
+            reason="default preflight: verification path present, no power check configured",
+            details={"domain": self.domain_id, "has_verification_capability": True},
+        )
 
     # --- Literature prior ---------------------------------------------------
     def literature_prior(self, question: str) -> dict[str, Any]:
@@ -216,7 +317,14 @@ class DomainPlugin(ABC):
         return []
 
     def extract_numerical_seeds(self, confirmed_nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Extract numerical findings from confirmed nodes for next campaign seeding."""
+        """
+        Extract numerical findings from confirmed nodes for next campaign seeding.
+
+        D3 honesty note: the default returns ``[]``, which DISABLES numerical-seed
+        compounding for this domain — successive campaigns get no carried-forward
+        numerical findings. This is silent by design (empty is a valid result too),
+        so a domain that wants seed compounding must override this.
+        """
         _ = confirmed_nodes
         return []
 
