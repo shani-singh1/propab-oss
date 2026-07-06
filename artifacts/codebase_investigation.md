@@ -461,6 +461,40 @@ domain-generality blockers). Nothing below is cleared yet.
   deterministic. Not opened as an actionable issue (low, structural gate sound).
 - **L10 API + events + persistence** (`routes/*`, `stream.py`, `events.py`,
   `db.py`, `campaign_db.py`) — SSE/event integrity, resume correctness.
+  **PARTIALLY SURVEYED → L10-R1 opened (below).**
+
+**L10-R1 · MED · OPEN · SUSPECTED — resume rebuilds the tree from a JSON snapshot
+and never reconciles node verdicts against the authoritative `hypotheses` table.**
+Verified facts: (1) `db_save_campaign` persists `campaign.hypothesis_tree.to_dict()`
+as a `hypothesis_tree_json` snapshot (campaign_db.py:136); `db_load_campaign` rebuilds
+the tree ONLY from that snapshot (`Campaign.from_dict`, :207). (2) The WORKER writes
+`hypotheses.verdict` DIRECTLY (`UPDATE hypotheses SET … WHERE id=:id`,
+sub_agent_loop.py:822); there is NO orchestrator-side verdict write. (3) `campaign_resume.py`
+backfills belief state from events and validates readiness but does NOT read
+`hypotheses.verdict` rows back into the resumed tree. **Consequence:** if the
+orchestrator crashes AFTER a worker's DB verdict-write but BEFORE it collects+applies+
+snapshots, the resumed tree has that node stale-pending while the DB row (and the
+paper, which reads the `hypotheses` table via `_fetch_result_rows`) has the verdict —
+so the campaign loop (convergence/synthesis/stop) transiently operates on a tree
+missing completed results, and the tree vs paper can disagree. **VERIFIED self-healing → downgraded MED→LOW-MED.**
+Traced the resume path fully: `resume_warm` (campaign_loop.py:1601-1637) loads the
+snapshot tree + backfills belief state but does NOT reconcile node verdicts from the
+DB. The in-flight set is derived from the IN-MEMORY `pending` list (`pending=[]` at
+:1222, `inflight={p["nid"] for p in pending}` at :1252), which is EMPTY on a fresh
+resumed process — so `next_dispatch_candidate(inflight={})` re-selects every
+tree-pending node, INCLUDING one the pre-crash worker already verdicted in the DB, and
+re-dispatches it. The worker's `UPDATE hypotheses SET … WHERE id=:id` (:822) is
+unconditional, so the row is overwritten. **Net:** no stranded node, no silent wrong
+answer (the paper reads the healed DB state); the divergence is transient and closes
+on re-dispatch. **Residual real cost (LOW-MED):** (a) wasted recompute of the in-flight
+wave that completed just before the crash; (b) possibly duplicate/orphaned
+`experiment_steps`/evidence rows from the discarded pre-crash run; (c) a nondeterministic
+re-run can yield a different verdict than the (uncommitted) pre-crash one — acceptable
+since the pre-crash verdict never entered the tree. **Clean fix (if we invest):** on
+`resume_warm`, reconcile the snapshot tree against the `hypotheses` table — for each
+node whose DB row already carries a terminal verdict the tree lacks, apply it via
+`update_node` before dispatching, so completed work isn't recomputed and step rows
+aren't duplicated. Not a campaign-blocker; batch with other L10 items.
 - **L11 Tools registry** (`tools/*`) — are the STEM tools real computations or
   spec stubs? (ties to W1.)
 - **L12 config.py / llm.py** — ret/timeout defaults, provider fallbacks that
