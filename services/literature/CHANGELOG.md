@@ -3,6 +3,55 @@
 Eval scores before/after each significant change. Full score history:
 `artifacts/astabench_literature_scores.json` (append-only).
 
+## 0.10.0 — chasing 0.89: an agent and full-text search, both measured, both reverted
+
+Target raised to beat AI2's leaderboard top (~0.89). Two architecturally larger
+levers were built and measured at n=100; both regressed below the 0.77 single-
+pass baseline and were reverted. This entry records *why*, because the failures
+sharply characterize what beating 0.89 actually requires.
+
+**Agentic multi-hop reader — 0.62 (n=50, same slice single-pass scores 0.68).**
+Built a real ReAct/PaperQA2-style loop: `search_and_fetch_ranked_docs` (a clean
+extraction of the search→rank→fetch stage) feeds a loop that deep-reads each
+candidate paper one at a time, scores how strongly *that* paper grounds an
+answer (0-10), takes the best-supporting paper's answer (argmax, early-exit on
+an explicit 9-10), and falls back to the forced-answer path when nothing
+grounds. It regressed. Mechanism (from the per-paper trail): committing on a
+single paper's ~12 chunks is *thinner* evidence than the single-pass forced
+answer reasoning across the doc[0]-deep + cross-paper-shallow pool — the agent
+fragments the very cross-paper reasoning that made deep-read work. The leaders'
+agents win on *retrieval* (a full-text snippet index puts the answer passage in
+front of the model), not on a cleverer control loop; reading the same BM25
+chunks in a fancier order can only lose context.
+
+**Full-text body search (NCBI `db=pmc`) — 0.56-0.76 (n=100), + timeout
+instability.** Added a source that searches article *body text*, not just
+title/abstract; verified live it surfaces papers the title/abstract path misses
+(e.g. the SNIPR001 paper at rank 1). But as a unioned candidate source it
+*regressed*: full-text keyword search returns every paper that merely *mentions*
+the query entity in its body — dozens of non-source papers — which floods the
+title+abstract candidate ranking that deep-read depends on. With 12 fetches the
+noise was tolerable-but-flat (0.74-0.76, precision 0.78-0.81) while heavy JATS-
+XML fetches timed out 5-6 questions/100 (pure lost accuracy); trimming to 8
+fetches to fix the timeouts pushed the *true* source paper out of the fetched
+set entirely → **0.56**. Full-text keyword search is fundamentally incompatible
+with a retrieval architecture whose payoff depends on the single top-ranked
+paper being the real source: it adds precisely the noise that corrupts that
+ranking.
+
+**What this establishes about the 0.89 gap.** The two obvious "do what the
+leaders do" levers — an agent loop and full-text search — both *hurt* on public
+infrastructure, for the same root reason: the missing capability is not
+orchestration or raw full-text recall, it is **high-precision passage retrieval**
+— returning the two or three sentences that answer the question from the right
+paper, not a keyword-matched flood. AI2 reaches ~0.82-0.89 on Semantic Scholar's
+*proprietary* full-text snippet index, which does exactly that; PaperQA2 does it
+with a heavy per-paper dense-embedding+rerank pass over full text. Neither is
+reachable with public keyword APIs + one Gemini call. Honest standing result:
+**0.76-0.78 (n=100, two seeds)** — deep-read single-pass (0.9.0), unchanged. The
+agent and `db=pmc` source were reverted (findings kept here; append-only score
+history retains the 0.62/0.56/0.74/0.76 experiment runs).
+
 ## 0.9.0 — breaking the 0.71 plateau: deep-read the source paper (+5-7pp)
 
 Continuing the loop toward the AstaBench 0.84 baseline. The starting point was
