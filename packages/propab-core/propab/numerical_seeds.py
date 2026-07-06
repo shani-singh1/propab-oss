@@ -56,10 +56,18 @@ def claim_has_numeric_falsifier(text: str, methodology: str = "") -> bool:
 
 def _node_evidence(node: dict[str, Any]) -> dict[str, Any]:
     finding = node.get("finding") or {}
-    evs = node.get("evidence_summary") or {}
+    evs = node.get("evidence_summary")
     if isinstance(finding, dict) and finding:
         return finding
-    return evs if isinstance(evs, dict) else {}
+    if isinstance(evs, dict) and evs:
+        return evs
+    if isinstance(evs, str) and evs.strip():
+        from propab.hypothesis_tree import HypothesisTree
+
+        parsed = HypothesisTree._parse_evidence_blob(evs)
+        if parsed:
+            return parsed
+    return {}
 
 
 def _parse_sweep_points(node: dict[str, Any]) -> list[tuple[int, float]]:
@@ -115,8 +123,126 @@ def _parse_text_sweep_points(node: dict[str, Any]) -> list[tuple[int, float]]:
     return sorted(set(points))
 
 
+def crossing_from_node(node: dict[str, Any]) -> dict[str, Any] | None:
+    """Structured threshold_search from verifier output, if present."""
+    ev = _node_evidence(node)
+    ts = ev.get("threshold_search")
+    if not isinstance(ts, dict):
+        return None
+    crossing_n = ts.get("crossing_n")
+    if crossing_n is None:
+        return None
+    return {
+        "crossing_n": int(crossing_n),
+        "crossing_ratio": ts.get("crossing_ratio"),
+        "target_ratio": ts.get("target_ratio"),
+        "prev_n": ts.get("prev_n"),
+        "prev_ratio": ts.get("prev_ratio"),
+    }
+
+
+def _threshold_search_seed(node: dict[str, Any], crossing: dict[str, Any]) -> dict[str, Any]:
+    target = crossing.get("target_ratio") or 0.60
+    cn = int(crossing["crossing_n"])
+    ratio = crossing.get("crossing_ratio")
+    ratio_s = f"{float(ratio):.4f}" if ratio is not None else "?"
+    return {
+        "finding_type": "threshold_crossing",
+        "claim": f"F(n)/sqrt(n) first drops below {target} at n={cn} (ratio={ratio_s})",
+        "parameters": {
+            "threshold": float(target),
+            "crossing_n": cn,
+            "ratio": ratio,
+            "prev_n": crossing.get("prev_n"),
+        },
+        "source_node_ids": [str(node.get("id") or "")],
+        "next_hypotheses": [
+            f"Pin the exact crossing n below {target} between n={crossing.get('prev_n')} and n={cn}",
+        ],
+    }
+
+
+def best_q1_crossing_from_nodes(
+    nodes: dict[str, Any] | list[dict[str, Any]],
+    *,
+    target: float = 0.60,
+) -> dict[str, Any] | None:
+    """Best (smallest) confirmed crossing_n at or below target from tree nodes."""
+    node_list = nodes.values() if isinstance(nodes, dict) else nodes
+    best: dict[str, Any] | None = None
+    for node in node_list:
+        if not isinstance(node, dict):
+            continue
+        if str(node.get("verdict") or "") != "confirmed":
+            continue
+        crossing = crossing_from_node(node)
+        if not crossing:
+            continue
+        ts_target = crossing.get("target_ratio")
+        if ts_target is not None and abs(float(ts_target) - target) > 0.02:
+            continue
+        cn = int(crossing["crossing_n"])
+        if best is None or cn < int(best["crossing_n"]):
+            best = {**crossing, "node_id": str(node.get("id") or "")}
+    return best
+
+
+def in_campaign_crossing_context_block(
+    crossing: dict[str, Any],
+    *,
+    target: float = 0.60,
+) -> str:
+    """Factual in-campaign crossing summary for lifetime context (no experiment directives)."""
+    cn = int(crossing["crossing_n"])
+    ratio = crossing.get("crossing_ratio")
+    ratio_s = f"{float(ratio):.4f}" if ratio is not None else "?"
+    return (
+        f"In-campaign finding: F(n)/sqrt(n) crossed below {target:.2f} at n={cn} (ratio={ratio_s})."
+    )
+
+
+def refresh_lifetime_context_with_crossings(
+    lifetime_context: str,
+    tree: Any,
+    question: str,
+) -> str:
+    """Append confirmed threshold-crossing facts from the current tree (evidence only)."""
+    from propab.synthesis_diversity import q1_threshold_target
+
+    target = q1_threshold_target(question)
+    node_dicts = {
+        nid: (n.to_dict() if hasattr(n, "to_dict") else n)
+        for nid, n in tree.nodes.items()
+    }
+    crossing = best_q1_crossing_from_nodes(node_dicts, target=target)
+    if not crossing:
+        return lifetime_context
+    block = in_campaign_crossing_context_block(crossing, target=target)
+    marker = "In-campaign finding:"
+    if marker in lifetime_context:
+        before = lifetime_context.split(marker)[0].rstrip()
+        return f"{before}\n\n{block}".strip()
+    base = (lifetime_context or "").strip()
+    return f"{base}\n\n{block}".strip() if base else block
+
+
 def extract_math_combinatorics_seeds(confirmed_nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Extract structured numerical seeds from confirmed hypothesis nodes."""
+    seeds: list[dict[str, Any]] = []
+    seen_crossings: set[tuple[float, int]] = set()
+
+    for node in confirmed_nodes:
+        crossing = crossing_from_node(node)
+        if not crossing:
+            continue
+        target = float(crossing.get("target_ratio") or 0.60)
+        cn = int(crossing["crossing_n"])
+        key = (target, cn)
+        if key in seen_crossings:
+            continue
+        seen_crossings.add(key)
+        seeds.append(_threshold_search_seed(node, crossing))
+
     all_points: list[tuple[int, float, str]] = []
     for node in confirmed_nodes:
         nid = str(node.get("id") or "")
@@ -141,11 +267,10 @@ def extract_math_combinatorics_seeds(confirmed_nodes: list[dict[str, Any]]) -> l
             by_n[n] = (ratio, nid)
 
     if len(by_n) < 2:
-        return []
+        return seeds
 
     sorted_ns = sorted(by_n)
     ratios = [by_n[n][0] for n in sorted_ns]
-    seeds: list[dict[str, Any]] = []
 
     if all(ratios[i] >= ratios[i + 1] for i in range(len(ratios) - 1)):
         seeds.append({
@@ -170,6 +295,10 @@ def extract_math_combinatorics_seeds(confirmed_nodes: list[dict[str, Any]]) -> l
                 break
         if crossing_n is None:
             continue
+        key = (target, crossing_n)
+        if key in seen_crossings:
+            continue
+        seen_crossings.add(key)
         prev_n = max(n for n in sorted_ns if n < crossing_n) if any(n < crossing_n for n in sorted_ns) else None
         seeds.append({
             "finding_type": "threshold_crossing",
