@@ -22,6 +22,7 @@ def render_paper_tex(
     methods_tex: str,
     results_tex: str,
     figures_tex: str,
+    narrative_tex: str = "",
     discussion: str,
     conclusion: str,
     references_tex: str,
@@ -37,6 +38,7 @@ def render_paper_tex(
         methods_tex=methods_tex,
         results_tex=results_tex,
         figures_tex=figures_tex,
+        narrative_tex=narrative_tex,
         discussion=discussion,
         conclusion=conclusion,
         references_tex=references_tex,
@@ -267,12 +269,21 @@ def _fallback_from_context(
         "Falsifiable hypotheses were generated and tested under a uniform protocol, with claims admitted only on "
         f"significant statistical evidence. {outcome}"
     )
+    threats = (
+        " \\paragraph{Threats to validity.} The findings inherit the breadth of the instruments available to the "
+        "agents and the per-hypothesis compute budget; an effect the available tools cannot measure cannot be "
+        "confirmed here. Statistical support is established within each experiment, so a within-experiment effect is "
+        "not the same as a gain over the external baseline, which is reported separately. Automated metric extraction "
+        "and the artifact gate mitigate, but do not eliminate, implementation or measurement artifacts. Independent "
+        "replication remains the appropriate check before any strong external claim."
+    )
     if counts["confirmed"] == 0:
         discussion = (
             "The experiments did not surface evidence strong enough to confirm any hypothesis under the present "
             "protocol. This is an honest negative result: it constrains the space of likely answers rather than "
             "establishing one. Limitations include the breadth of instruments available to the agents and the "
             "compute budget allotted per hypothesis."
+            + threats
         )
         conclusion = (
             "No claim met the evidence bar in this study. Promising but inconclusive directions, summarised in the "
@@ -283,6 +294,7 @@ def _fallback_from_context(
             "The supported findings are reported with their statistical evidence in the results section. They should "
             "be read as automated, reproducible results subject to the breadth of the available instruments and the "
             "per-hypothesis compute budget; independent replication remains valuable before strong claims are made."
+            + threats
         )
         conclusion = (
             "The study yields concrete, statistically supported findings together with refuted and inconclusive "

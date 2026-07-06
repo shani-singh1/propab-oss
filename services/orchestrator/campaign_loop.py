@@ -163,6 +163,66 @@ def confirmed_findings_count(campaign: "ResearchCampaign") -> int:
     return int(getattr(campaign, "total_confirmed", 0) or 0)
 
 
+def _campaign_reasoning_trace(campaign: ResearchCampaign) -> dict[str, Any]:
+    """Trace-derived reasoning context for the paper's Chain-of-Reasoning section.
+
+    Emits ONLY structural facts read straight off the hypothesis tree and belief state
+    (parent->child lineage, per-node verdict/generation, and the belief history). No
+    finding is *claimed* here: verdicts are the tree's own labels and are re-gated against
+    the authoritative DB rows at render time. Controls are excluded from lineage edges.
+    """
+    tree = campaign.hypothesis_tree
+    nodes_out: dict[str, dict[str, Any]] = {}
+    for nid, n in tree.nodes.items():
+        nodes_out[str(nid)] = {
+            "id": str(nid),
+            "text": (n.text or "")[:400],
+            "parent_id": str(n.parent_id) if n.parent_id else None,
+            "depth": int(n.depth or 0),
+            "generation": int(n.generation or 0),
+            "verdict": str(n.verdict or "pending"),
+            "expansion_type": n.expansion_type,
+            "node_role": n.node_role,
+            "primary_theme": n.primary_theme or n.theme_id,
+            "mechanism": (n.mechanism or "")[:300] or None,
+            "confidence": float(n.confidence or 0.0),
+        }
+    # Lineage edges (parent -> child) among discovery nodes only.
+    edges: list[dict[str, str]] = []
+    for nid, meta in nodes_out.items():
+        pid = meta["parent_id"]
+        if pid and pid in nodes_out and meta["node_role"] != NODE_ROLE_CONTROL:
+            edges.append({"parent": pid, "child": nid, "expansion_type": meta["expansion_type"] or "expansion"})
+
+    bs = campaign.belief_state
+    beliefs = {
+        "active": [b.to_dict() for b in bs.active_beliefs],
+        "closed": [c.to_dict() for c in bs.closed_beliefs],
+        "recent_activity": (bs.recent_activity_summary or "")[:600],
+        "branch_exhausted": bool(bs.branch_exhausted),
+    }
+    # Per-generation verdict histogram: how beliefs/outcomes evolved across rounds.
+    gen_hist: dict[int, dict[str, int]] = {}
+    for meta in nodes_out.values():
+        if meta["node_role"] == NODE_ROLE_CONTROL:
+            continue
+        g = int(meta["generation"])
+        row = gen_hist.setdefault(g, {"confirmed": 0, "refuted": 0, "inconclusive": 0, "pending": 0})
+        v = meta["verdict"] if meta["verdict"] in row else "pending"
+        row[v] += 1
+    generations = [
+        {"generation": g, **gen_hist[g]} for g in sorted(gen_hist)
+    ]
+    return {
+        "nodes": nodes_out,
+        "lineage_edges": edges[:400],
+        "beliefs": beliefs,
+        "generations": generations,
+        "max_depth": max((m["depth"] for m in nodes_out.values()), default=0),
+        "max_generation": max((m["generation"] for m in nodes_out.values()), default=0),
+    }
+
+
 def _prior_snippets(prior_dict: dict[str, Any]) -> list[str]:
     snippets: list[str] = []
     for f in prior_dict.get("established_facts") or []:
@@ -359,6 +419,7 @@ def build_campaign_synthesis_payload(campaign: ResearchCampaign) -> dict[str, An
         },
         "counts_source": "tree_preview_db_authoritative_at_paper_time",
         "confirmed_findings": ledger_findings,
+        "reasoning_trace": _campaign_reasoning_trace(campaign),
     }
 
 

@@ -468,12 +468,25 @@ async def compile_session_methods_latex(session_factory: async_sessionmaker, ses
             "excluding the null) in the predicted direction; otherwise it was recorded as refuted or inconclusive."
         )
 
+    verification_protocol = (
+        "\\paragraph{Verification protocol.} Every hypothesis passed through a uniform evidence bar before it could "
+        "be reported as a finding. A hypothesis was admitted as \\emph{confirmed} only if a metric-bearing "
+        "experiment produced significant support in the predicted direction; a claim that lacked a recorded "
+        "metric, that merely restated a control (null) hypothesis, or that duplicated evidence already credited to "
+        "an earlier finding was demoted to \\emph{inconclusive} rather than reported. Hypotheses that were "
+        "generated but never executed are excluded from all counts. Where an experiment produced a candidate effect, "
+        "an artifact gate re-ran the strongest competing artifact to check that the effect was not an implementation "
+        "or measurement artifact, and the finding was retained only if it survived that check. The same "
+        "classification is applied uniformly to the abstract, results, figures, tables, and narrative, so no section "
+        "can report an outcome the evidence bar did not grant."
+    )
+
     reproducibility = (
         "All hypotheses, parameters, intermediate outputs, and statistical computations are persisted in a structured "
         "trace and are available for independent inspection and replication."
     )
 
-    body = "\n\n".join([protocol, instruments, stats_method, reproducibility])
+    body = "\n\n".join([protocol, instruments, stats_method, verification_protocol, reproducibility])
     combined = f"\\section{{Methods}}\n{body}\n"
     return {"combined_latex": combined, "per_hypothesis": {}}
 
@@ -529,42 +542,27 @@ def _finding_sentence(f: dict[str, Any]) -> str:
     return sent + "."
 
 
-def _findings_table(findings: list[dict[str, Any]]) -> str:
-    """A clean summary table of confirmed findings (no trace IDs, no raw JSON)."""
-    if not findings:
-        return ""
-    lines = [
-        "\\begin{table}[ht]",
-        "\\centering",
-        "\\caption{Summary of supported findings and their statistical evidence.}",
-        "\\begin{tabular}{p{0.46\\linewidth} c p{0.30\\linewidth}}",
-        "\\hline",
-        "\\textbf{Finding} & \\textbf{Claim / replication} & \\textbf{Statistical evidence} \\\\",
-        "\\hline",
-    ]
-    for f in findings[:20]:
-        claim = (f.get("key_finding") or f.get("text") or "").strip().rstrip(".")
-        cell = _latex_escape(claim[:180])
-        conf = f.get("confidence")
-        conf_s = f"{float(conf):.2f}" if isinstance(conf, (int, float)) else "--"
-        ctype = f.get("claim_type") or "--"
-        repl = f.get("replication_level") or "--"
-        mid = _latex_escape(f"{ctype}, {repl}, conf={conf_s}")
-        stats = f.get("stats_text") or "--"
-        lines.append(f"{cell} & {mid} & {stats} \\\\")
-    lines.extend(["\\hline", "\\end{tabular}", "\\end{table}"])
-    return "\n".join(lines)
-
-
-async def compile_session_results_latex(session_factory: async_sessionmaker, session_id: str) -> str:
+async def compile_session_results_latex(
+    session_factory: async_sessionmaker,
+    session_id: str,
+    *,
+    baseline: float | None = None,
+    findings: dict[str, Any] | None = None,
+) -> str:
     """
-    Deterministic Results section as readable prose plus a findings table.
+    Deterministic Results section as readable prose plus tables.
 
     Outcomes are organised by what was learned (supported / refuted / inconclusive),
     not as a chronological per-hypothesis verdict log. Counts here are produced by the
-    same classifier (:func:`compile_session_findings`) that feeds the abstract.
+    same classifier (:func:`compile_session_findings`) that feeds the abstract, figures,
+    and narrative. A caller may pass a pre-computed ``findings`` (the identical gated
+    dict) to guarantee every section reads from one gate evaluation.
     """
-    findings = await compile_session_findings(session_factory, session_id)
+    from propab.paper_narrative import findings_table as _rich_findings_table
+    from propab.paper_narrative import summary_counts_table
+
+    if findings is None:
+        findings = await compile_session_findings(session_factory, session_id)
     counts = findings["counts"]
     if counts["tested"] == 0:
         return "\\section{Results}\nNo hypotheses were executed for this session.\n"
@@ -582,11 +580,14 @@ async def compile_session_results_latex(session_factory: async_sessionmaker, ses
             "the analysis."
         )
     parts.append(lead)
+    parts.append(summary_counts_table(counts))
 
     confirmed = findings["confirmed"]
+    rich_table = _rich_findings_table(findings, baseline=baseline)
+    if rich_table:
+        parts.append(rich_table)
     if confirmed:
         parts.append("\\subsection{Supported findings}")
-        parts.append(_findings_table(confirmed))
         for f in confirmed[:10]:
             parts.append(_finding_sentence(f))
     else:
