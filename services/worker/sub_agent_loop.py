@@ -371,6 +371,128 @@ def _first_key(payload: dict[str, Any], keys: tuple[str, ...]) -> float | None:
     return None
 
 
+# ─── Significance-input provenance ────────────────────────────────────────────
+#
+# A significance tool (statistical_significance / bootstrap_confidence /
+# literature_baseline_compare) computes REAL scipy statistics — but on whatever
+# arrays the LLM agent hands it. If those arrays were TYPED by the agent rather
+# than lifted from a prior real tool/sandbox output, the resulting p-value is
+# real-looking but rests on fabricated data. These helpers record, at call time,
+# whether a significance tool's numeric inputs TRACE to a prior computed output
+# in the same run. The signal is surfaced on the evidence object so audits can
+# see when a "confirmed" rests on agent-typed numbers.
+
+# The numeric-array params each significance tool consumes.
+_SIG_INPUT_ARRAY_KEYS: tuple[str, ...] = (
+    "results_a",
+    "results_b",
+    "values",
+    "our_results",
+    "baseline_results",
+)
+
+
+def _collect_numeric_arrays(payload: Any, *, out: list[list[float]] | None = None) -> list[list[float]]:
+    """Recursively collect every homogeneous numeric list (len>=2) inside payload."""
+    if out is None:
+        out = []
+    if isinstance(payload, dict):
+        for v in payload.values():
+            _collect_numeric_arrays(v, out=out)
+    elif isinstance(payload, list):
+        nums = [x for x in payload if isinstance(x, (int, float)) and not isinstance(x, bool)]
+        if len(nums) == len(payload) and len(nums) >= 2:
+            out.append([float(x) for x in nums])
+        else:
+            for v in payload:
+                _collect_numeric_arrays(v, out=out)
+    return out
+
+
+def _array_traces_to_prior(arr: list[float], prior_arrays: list[list[float]]) -> bool:
+    """
+    True when `arr` matches a prior computed array exactly, or is a contiguous /
+    subset slice of one (agents commonly pass val_losses[:20], or a reordering).
+    Matching is by value with a small float tolerance.
+    """
+    if len(arr) < 2:
+        return False
+
+    def _val_close(x: float, y: float) -> bool:
+        return abs(x - y) <= 1e-9 + 1e-6 * abs(y)
+
+    def _seq_close(a: list[float], b: list[float]) -> bool:
+        return len(a) == len(b) and all(_val_close(x, y) for x, y in zip(a, b))
+
+    def _is_multiset_subset(small: list[float], big: list[float]) -> bool:
+        """Every value in `small` is matched by a distinct value in `big` (order-free)."""
+        remaining = list(big)
+        for x in small:
+            for i, y in enumerate(remaining):
+                if _val_close(x, y):
+                    remaining.pop(i)
+                    break
+            else:
+                return False
+        return True
+
+    for prior in prior_arrays:
+        if len(prior) < len(arr):
+            continue
+        if _seq_close(arr, prior):
+            return True
+        # Reordered / sliced subset of a prior computed array (e.g. val_losses[:k]).
+        if _is_multiset_subset(arr, prior):
+            return True
+    return False
+
+
+def _classify_stat_input_provenance(
+    params: dict[str, Any],
+    prior_outputs: list[dict[str, Any]],
+) -> str:
+    """
+    Classify a significance tool's numeric-array inputs against arrays produced by
+    prior real tool/sandbox outputs in the same run.
+
+    Returns:
+      "computed"      — at least one input array traces to a prior real output
+                        AND no input array is unaccounted-for (all trace back).
+      "agent_literal" — at least one numeric-array input exists but NONE of them
+                        trace to any prior real output (agent-typed numbers).
+      "unknown"       — no numeric-array inputs present, or no prior outputs to
+                        compare against (cannot decide either way).
+    """
+    input_arrays: list[list[float]] = []
+    for k in _SIG_INPUT_ARRAY_KEYS:
+        v = params.get(k)
+        if isinstance(v, list):
+            nums = [x for x in v if isinstance(x, (int, float)) and not isinstance(x, bool)]
+            if len(nums) == len(v) and len(nums) >= 2:
+                input_arrays.append([float(x) for x in nums])
+
+    if not input_arrays:
+        return "unknown"
+
+    prior_arrays: list[list[float]] = []
+    for out in prior_outputs:
+        _collect_numeric_arrays(out, out=prior_arrays)
+    if not prior_arrays:
+        # No real computed arrays exist yet → cannot corroborate. This is itself a
+        # red flag, but we do not have positive evidence of fabrication, so report
+        # "agent_literal" only if there is genuinely nothing upstream to trace to.
+        return "agent_literal"
+
+    traced = [_array_traces_to_prior(a, prior_arrays) for a in input_arrays]
+    if all(traced):
+        return "computed"
+    if any(traced):
+        # Mixed: some inputs are real, some are not. Treat as agent_literal so a
+        # partially-fabricated comparison is never labeled fully "computed".
+        return "agent_literal"
+    return "agent_literal"
+
+
 def _build_evidence(
     *,
     successful_outputs: list[dict[str, Any]],
@@ -1606,6 +1728,11 @@ async def run_sub_agent_async(payload: dict) -> dict:
         step_counter = 0
         tool_calls_done = 0
         err_box: list[Any] = [None]
+        # Provenance verdicts for each significance-tool call, in call order. Each
+        # entry is "computed" | "agent_literal" | "unknown" (see
+        # _classify_stat_input_provenance). Recorded from the arrays available
+        # BEFORE the significance tool's own output is appended.
+        sig_input_provenance: list[str] = []
 
         # ── Shared tool execution helper (inline, no external function needed) ─
 
@@ -1660,6 +1787,20 @@ async def run_sub_agent_async(payload: dict) -> dict:
                         call_params.pop("baseline_value", None)
                 except (TypeError, ValueError):
                     pass
+
+            # Record significance-input provenance BEFORE the call, while
+            # successful_tool_outputs holds only PRIOR real outputs (this tool's
+            # own output has not been appended yet).
+            if tool_name in _SIGNIFICANCE_TOOL_NAMES:
+                prov = _classify_stat_input_provenance(call_params, successful_tool_outputs)
+                sig_input_provenance.append(prov)
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.TOOL_CALLED,
+                    step=f"experiment.{hypothesis_id}.step_{step_index}.provenance",
+                    payload={"tool": tool_name, "stat_input_provenance": prov},
+                    hypothesis_id=hypothesis_id,
+                )
 
             await emitter.emit(
                 session_id=session_id,
@@ -2211,6 +2352,32 @@ async def run_sub_agent_async(payload: dict) -> dict:
             n_tool_steps=n_tool_steps,
             baseline_value=baseline_value,
         )
+
+        # ── Significance-input provenance (audit signal) ──────────────────────
+        # Aggregate per-call verdicts into a single evidence-level signal. This
+        # is only meaningful for the think-act / heuristic worker path (where
+        # sig_input_provenance was populated by run_tool_step); the dedicated
+        # domain-verification paths (mandrake/materials/plugin) return earlier
+        # and never reach here.
+        #
+        # Aggregation rule (conservative): if ANY significance call rested on
+        # agent-typed literals, the evidence is flagged agent_literal — one
+        # fabricated comparison taints the verdict. "computed" requires that at
+        # least one significance call ran AND every such call traced to prior
+        # real outputs. "unknown" when we could not decide (no numeric-array
+        # inputs / no significance call).
+        if sig_input_provenance:
+            if any(p == "agent_literal" for p in sig_input_provenance):
+                agg_provenance = "agent_literal"
+            elif any(p == "computed" for p in sig_input_provenance):
+                agg_provenance = "computed"
+            else:
+                agg_provenance = "unknown"
+        else:
+            agg_provenance = "unknown"
+        evidence_obj["stat_input_provenance"] = agg_provenance
+        evidence_obj["stat_input_provenance_calls"] = list(sig_input_provenance)
+        evidence_obj["inputs_from_sandbox"] = agg_provenance == "computed"
 
         bm_cfg = payload.get("baseline_measurement")
         if isinstance(bm_cfg, dict) and evidence_obj.get("metric_value") is None:
