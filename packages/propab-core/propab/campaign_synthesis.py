@@ -43,11 +43,40 @@ def _dedup_key(text: str) -> str:
     return _norm_text(line or text)
 
 
+_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _numeric_signature(text: str) -> frozenset[str]:
+    """The set of numbers a hypothesis mentions — its parameter fingerprint.
+
+    Convergence works by NARROWING: a child tests a stricter region/value than its
+    parent (e.g. n in [34000,36000] then [34500,35500]). Those texts are ~0.96
+    similar (only the numbers differ), so the pure-text duplicate filter rejected
+    the second — deleting exactly the sequence of narrowing tests convergence
+    needs, then starving the frontier (measured: max confirmed-lineage depth ~1,
+    search halts after ~2 waves; see investigation report §6b). Two textually-
+    similar candidates whose number sets DIFFER are distinct experiments, not
+    duplicates. Reject only true rephrasings (same claim AND same numbers)."""
+    return frozenset(_NUM_RE.findall(text or ""))
+
+
 def text_similarity(a: str, b: str) -> float:
     """Normalized text similarity for frontier dedup (fixes.md P2)."""
     full = SequenceMatcher(None, _norm_text(a), _norm_text(b)).ratio()
     core = SequenceMatcher(None, _dedup_key(a), _dedup_key(b)).ratio()
     return max(full, core)
+
+
+def _distinct_parameters(cand_nums: frozenset[str], existing_text: str, similarity: float) -> bool:
+    """True when a textually-similar candidate is actually a DISTINCT experiment
+    (different numeric parameters) — a narrowing step, not a rephrasing — so it
+    must NOT be dropped as a duplicate. Near-identical text (≥0.98) is treated as
+    a true duplicate regardless, so exact rephrasings still can't flood the tree;
+    non-numeric claims (either side has no numbers) fall back to text dedup."""
+    if similarity >= 0.98:
+        return False
+    other_nums = _numeric_signature(existing_text)
+    return bool(cand_nums) and bool(other_nums) and cand_nums != other_nums
 
 
 def _is_duplicate_frontier_candidate(
@@ -59,16 +88,22 @@ def _is_duplicate_frontier_candidate(
     allowed_parent_id: str | None = None,
     threshold: float = FRONTIER_DEDUP_SIMILARITY,
 ) -> tuple[bool, str]:
+    cand_nums = _numeric_signature(text)
     for existing in tree.nodes.values():
         existing_text = existing.text if hasattr(existing, "text") else str(existing.get("text", ""))
         existing_id = existing.id if hasattr(existing, "id") else str(existing.get("id", "?"))
         similarity = text_similarity(text, existing_text)
         if allowed_parent_id and existing_id == allowed_parent_id and similarity < 0.98:
             continue
+        if similarity >= threshold and _distinct_parameters(cand_nums, existing_text, similarity):
+            continue
         if similarity >= threshold:
             return True, f"tree_node:{existing_id}"
     for sibling in same_round_texts:
-        if text_similarity(text, sibling) >= threshold:
+        sim = text_similarity(text, sibling)
+        if sim >= threshold and _distinct_parameters(cand_nums, sibling, sim):
+            continue
+        if sim >= threshold:
             return True, "same_round_sibling"
     for belief in belief_state.closed_beliefs:
         if text_similarity(text, belief.statement) >= threshold:

@@ -9,6 +9,45 @@ from propab.synthesis_diversity import (
 )
 
 
+def test_dedup_allows_scope_narrowing_but_rejects_rephrasing() -> None:
+    """Convergence works by narrowing: a child tests a stricter numeric region
+    than its parent. Those texts are ~0.96 similar (only the numbers differ), so
+    the pure-text dedup used to reject them — deleting the narrowing sequence and
+    starving the frontier (investigation report §6b). Scope/parameter-aware dedup
+    must let a DISTINCT-region candidate through while still rejecting a true
+    rephrasing (same claim AND same numbers)."""
+    from propab.belief_state import CampaignBeliefState
+    from propab.campaign_synthesis import _is_duplicate_frontier_candidate
+    from propab.hypothesis_tree import HypothesisTree
+
+    tree = HypothesisTree()
+    tree.add_seeds(
+        [{"text": "Greedy F(n)/sqrt(n) crosses 0.60 within n in [34000,36000].\n"
+                  "Population: greedy Sidon sequences\nDistribution: n in [34000,36000]\n"
+                  "Claimed generalization: crossing in [34000,36000]\n"
+                  "Expected failure modes: dip\nOOD test: dense grid",
+          "test_methodology": "numeric_sweep"}],
+        generation=0,
+    )
+    state = CampaignBeliefState()
+
+    # Distinct region (a narrowing step) — must NOT be a duplicate.
+    narrowing = ("Greedy F(n)/sqrt(n) crosses 0.60 within n in [34500,35500].\n"
+                 "Population: greedy Sidon sequences\nDistribution: n in [34500,35500]\n"
+                 "Claimed generalization: crossing in [34500,35500]\n"
+                 "Expected failure modes: dip\nOOD test: dense grid")
+    dup, _ = _is_duplicate_frontier_candidate(narrowing, tree, state, same_round_texts=[])
+    assert dup is False
+
+    # Same region, reworded — IS a duplicate (same experiment).
+    rephrase = ("F(n)/sqrt(n) for the greedy sequence drops under 0.60 in n in [34000,36000].\n"
+                "Population: greedy Sidon sequences\nDistribution: n in [34000,36000]\n"
+                "Claimed generalization: crossing in [34000,36000]\n"
+                "Expected failure modes: dip\nOOD test: dense grid")
+    dup2, _ = _is_duplicate_frontier_candidate(rephrase, tree, state, same_round_texts=[])
+    assert dup2 is True
+
+
 def test_methodology_filter_rejects_simulated_annealing() -> None:
     kw = MathCombinatoricsPlugin().implementable_methodologies()
     assert not methodology_implementable(
