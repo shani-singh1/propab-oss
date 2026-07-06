@@ -1,421 +1,226 @@
-# Propab — Codebase Investigation & Failure-Pattern Map
+# Propab — Codebase Investigation & Issue Registry (source of truth)
 
-> **Living document.** Maps the architecture as actually wired, questions the
-> load-bearing assumptions, and ranks the flaws that plausibly explain the
-> months-long "campaigns run but don't do real frontier science" pattern.
-> Method: read `ARCHITECTURE.md` (intended design) then trace the actual code on
-> the campaign spine. Each finding is tagged **[VERIFIED]** (I read the code and
-> confirmed), **[LIKELY]** (strong code evidence, not yet runtime-confirmed), or
-> **[AUDIT-PENDING]** (flagged, not yet deeply read).
+> **Purpose.** The single source of truth for what is broken, dishonest, or
+> research-blocking across Propab, per layer. We do NOT run campaigns until the
+> infrastructure each layer depends on is verified — every past cycle of "run a
+> long campaign, watch it fail, guess a fix" failed because the map didn't exist.
+> This file IS the map. If it misses something, we spiral again.
 >
-> Started 2026-07-06 by Agent 3 after finishing the literature layer.
+> **How to use / maintain.** Every issue has an ID, a severity, and a status.
+> When you (any agent) touch an issue, update its status line — do not delete it.
+> Add new issues with the next ID in that layer. Keep the *reasoning* (design
+> intent vs. actual behaviour) so a future reader can re-derive the call.
+>
+> **Status:** `OPEN` · `FIXING` · `FIXED` · `CLEARED` (investigated, not a bug) ·
+> `WONTFIX`. **Severity:** `CRITICAL` (blocks real research / silent wrong
+> science) · `HIGH` (wrong for a class of domains/campaigns) · `MED` (degrades
+> quality) · `LOW` (hygiene). **Confidence:** `VERIFIED` (read the code, traced
+> it) · `LIKELY` · `SUSPECTED`.
+>
+> **Method.** Read each component; compare its docstring/name (what it was
+> designed to do) to what the code actually does; find where it silently degrades,
+> hardcodes a domain assumption, swallows a failure, or blocks a whole class of
+> domains. Reason line by line. Loop until every file is covered.
 
----
+## Coverage tracker (honest audit depth)
 
-## 0. TL;DR — where the frontier-science failure actually lives
-
-The system is unusually well-architected on paper (four services, a domain-
-plugin seam, write-time evidence binding, a non-null stop-reason discipline,
-eight health metrics). The failure is **not** "no structure exists." It is that
-the **search does not converge**: the hypothesis tree grows in node count and,
-now, in depth, but the parent→child edges and the frontier-selection policy do
-not reliably turn a confirmed/refuted finding into a *narrower* next test.
-
-Ranked, the things most likely to keep Propab from doing real science:
-
-1. **[VERIFIED] Frontier selection deprioritizes deepening confirmed findings.**
-   `_information_gain_score` scores a *confirmed* parent as low-uncertainty (0.45)
-   vs *inconclusive* (0.85), and the depth/lineage reward is ≤0.015 — so the
-   policy spends dispatches on inconclusive **breadth**, not confirmed **depth**.
-   A direct, code-level cause of "generation increases, depth does not." (§3.3)
-2. **[VERIFIED] Semantic lineage is inferred, not derived.** The flat-tree bug
-   (all candidates `parent_id=None`) is now structurally fixed, but the fix
-   assigns a parent by *text similarity + verdict preference*, not by the
-   candidate actually being a refinement of that parent. Depth > 0 is restored;
-   whether each edge means "this narrows that" is not guaranteed. (§3.2)
-3. **[VERIFIED] "Belief binding rejects hundreds" is by design, not a bug** —
-   the belief state is a ≤3-rival posterior *summary*, not the search state.
-   Candidates still enter the tree. Do not "fix" this by widening the cap. (§3.4)
-4. **[AUDIT-PENDING] Worker experiment quality** (`sub_agent_loop.py`, 2418 lines)
-   — the actual experiments that produce evidence. If the evidence is weak/noisy,
-   no amount of tree structure helps. Not yet read. (§4)
-5. **[AUDIT-PENDING] Verdict + artifact gate calibration** — if "confirmed" is
-   too easy or too hard, the tree either chases noise or never gets a parent to
-   refine. Not yet read. (§4)
-
-**Recommended next layer to improve (after literature): the orchestrator
-campaign search loop — specifically convergence** (semantic lineage + frontier
-selection). Rationale in §6.
-
----
-
-## 1. Service topology (as wired)
-
-Four app services + infra (`docker-compose.yml`), matching `ARCHITECTURE.md §2`:
-
-- **api** (`services/api/`) — FastAPI entry; creates/loads campaigns, persists the
-  row, delegates to orchestrator via `POST /internal/campaign` (or in-process
-  BackgroundTask fallback if `ORCHESTRATOR_URL` unset).
-- **orchestrator** (`services/orchestrator/`) — owns the campaign lifecycle.
-  `run_campaign_loop` (campaign_loop.py, **2369 lines** — the biggest single
-  file and the spine). Survives API restarts.
-- **worker** (`services/worker/`) — Celery pool; `run_sub_agent_async`
-  (sub_agent_loop.py, **2418 lines**) runs ONE hypothesis's think-act experiment.
-- **frontend** (`frontend/`) — Vite/React dashboard.
-- infra: postgres (state + append-only events), redis (pub/sub + broker), qdrant
-  (lit vectors), minio (objects), alembic migrate one-shot.
-
-The API↔orchestrator split is a genuine strength: an in-flight campaign is not
-tied to the HTTP process.
-
-## 2. Core package map (`packages/propab-core/propab/`, ~12.5k LoC)
-
-The domain-agnostic engine. Load-bearing modules on the spine:
-
-| Module | LoC | Role on the spine |
+| Area | Files | Depth |
 |---|---|---|
-| `hypothesis_tree.py` | 797 | the tree + frontier; `add_seeds` (flat) vs child expansion (depth+1) |
-| `campaign_synthesis.py` | 744 | Tier-2 refill: resolve parent → add candidates as children/roots |
-| `campaign.py` | 463 | `ResearchCampaign`, belief_state, stop reasons |
-| `belief_state.py` | 275 | ≤3 rival beliefs; evidence binding at write time |
-| `verdict_pipeline.py` | 271 | classify → artifact gate → OOD → scope integrity |
-| `artifact_verification.py` | 753 | null/permutation adversarial tests on "confirmed" |
-| `evidence_binding.py` | 384 | citation relevance at write time |
-| `numerical_seeds.py` | 365 | math compounding: crossings → lifetime context (just committed) |
-| `scoped_claim.py` | 528 | OOD/scope gates + `validate_expansion_child` |
-| `entropy_trajectory.py` | — | convergence signal (AUDIT-PENDING — is it *used* to steer?) |
+| Campaign spine: hypothesis_tree, campaign_synthesis, belief_state, frontier | core | **deep** (convergence layer — fixed) |
+| Verdict: verdict_pipeline, significance | core | **deep** |
+| Worker: sub_agent_loop, think_act | services/worker | partial (1 flaw found) |
+| Evidence binding, artifact_verification, scoped_claim | core | pending |
+| Numerical seeds, synthesis_diversity, belief_promotion | core | partial |
+| Orchestrator loop: campaign_loop.py (2369) | services/orchestrator | partial |
+| Generation: hypotheses, seed_validation, hypothesis_ranking, anomaly_seeds | orch | survey |
+| Domain layer: base, registry, plugins, adapters, profiles | core | spot-check |
+| Lifetime learning: lifetime_knowledge, knowledge_graph, meta_science, policy_* | mixed | pending |
+| Paper: paper_compiler, paper_sections, paper_gate, research_quality | core | pending |
+| API + events + persistence: routes, stream, events, db, campaign_db | services | pending |
+| Tools registry | core/tools | pending |
+| Literature service | services/literature | **owner-known** (done, 0.77) |
 
-Domain seam: `domain_modules/` (plugins + registry), `domain_profiles/` (gate
-config), `domain_adapters/` (experiment runners). Core imports no dataset/feature
-/threshold name directly — verified by spot-checks; this seam looks clean.
-
----
-
-## 3. The campaign spine — deep dive
-
-### 3.1 Intended loop (ARCHITECTURE.md §3)
-`intake → literature prior → baseline → while not should_stop(): {frontier empty
-→ seeds or Tier-2 synthesis; dispatch workers; update tree + beliefs} → finalize
-(non-null stop reason) → lifetime ingest → paper`.
-
-### 3.2 Lineage: the flat-tree bug is structurally fixed — but parenthood is *inferred* [VERIFIED]
-The original failure (all synthesis candidates enter via `add_seeds` with
-`parent_id=None, depth=0`, so the tree never gains depth) is addressed in
-`campaign_synthesis.apply_synthesis_to_frontier`:
-- `_resolve_synthesis_parent(item, raw_text, tree, eligible_parents)` returns a
-  parent for **every** candidate when any completed/eligible parent exists:
-  1. explicit id from the candidate (`_candidate_parent_ids` accepts many key
-     aliases: `parent_id`, `refinement_of`, `discriminates_node_ids`, …),
-  2. else **inferred** — rank eligible parents by (verdict preference for the
-     candidate's `expansion_type`, generation, depth, −child_count) **+ text
-     similarity** and take the top.
-- resolved `parent_id` is written into the entry dict; candidates then split into
-  `root_dicts` (no parent → `add_seeds`, flat) vs `child_dicts` (→ attached with
-  `parent_id=parent.id, depth=parent.depth+1, lineage_length+1`).
-- child scope gets `compute_scope_delta(parent_scope, child_scope)`.
-
-**So depth > 0 is now created.** `tests/test_synthesis_diversity.py` +
-`test_q1_steering.py` exercise the crossing/lineage path (18 tests pass).
-
-**The load-bearing assumption this leaves unproven:** an *inferred* parent (top
-text-similarity among completed nodes) is treated as the node the candidate
-*refines*. Text similarity is not derivation. A candidate can be attached under a
-parent it doesn't actually narrow, producing a tree that has structural depth but
-whose edges don't encode "child reduces the uncertainty left open by parent."
-Convergence (log-style narrowing) needs the latter. **This is the #1 thing to
-verify/fix in the next layer.** Concretely: the synthesis prompt should make the
-LLM name the `parent_id` it is refining and state the specific uncertainty the
-child closes, and the code should prefer explicit-derivation over similarity-
-inference (fall back to inference only when the LLM declines).
-
-### 3.3 Frontier selection *structurally deprioritizes deepening confirmed findings* [VERIFIED]
-`next_dispatch_candidate` / `next_batch` sort the frontier by
-`_information_gain_score` (hypothesis_tree.py:663) = `info_gain × closure`, where
-`info_gain = 0.30·relevance + 0.25·novelty + 0.25·parent_uncertainty +
-0.10·coverage + 0.10·lineage_bonus`. Two components fight convergence:
-
-- **parent_uncertainty inverts the exploit signal.** It is hard-coded by parent
-  verdict: `inconclusive → 0.85`, `refuted → 0.70`, `confirmed → 0.45`. So a
-  child of a **confirmed** node scores *lower* than a child of an inconclusive
-  one. That is defensible for pure information-gain exploration, but it is the
-  **opposite** of convergence: the "confirmed parent → targeted child → narrower
-  region" deepening the user wants is exactly what this de-ranks. The frontier
-  keeps preferring inconclusive *breadth* over confirmed *depth*.
-- **lineage_bonus is too weak to compensate.** `min(0.15, lineage·0.03)` at 10%
-  weight ⇒ at most +0.015 to the final score. Depth is barely rewarded.
-
-**This is a concrete, code-level explanation for "generation increases, depth
-does not."** Even with §3.2's structural lineage fixed, the *selection policy*
-won't spend dispatches deepening a confirmed finding, so confirmed lineages stay
-shallow. Fix direction: add an explicit **exploit/convergence term** — once a
-node is confirmed, its children (which *narrow* its scope) should be *boosted*,
-not penalised; make the confirmed-parent uncertainty contribution a function of
-*residual* open uncertainty (scope not yet closed), not a flat 0.45; and raise
-the effective weight on lineage/scope-narrowing. `entropy_trajectory.py` still
-unverified as a *steering* (vs reporting-only) signal.
-
-### 3.4 Belief state: ≤3 rivals, rejection is expected [VERIFIED]
-`belief_state.apply_synthesis_beliefs` caps active beliefs at
-`MAX_ACTIVE_BELIEFS=3` (2 in rival-exhaustion mode) and rejects candidates on
-falsifiability failure, belief-cap, or ungrounded-citation (after
-`evidence_binding.filter_node_citations`). "Accepts 0, rejects hundreds" is the
-*designed* behaviour of a small posterior summary — **not** the tree bug and
-**not** to be fixed by widening the cap. The tree, not the belief list, is the
-search state. (This directly refutes one of the reported "wrong" bullets.)
-
-### 3.5 Evidence binding at write time [VERIFIED design, AUDIT-PENDING calibration]
-`apply_synthesis_beliefs` filters citations *before* persist (covered by
-`test_synthesis_pass_rejects_fabricated_citation_before_persist`). Good
-discipline. Open question: is `filter_node_citations` so strict that genuinely-
-supporting nodes are dropped (→ beliefs never form → no rival tension to drive
-discriminating experiments)? Needs a rejection-reason histogram from a real run.
+Legend for the loop: pending = not yet read; survey = grepped/skimmed; partial =
+key paths read; deep = traced line by line.
 
 ---
 
-## 4. Worker / executor — evidence integrity [PARTIAL, one concrete flaw found]
+## LAYER 1 — Verdict pipeline (the "confirmed" decision) [deep]
 
-`run_sub_agent_async` (sub_agent_loop.py:1273) resolves the domain plugin and
-routes to a worker verification path (materials/mandrake fast paths, else generic
-`_plugin_verification_path`). Domain routing via the registry is clean. Verdict
-"requires significance evidence" (a stat tool must run).
+Files: `verdict_pipeline.py`, `significance.py`. This decides confirmed / refuted
+/ inconclusive; everything downstream (belief state, convergence, paper) trusts
+it. Composition `classify_verdict_stage → artifact_gate_stage → ood_gate_stage →
+scope_integrity_stage` is clean and pure. But:
 
-**[VERIFIED] The guard against fabricated evidence is a 3-entry denylist.**
-`think_act._is_spec_example_params` (line 350) detects the agent using
-placeholder numbers by **exact-matching three hardcoded spec-example arrays**
-(`statistical_significance`→`[0.9,0.88,0.91]`/`[0.82,0.8,0.79]`,
-`bootstrap_confidence`→`[0.1,0.2,0.15,0.18]`,
-`literature_baseline_compare`→`[0.42,0.44,0.41]`). It catches only a verbatim
-copy of the tool-spec example; **any other invented numbers pass**. Combined
-with the significance gate checking that a stat tool *ran* (not that its inputs
-came from real sandbox computation), there is a path where an LLM feeds
-fabricated inputs to a real stat tool → real-looking p-value → confirmed verdict
-built on invented data. **Evidence integrity is the load-bearing assumption of
-the entire campaign; this guard does not robustly enforce it.** Needs: require
-metric values to originate from a sandbox-executed run (provenance), not
-agent-supplied literals, or a general fabrication check rather than a denylist.
+**V1 · CRITICAL · OPEN · VERIFIED — statistical-only evidence can NEVER be
+confirmed, silently blocking every non-LOFO/non-deterministic domain.**
+`classify_verdict` (significance.py) will return "confirmed" for a good
+statistical result (gate passed + metric direction supports + replicated). But
+`artifact_gate_stage` (verdict_pipeline.py:168) then classifies that evidence as
+`"statistical"` (has p_value+metric, no `lofo_r2`/`label_shuffle_null_p95`) and
+**forces it to "inconclusive"** — "no cross-group holdout available to rule out
+artifact." So the ONLY evidence shapes that can survive to "confirmed" are:
+(a) `deterministic` (symbolic proof / exact check / `verified_true_steps>=2`) or
+(b) `lofo` (a leave-one-family-out holdout with a passing null test). A domain
+whose experiments produce ordinary statistics — a regression coefficient, a
+correlation, an effect size, an A/B delta — with no LOFO grouping gets **nothing
+confirmed, ever**. Consequences cascade: no confirmed nodes ⇒ belief state can't
+form supported beliefs ⇒ the convergence layer (deepens *confirmed* parents) has
+nothing to deepen ⇒ the campaign runs, spends its whole budget on inconclusive
+breadth, and finalizes with zero findings. This is very likely a core reason
+campaigns "run but produce nothing" outside math/mandrake/materials. *Design
+intent:* rule out artifacts before believing a result — legitimate. *Actual
+effect:* only two hand-picked evidence shapes can ever pass, so the gate is a
+domain filter masquerading as a rigor filter. **Fix direction:** a statistical
+result with a real independent null/permutation test (not necessarily LOFO)
+should be confirmable; the gate should demand *an* adversarial control
+appropriate to the evidence type, not specifically LOFO. Needs a
+domain-plugin-provided "confirmation evidence contract."
 
-**[AUDIT-PENDING] "description-only → deterministic no-op stub"** (line ~2084):
-when the agent supplies a code *description* but no source, a no-op stub runs
-in-process (not Docker). What evidence that yields and whether it can reach a
-confident verdict is unverified. Also `_run_inline_trusted_sandbox_code` execs
-"trusted" code in-process (no isolation) — trust boundary worth auditing.
+**V2 · HIGH · OPEN · VERIFIED — the "deterministic" class bypasses the artifact
+gate on a loose, agent-influenceable trigger.** `classify_evidence_type`
+(verdict_pipeline.py:43) tags evidence "deterministic" when
+`verified_true_steps>0 AND verified_false_steps==0 AND (method not in
+{None,'','significance'} OR verified_true_steps>=2)`, and `artifact_gate_stage`
+returns a deterministic verdict **unchanged — no null test at all** (line 158).
+So any evidence carrying `verified_true_steps>=2` confirms with zero adversarial
+control. If the worker can set `verified_true_steps` from tool outputs the agent
+influences (see W1 — the anti-fabrication guard is a 3-item denylist), a
+fabricated "two checks passed" confirms a claim with no artifact gate. *Intent:* a
+real proof needs no statistical null. *Risk:* "deterministic" is inferred from a
+counter the agent can drive, and it is a full gate bypass. **Fix:** require the
+`verification_method` to be an actual proof method (symbolic/exact/counterexample)
+for the bypass — drop the bare `verified_true_steps>=2` path.
 
-## 5b. Layers surveyed at surface depth (AUDIT-PENDING, ranked by leverage)
+**V3 · MED · OPEN · VERIFIED — `min_metric_steps` default 2 is a silent
+replication bar that many single-shot experiments can't meet.** `classify_verdict`
+downgrades an otherwise-confirmable result to "needs replication" when
+`n_metric_steps < 2` (or `verified_true_steps < 2`). A worker that runs one
+decisive experiment (common) yields `n_metric_steps=1` → inconclusive. Whether
+this is right depends on whether the worker is built to produce ≥2 metric steps
+per hypothesis; if not, this silently caps everything at inconclusive. Cross-check
+against worker evidence construction (LAYER 3). *Not necessarily a bug — flag to
+verify the worker actually produces ≥2 steps.*
 
-1. **Verdict pipeline + artifact gate** (`verdict_pipeline.py`,
-   `artifact_verification.py` 753) — is "confirmed" calibrated? Too-easy ⇒ tree
-   chases noise; too-hard ⇒ no parents to expand. Not yet read.
-2. **Seed / hypothesis generation** (`services/orchestrator/hypotheses.py` 627,
-   `generate_ranked_hypotheses`) — duplicate rate, question-relevance gate.
-3. **Lifetime learning** (`lifetime_knowledge.py` 356) — JSON last-writer-wins;
-   does prior knowledge actually improve later campaigns, or just accumulate?
-4. **Paper compiler** (`paper_compiler.py` 644) — does the paper reflect the real
-   trace (already claimed) — spot-check for fabrication.
-
-## 5. Cross-cutting observations
-- **Windows/OneDrive dev reality**: heavy artifacts churn; gitignore now covers
-  ad-hoc scripts + `*.tsbuildinfo`; local artifacts pruned (logs/pollers/tails).
-- **Health metrics are computed but are they *acted on*?** Eight metrics land in
-  Postgres. Convergence failure would be visible as depth/lineage stagnation —
-  is any metric wired to *stop or steer* a stuck campaign, or only logged?
-  (AUDIT-PENDING — this is the "debug by which number is out of range" promise;
-  verify a number actually gates behaviour.)
-
-## 5c. Verdict + generation — surveyed, look rigorous [POSITIVE]
-- **Verdict** (`verdict_pipeline.py` + `significance.py`): confirmation requires a
-  real significance result (p_value/effect_size, `n_metric_steps>=3`) AND passes
-  a chain of gates — a "confirmed" that has no cross-group holdout is downgraded
-  (line ~172), then artifact/OOD/scope-integrity gates. This is *not* an
-  easy-confirm; if anything the risk is over-strict (few confirmed parents to
-  deepen — which compounds §3.3). Calibration on a real run still worth checking.
-- **Generation** (`hypotheses.generate_ranked_hypotheses`): a question-relevance
-  gate (threshold 0.35) rejects `ml_template`/off-topic/below-threshold seeds
-  before they enter the tree. Reasonable.
-
-## 5d. Coverage table (honest audit depth)
-
-| Layer | Depth | Verdict |
-|---|---|---|
-| Campaign spine: tree / synthesis / belief / frontier | **deep** | 2 verified convergence flaws (§3.2, §3.3); belief-cap is by-design |
-| Worker / executor | partial | 1 verified evidence-integrity flaw (denylist guard, §4) |
-| Verdict pipeline + gates | survey | looks rigorous, maybe over-strict |
-| Hypothesis generation | survey | relevance gate present, reasonable |
-| Domain plugin seam | spot-check | clean (core imports no domain constants) |
-| Lifetime learning | not read | JSON last-writer-wins (per ARCHITECTURE.md §10) |
-| Paper compiler | not read | claims to reflect real trace; unverified |
-| API / events / persistence | not read | per ARCHITECTURE.md §12; unverified |
-
-The spine — the layer to be improved — is audited deeply; the rest is mapped to
-"architecture + concrete flaws found," which is sufficient to fix convergence
-safely without regressing neighbours. Remaining deep audits are queued.
-
-## 6. Recommendation — the next layer to improve
-
-**Orchestrator campaign search loop → make the tree converge, not just grow.**
-
-Why this over the worker: the reported months-long symptom is precisely
-"generation increases, depth does not; more roots, not narrower tests." The
-structural half is fixed; the *semantic* half (§3.2/§3.3) is the missing piece,
-and it sits in code I own the context for now (synthesis + tree). It is also
-measurable: a good fix shows up as rising mean depth-of-confirmed-lineage and a
-falling open-uncertainty metric across generations, on a real campaign.
-
-Concrete plan for that layer (to be validated before/while implementing):
-1. Make synthesis **derive** parenthood: prompt requires each candidate to name
-   the `parent_id` it refines + the specific open uncertainty it closes; code
-   prefers explicit derivation, uses similarity-inference only as fallback, and
-   *logs* the explicit-vs-inferred ratio as a health metric.
-2. Make frontier selection **exploit**: bias `next_dispatch_candidate` toward the
-   child that most narrows a confirmed parent's residual uncertainty.
-3. Add a **convergence metric** (mean confirmed-lineage depth; open-uncertainty
-   trend) and surface it so a stuck campaign is visible and steerable.
-4. Validate on a real math_combinatorics campaign (the numerical-crossing path
-   just committed is the cleanest place to measure depth growth).
-
-## 6b. Convergence issue HUNT (deep, "no campaign until quantified & fixed")
-
-Mandate reset: no live campaigns; each layer must be **substantially improved AND
-quantified** before moving on, and this layer must never be the culprit for a
-failed campaign. Hunting every convergence-killer, not just the frontier score.
-
-**[VERIFIED — MAJOR] The duplicate filter rejects the narrowing move itself.**
-`_is_duplicate_frontier_candidate` rejects any candidate ≥`FRONTIER_DEDUP_SIMILARITY`
-(0.85) text-similar to any existing node (exempting only the *direct* parent).
-`text_similarity = max(full_text, dedup_key)` and `_dedup_key` = the first-line
-claim title. A scope-narrowing child differs from its parent/siblings ONLY in the
-specific region/value, so it is ~0.85–0.96 similar. **Measured** (realistic Q1
-threshold-sweep texts): parent~child 0.847, **child~sibling 0.963 → REJECTED**.
-So the search can add ONE narrowing child but not a *sequence* of them refining a
-region — it structurally cannot do progressive (log-style) narrowing of a
-confirmed finding. This is a prime, quantified root cause of "campaigns run but
-never converge," independent of the frontier-score fix (§3.3): even with the
-frontier *preferring* to deepen, dedup deletes the deeper candidates. **Fix
-direction:** make dedup scope/parameter-aware — two textually-similar candidates
-whose numeric/scope discriminators DIFFER are distinct experiments, not
-duplicates; only reject true rephrasings (same claim AND same discriminators).
-
-**[OK] Branch exhaustion is reasonably guarded.** `record_synthesis_exhaustion`
-sets exhausted only when `check_exhaustion()` (all active beliefs unclear / none)
-AND the LLM's self-reported `direction_exhausted` are BOTH true, for
-`EXHAUSTION_ROUNDS_REQUIRED`=3 consecutive rounds. Not a silent no-candidates
-trap. (But it compounds the dedup bug: if dedup keeps deleting narrowing
-candidates, rounds add nothing and beliefs can drift to "unclear," nudging toward
-exhaustion — so the dedup fix also protects exhaustion.)
-
-## 6c. The convergence NUMBER (offline benchmark on real code)
-
-`scripts/bench_campaign_convergence.py` drives the **real** convergence code
-(`apply_synthesis_to_frontier` → real dedup + parent resolution + frontier
-insertion; real `next_batch`/`_information_gain_score`; real `update_node`) with
-a mock LLM (schema-valid narrowing candidates) + mock verdict. 10 seeds. This is
-the layer's leading number — no live campaigns needed.
-
-| metric | before hunt | after fixes | meaning |
-|---|---|---|---|
-| narrowing-dedup reject rate | 0.323 | **0.022** | fraction of narrowing moves the dedup deleted |
-| max confirmed-lineage depth | 1.1 | **1.9** | how deep a real finding gets narrowed |
-| confirmed nodes | 1.3 | **3.9** | search no longer halts after ~2 waves |
-| silent candidate drops | present | **0** | every proposed candidate is accounted for |
-
-**Issues found & fixed this hunt:** frontier deprioritized deepening (§3.3, fixed
-+ metric); scope-blind dedup deleted the narrowing sequence and starved the
-frontier (§6b, THE dominant killer — fixed, scope/parameter-aware); silent
-candidate drops (validate_scoped_claim / relevance `continue`s incremented no
-metric — fixed, now `n_rejected_invalid_scope`/`n_rejected_low_relevance`).
-
-### 6d–6f. Further killers found & fixed (all quantified on the real-code bench)
-
-- **§6d Relevance gate dropped narrowing children.** Lexical question-relevance
-  falls as a child narrows (full region 0.43 passes 0.35; any sub-region 0.33
-  fails) → at the prod threshold the search couldn't narrow past level 1. Fixed:
-  a synthesis CHILD (already on-topic + scope-validated) bypasses the lexical
-  relevance THRESHOLD and inherits its parent's relevance for ranking; roots
-  still face the gate. (The benchmark was also using threshold 0.0, hiding this —
-  now uses the prod 0.35.)
-- **§6e Anti-monoculture type-diversity force rejected narrowing.** Deepening one
-  confirmed finding is inherently single-type, so `forced_type` rejected 8/8
-  narrowing children once a finding was pursued → depth stalled at ~4 even with
-  every experiment confirming. Fixed: a deepening refinement of a CONFIRMED
-  parent bypasses the type-diversity force.
-- **§6f O(n²) dedup made long campaigns crawl.** Each candidate was SequenceMatch-
-  ed against every node (131-node round = 16.5s, quadratic). Fixed with a
-  difflib `real_quick_ratio` (O(1) exact upper bound) pre-filter → 16.5s → 6.3s.
-- **Non-numeric narrowing** (biology sub-populations): dedup now judges
-  distinctness on the parameter fingerprint — different numbers OR a ≥2-token
-  scope-line difference — independent of text similarity, so a same-title-
-  different-scope refinement survives.
-
-**Cleared (verified not a convergence bug):** branch exhaustion (guarded by
-beliefs-unclear AND LLM `direction_exhausted`, ×3 rounds); belief ≤3 cap
-(by-design summary, not the search state); `expansion_passes_merit_gate` (dead —
-no caller in the synthesis path); `entropy_trajectory` (report-only; steering is
-the frontier score); depth cap (depth<8, reachable — capability verified to 7).
-
-### 6g. FINAL convergence number (real-code benchmark, within a 90-node budget)
-
-| metric | start of hunt | DONE |
-|---|---|---|
-| max confirmed-lineage depth | 1.1 | **3.2** (capability to 7 = depth<8 cap) |
-| confirmed nodes | 1.3 | **17.3** |
-| narrowing-dedup reject rate | 0.323 | **0.001** |
-| silent candidate drops | present | **0** |
-| 131-node synthesis round | 16.5s | **6.3s** |
-
-Every identified convergence-killer is fixed and covered by a test; the layer now
-turns a confirmed finding into progressively narrower confirmed findings (numeric
-and non-numeric), and it is instrumented so a future stall is visible, not silent.
-Residual (non-blocking): dead `expansion_passes_merit_gate` could be removed;
-`entropy_trajectory` could be wired to *steer* (not just report) as a future
-enhancement.
-
-## 7. Convergence fix — iteration log (branch `campaign-convergence`)
-
-**Iter 1 [DONE] — frontier now deepens confirmed findings (§3.3).**
-`_information_gain_score` rebalanced: a scope-narrowing child of a *confirmed*
-parent gets uncertainty 0.80 (was 0.45) + an `exploit_bonus` (≤0.30, scales with
-confirmed-ancestry depth); inconclusive parent lowered 0.85→0.75; lateral
-(non-narrowing) children of confirmed nodes stay 0.45. Added
-`confirmed_lineage_depth()` metric + `_confirmed_ancestry_depth()` helper.
-Behavioral change locked by `test_convergence_prefers_deepening_confirmed_over_
-inconclusive_breadth` (deepening a confirmed finding now outranks inconclusive
-breadth). 52 tree/campaign tests pass.
-
-**Measured (simulation, `scripts/sim_campaign_convergence.py`): +39%.** Mean
-confirmed-lineage depth over 8 seeds × 120 generations rose **2.83 → 3.93** under
-the new policy vs the old one on identical stochastic dynamics — the search now
-turns confirmed findings into narrower confirmed findings substantially more,
-instead of adding shallow roots. This is the convergence analog of the literature
-n=100 eval: same "measure, don't guess" discipline.
-
-**Iter 2 [DONE] — lineage-derivation quality is now measured (§3.2).** Correction
-from first-pass audit: `prompts/synthesis_task.md` *already* requires each
-candidate to set `parent_id` to a listed target and to "reduce uncertainty
-relative to its parent" (boundary/mechanism/generalization for confirmed
-parents), and `_resolve_synthesis_parent` already prefers explicit over inferred.
-So derivation is *requested*; what was missing was knowing whether the LLM
-*complies*. `apply_synthesis_to_frontier` now emits `lineage_derivation_rate`
-(+ `n_lineage_explicit`/`n_lineage_inferred`) — of candidates that became
-children, the fraction that named an explicit parent vs. fell back to
-similarity-inference. A low rate on a real campaign = structural depth with
-arbitrary edges → then (and only then) strengthen the prompt/parsing. The
-`_parent_mode` was previously computed and discarded; now surfaced.
-
-**Iter 3 [DONE] — `confirmed_lineage_depth` wired into per-round metrics.**
-Emitted on the `campaign.synthesis` progress event alongside the lineage metrics,
-so a non-converging campaign (flat confirmed-lineage depth) is now *visible* —
-closing the "debug by which number is out of range" loop for convergence.
-Both metric methods read node fields defensively so they can never raise into a
-campaign (ARCHITECTURE §11).
-
-**Validation plan (the analog of the literature n=100 eval).** A full live
-campaign needs the whole stack (postgres/redis/celery/workers), so convergence is
-measured two ways: (a) unit tests on the frontier ranking (done for iter 1);
-(b) a lightweight **search simulation** — seed a tree, loop generations picking
-`next_dispatch_candidate`, mock verdicts + narrowing/breadth children, and track
-`confirmed_lineage_depth` over generations under old-vs-new scoring. "Substantially
-improved" = mean confirmed-lineage depth rises materially across generations where
-before it stayed flat. To build next.
+**V4 · LOW · CLEARED — OOD/scope stages are correctly no-ops when unpopulated.**
+`ood_gate_stage`/`scope_integrity_stage` only act when scope/methodology or
+`scope_gate_result` is present, else pass through. Reasonable; not a bug, but note
+that a confirmed verdict with no scope info skips the OOD downgrade (upstream
+should always supply scope — verify in the worker/generation layer).
 
 ---
-*Prior note (resolved): line-by-line read of `next_dispatch_candidate` and
-`_information_gain_score` is done — it drove the iter-1 fix above.*
+
+## LAYER 2 — Campaign spine / convergence (search structure) [deep — FIXED]
+
+Files: `hypothesis_tree.py`, `campaign_synthesis.py`, `belief_state.py`. This was
+the first layer taken to "done" (branch `campaign-convergence`). Full history in
+the git log; the issues and their fixes:
+
+**C1 · CRITICAL · FIXED — frontier deprioritized deepening confirmed findings.**
+`_information_gain_score` scored a confirmed parent as low-uncertainty (0.45) vs
+inconclusive (0.85); depth reward ≤0.015. Fixed: exploit bias for scope-narrowing
+children of confirmed parents + `confirmed_lineage_depth()` metric.
+
+**C2 · CRITICAL · FIXED — dedup deleted the narrowing move.** `text_similarity`
+(first-line-title dominated) rejected two narrowing steps (different regions) as
+duplicates (0.96 similar), starving the frontier → campaign halted at depth 1.
+Fixed: parameter-aware dedup (numeric signature + scope-line signature); rephrasings
+still deduped.
+
+**C3 · CRITICAL · FIXED — relevance gate dropped narrowing children.** Lexical
+question-relevance falls as a child narrows (0.43→0.33), so the 0.35 gate rejected
+every refinement. Fixed: synthesis children (already on-topic + scope-validated)
+bypass the lexical threshold, inherit parent relevance for ranking.
+
+**C4 · CRITICAL · FIXED — anti-monoculture diversity force rejected deepening.**
+`forced_type` rejected 8/8 narrowing children (deepening one finding is single-
+type). Fixed: deepening refinements of a confirmed parent bypass the type-diversity
+force.
+
+**C5 · HIGH · FIXED — silent candidate drops.** `validate_scoped_claim` /
+relevance `continue`s incremented no metric; candidates vanished uncounted. Fixed:
+`n_rejected_invalid_scope` / `n_rejected_low_relevance` counted + emitted.
+
+**C6 · MED · FIXED — O(n²) dedup crawled long campaigns** (131-node round 16.5s).
+Fixed: `real_quick_ratio` pre-filter → 6.3s.
+
+**C7 · LOW · OPEN · VERIFIED — `expansion_passes_merit_gate` is dead code.** No
+caller in the synthesis/frontier path; a would-be quality gate that never runs.
+Remove or wire it. Not currently harmful (it just doesn't exist in the live path).
+
+**C8 · LOW · CLEARED — belief ≤3 cap and branch-exhaustion are by-design**, not
+the tree bug; do not "fix" by widening. `entropy_trajectory` is report-only (fed
+to snapshots, does not steer) — an enhancement opportunity, not a bug.
+
+Convergence benchmark (real code): max confirmed-lineage depth 1.1→3.2 (capability
+to 7), confirmed nodes 1.3→17.3, narrowing-dedup reject 0.32→0.001.
+**Caveat: C-layer convergence is moot for any domain hit by V1** (nothing confirms
+⇒ nothing to deepen). V1 is upstream of everything here.
+
+---
+
+## LAYER 3 — Worker / executor (evidence generation) [partial]
+
+Files: `sub_agent_loop.py` (2418), `think_act.py` (585), `sandbox_code_rewrite.py`.
+Produces the raw evidence every verdict trusts. Highest-leverage remaining layer.
+
+**W1 · HIGH · OPEN · VERIFIED — the anti-fabrication guard is a 3-item denylist.**
+`think_act._is_spec_example_params` (line 350) detects an agent using placeholder
+numbers only by exact-matching three hardcoded tool-spec example arrays
+(`[0.9,0.88,0.91]`, `[0.1,0.2,0.15,0.18]`, `[0.42,0.44,0.41]`). Any *other*
+invented numbers pass. The significance gate checks that a stat tool *ran*, not
+that its inputs came from a real sandbox execution. So an LLM can feed fabricated
+inputs to a real stat tool → real-looking p-value → confirmed. Evidence integrity
+is the load-bearing assumption of the whole system; this doesn't enforce it.
+**Fix:** require metric values to carry provenance from a sandbox-executed run;
+generalize the fabrication check.
+
+**W2 · SUSPECTED · OPEN — description-only → deterministic no-op stub** runs
+in-process (not Docker) when the agent supplies a code description but no source
+(sub_agent_loop.py ~2084); `_run_inline_trusted_sandbox_code` execs "trusted"
+code in-process with no isolation. Need to trace what evidence a no-op stub yields
+and whether it can reach a confident verdict, and the trust boundary. PENDING deep
+read.
+
+**W3 · PENDING — does the worker produce ≥2 metric steps per hypothesis?** If not,
+V3's `min_metric_steps=2` bar silently makes single-shot experiments inconclusive.
+Cross-layer with V3. Trace `_build_evidence` / the tool loop's step accounting.
+
+---
+
+## LAYERS PENDING DEEP AUDIT (loop continues — do not treat absence as clean)
+
+Each gets the same four-lens read (bugs / arch flaws / dishonest components /
+domain-generality blockers). Nothing below is cleared yet.
+
+- **L4 Evidence binding + artifact_verification + scoped_claim** — does
+  write-time citation filtering reject genuine support (beliefs never form)? Is
+  the artifact gate's null test real or a rubber stamp? Does LOFO assume grouped
+  data that generic domains lack (ties to V1)?
+- **L5 Orchestrator `campaign_loop.py` (2369 lines)** — frontier refill, stop
+  reasons, preflight, health logging, the `lifetime_context_ref` crossings path
+  (recently committed). Where does it swallow errors or finalize with a stop
+  reason that hides a real failure?
+- **L6 Generation** (`hypotheses.py`, `seed_validation.py`, `anomaly_seeds.py`,
+  `hypothesis_ranking.py`) — duplicate rate, question-relevance gate calibration,
+  scope enrichment honesty.
+- **L7 Domain layer** (`domain_modules/*`, `domain_adapters/*`, `domain_profiles/*`)
+  — do the "generic" defaults actually run science, or return safe empties that
+  make an unsupported domain look supported? (dishonesty hot-spot.)
+- **L8 Lifetime learning** (`lifetime_knowledge.py`, `knowledge_graph.py`,
+  `meta_science.py`, `policy_*`) — JSON last-writer-wins; does prior knowledge
+  improve later campaigns or just accumulate? Is any of it read back and used?
+- **L9 Paper** (`paper_compiler.py`, `paper_sections.py`, `paper_gate.py`,
+  `research_quality.py`) — does the paper reflect the real trace, or can it
+  present inconclusive/absent findings as results?
+- **L10 API + events + persistence** (`routes/*`, `stream.py`, `events.py`,
+  `db.py`, `campaign_db.py`) — SSE/event integrity, resume correctness.
+- **L11 Tools registry** (`tools/*`) — are the STEM tools real computations or
+  spec stubs? (ties to W1.)
+- **L12 config.py / llm.py** — ret/timeout defaults, provider fallbacks that
+  silently degrade.
+
+---
+
+*Audit loop status: LAYERS 1–2 deep; 3 partial; 4–12 pending. Continue reading
+files, add issues with IDs, keep this the source of truth.*
