@@ -87,7 +87,7 @@ Files: `verdict_pipeline.py`, `significance.py`. This decides confirmed / refute
 it. Composition `classify_verdict_stage → artifact_gate_stage → ood_gate_stage →
 scope_integrity_stage` is clean and pure. But:
 
-**V1 · CRITICAL · FIXING (agent: fix/confirmation-layer) · VERIFIED — statistical-only evidence can NEVER be
+**V1 · CRITICAL · FIXED (fix/confirmation-layer, merged+verified) · VERIFIED — statistical-only evidence can NEVER be
 confirmed, silently blocking every non-LOFO/non-deterministic domain.**
 `classify_verdict` (significance.py) will return "confirmed" for a good
 statistical result (gate passed + metric direction supports + replicated). But
@@ -112,7 +112,7 @@ should be confirmable; the gate should demand *an* adversarial control
 appropriate to the evidence type, not specifically LOFO. Needs a
 domain-plugin-provided "confirmation evidence contract."
 
-**V2 · HIGH · FIXING (agent: fix/confirmation-layer) · VERIFIED — the "deterministic" class bypasses the artifact
+**V2 · HIGH · FIXED (fix/confirmation-layer, merged+verified) · VERIFIED — the "deterministic" class bypasses the artifact
 gate on a loose, agent-influenceable trigger.** `classify_evidence_type`
 (verdict_pipeline.py:43) tags evidence "deterministic" when
 `verified_true_steps>0 AND verified_false_steps==0 AND (method not in
@@ -229,7 +229,7 @@ Files: `artifact_verification.py` (753), `evidence_binding.py` (384),
 `scoped_claim.py`. This is what makes "confirmed" mean "survived an adversarial
 control." Reading the survival tests:
 
-**A1 · CRITICAL · FIXING (agent: fix/confirmation-layer) · VERIFIED — the artifact gate does not run the null test;
+**A1 · CRITICAL · FIXED (fix/confirmation-layer, merged+verified — rubber-stamps removed, fail-closed; input-provenance remains under W1) · VERIFIED — the artifact gate does not run the null test;
 it reads the worker's self-reported null statistics, and its fallbacks
 rubber-stamp.** `_survives_label_shuffle_lofo` / `_survives_permutation`
 (artifact_verification.py:286, 330) consume `lofo_r2`, `label_shuffle_null_p95`,
@@ -276,7 +276,7 @@ Files: `domain_modules/base.py`, `registry.py`, plugins, `domain_adapters/*`,
 `domain_profiles/*`. Core imports no domain constant — architecturally clean — but
 the *defaults* decide what happens for an unsupported domain:
 
-**D1 · CRITICAL · FIXING (agent: fix/domain-preflight) · VERIFIED — `preflight()` defaults to `passed=True`.**
+**D1 · CRITICAL · FIXED (fix/domain-preflight, merged+verified) · VERIFIED — `preflight()` defaults to `passed=True`.**
 (base.py:170) The "fail-fast power check" that is supposed to refuse an
 underpowered domain in seconds **fails open**: any domain that doesn't override
 preflight launches a full campaign. So the gate protects only the domains that
@@ -291,7 +291,7 @@ a verification path (or a LOFO adapter) produces no confirmable evidence — its
 experiments error to `inconclusive`. There is no generic "run experiment → get
 statistics → confirm with a permutation null" path. See CENTRAL THESIS.
 
-**D3 · MED · FIXING (agent: fix/domain-preflight) — `artifact_models`, `extract_numerical_seeds`,
+**D3 · MED · FIXED (fix/domain-preflight, merged+verified — has_scope_template/has_artifact_models added) — `artifact_models`, `extract_numerical_seeds`,
 `scope_template` default to empty/None.** Individually safe, but together they mean
 a generic domain gets: no artifact vocabulary (gate has nothing domain-specific),
 no numerical-seed compounding, no scope templates → the scope/OOD gates degrade to
@@ -303,7 +303,7 @@ Files: `hypotheses.py` (627), `seed_validation.py`, `hypothesis_ranking.py`,
 `anomaly_seeds.py`. The seeds are the campaign's initial frontier — bad seeds ⇒
 bad campaign.
 
-**G1 · HIGH · FIXING (agent: fix/generation-layer) · VERIFIED — the "domain fallback" seed generator is a
+**G1 · HIGH · FIXED (fix/generation-layer, merged+verified) · VERIFIED — the "domain fallback" seed generator is a
 hardcoded keyword→canned-hypotheses lookup for ~5 demo topics.**
 `_domain_fallback_options` (hypotheses.py:32) matches the question against literal
 keyword lists (`egyptian`/`unit fraction`, `collatz`, `prime gap`,
@@ -317,7 +317,7 @@ campaign starts from weak/empty seeds. **Fix:** generation must not depend on a
 hardcoded topic table; the LLM path + literature prior should carry unknown
 domains, and the fallback should be domain-shape-driven, not keyword-driven.
 
-**G2 · PENDING — question-relevance gate + scope-fallback honesty.** `used_fallback`
+**G2 · FIXED (fix/generation-layer, merged+verified — fallbacks flagged is_fallback/scope_valid=0, non-fallback boilerplate rejected) — question-relevance gate + scope-fallback honesty.** `used_fallback`
 / `scope_fallback` paths substitute template text when the LLM output fails scope
 validation; verify these don't quietly inject boilerplate that then passes as a
 real hypothesis (the `is_boilerplate_scope` check at line 548 suggests this failure
@@ -332,13 +332,13 @@ physics, econ) the metric isn't "accuracy"; only the generic `metric_value` JSON
 path works, and if the worker doesn't emit that exact key, breakthrough detection
 misses — another ML/demo-domain assumption baked in.
 
-**O2 · MED · FIXING (agent: fix/loop-honesty) · SUSPECTED — several `except Exception: pass` swallow errors
+**O2 · MED · FIXED (fix/loop-honesty, merged+verified) · VERIFIED — several `except Exception: pass` swallow errors
 in the loop** (lines ~373, 507, 515, 733, 1369, 1404, 1469-74). Salvage/preflight
 ones are intentionally best-effort (fine), but the others need a read to confirm
 none hide a real failure (e.g. a synthesis or dispatch error swallowed so the
 round looks empty rather than errored). PENDING targeted read.
 
-**O3 · MED · FIXING (agent: fix/loop-honesty) · SUSPECTED — "success" stop reasons mask zero-finding
+**O3 · MED · FIXED (fix/loop-honesty, merged+verified — finalized_without_findings signal) · VERIFIED — "success" stop reasons mask zero-finding
 campaigns.** A campaign that confirms nothing still finalizes with a normal
 `HYPOTHESIS_CAP_REACHED` / `TIME_BUDGET_EXHAUSTED` and writes a paper — presenting
 as a completed run. This is the "every layer reports success" half of the CENTRAL
