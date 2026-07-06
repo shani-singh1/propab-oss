@@ -282,8 +282,14 @@ confirmed-ancestry depth); inconclusive parent lowered 0.85→0.75; lateral
 `confirmed_lineage_depth()` metric + `_confirmed_ancestry_depth()` helper.
 Behavioral change locked by `test_convergence_prefers_deepening_confirmed_over_
 inconclusive_breadth` (deepening a confirmed finding now outranks inconclusive
-breadth). 52 tree/campaign tests pass. *Mechanism proven at unit level; the
-downstream convergence gain still to be quantified (see validation plan).*
+breadth). 52 tree/campaign tests pass.
+
+**Measured (simulation, `scripts/sim_campaign_convergence.py`): +39%.** Mean
+confirmed-lineage depth over 8 seeds × 120 generations rose **2.83 → 3.93** under
+the new policy vs the old one on identical stochastic dynamics — the search now
+turns confirmed findings into narrower confirmed findings substantially more,
+instead of adding shallow roots. This is the convergence analog of the literature
+n=100 eval: same "measure, don't guess" discipline.
 
 **Iter 2 [NEXT] — synthesis should DERIVE, not infer, lineage (§3.2).** Make the
 synthesis prompt require each candidate to name the `parent_id` it refines + the
