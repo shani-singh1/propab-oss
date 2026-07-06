@@ -73,14 +73,17 @@ def update_policy_from_graph(
 ) -> SearchPolicy:
     """Derive policy deltas from accumulated knowledge + latest campaign metrics."""
     policy.generation += 1
+    counts = graph.theme_counts()
     rates = graph.theme_success_rates()
 
     policy.theme_boost.clear()
     policy.theme_penalty.clear()
     for theme, rate in rates.items():
+        c = counts.get(theme, {"confirmed": 0, "failed": 0})
+        n = c["confirmed"] + c["failed"]
         if rate >= 0.4:
             policy.theme_boost[theme] = round(min(0.35, rate * 0.5), 3)
-        elif rate < 0.15 and sum(1 for c in graph.claims.values() if c.theme == theme) >= 5:
+        elif rate < 0.15 and n >= 5:
             policy.theme_penalty[theme] = 0.25
             if theme not in policy.saturated_themes:
                 policy.saturated_themes.append(theme)
