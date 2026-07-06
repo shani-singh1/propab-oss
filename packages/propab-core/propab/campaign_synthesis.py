@@ -461,6 +461,7 @@ def apply_synthesis_to_frontier(
         scope = parse_scope_from_methodology(entry["text"], entry["test_methodology"])
         ok, _ = validate_scoped_claim(scope)
         if not ok:
+            metrics["n_rejected_invalid_scope"] = int(metrics.get("n_rejected_invalid_scope") or 0) + 1
             continue
         same_round_texts.append(raw_text)
         entry_dict: dict[str, Any] = {
@@ -518,6 +519,7 @@ def apply_synthesis_to_frontier(
             scope = parse_scope_from_methodology(entry["text"], entry["test_methodology"])
             ok, _ = validate_scoped_claim(scope)
             if not ok:
+                metrics["n_rejected_invalid_scope"] = int(metrics.get("n_rejected_invalid_scope") or 0) + 1
                 continue
             same_round_texts.append(raw_text)
             entry_dict = {
@@ -585,6 +587,11 @@ def apply_synthesis_to_frontier(
             node.lineage_length = tree.lineage_length(node.parent_id) + 1
         if (node.question_relevance_score or 0) >= relevance_threshold:
             filtered.append(node)
+        else:
+            # Count it — a candidate that passed dedup/scope but is dropped here
+            # for low question-relevance must not vanish silently (no silent
+            # failures: every proposed candidate's fate is accounted for).
+            metrics["n_rejected_low_relevance"] = int(metrics.get("n_rejected_low_relevance") or 0) + 1
 
     if filtered:
         tree.add_to_frontier(filtered)
@@ -755,6 +762,8 @@ async def run_campaign_synthesis_pass(
                 "n_candidates_raw": metrics.get("n_candidates_raw", 0),
                 "n_added_as_children": metrics.get("n_added_as_children", 0),
                 "n_added_as_roots": metrics.get("n_added_as_roots", 0),
+                "n_rejected_invalid_scope": metrics.get("n_rejected_invalid_scope", 0),
+                "n_rejected_low_relevance": metrics.get("n_rejected_low_relevance", 0),
                 "n_lineage_explicit": metrics.get("n_lineage_explicit", 0),
                 "n_lineage_inferred": metrics.get("n_lineage_inferred", 0),
                 "lineage_derivation_rate": metrics.get("lineage_derivation_rate"),
