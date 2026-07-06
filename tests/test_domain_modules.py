@@ -83,7 +83,12 @@ def test_default_plugin_behaviour():
     with pytest.raises(NotImplementedError):
         d.run_verification({"text": "h"})
     assert d.artifact_models(hypothesis={"text": "h"}) == []
-    assert d.preflight().passed is True
+    # D1 fix: a plugin with no verification capability (no run_verification
+    # override, no domain profile) now FAILS the default preflight fail-closed.
+    # The old assertion (`passed is True`) encoded the fail-open defect being fixed.
+    pf = d.preflight()
+    assert pf.passed is False
+    assert "no verification capability" in pf.reason
     assert d.literature_prior("q") == {}
     # Default classify_verdict is neutral (domains override with their own classifier).
     verdict, rationale, conf = d.classify_verdict("h", {"mean_r2": 0.0})
@@ -112,3 +117,151 @@ def test_register_plugin_override():
 def test_preflight_result_to_dict():
     r = PreflightResult(False, "nope", {"n": 1})
     assert r.to_dict() == {"passed": False, "reason": "nope", "details": {"n": 1}}
+
+
+# ── D1: default preflight is fail-CLOSED without a verification capability ────
+
+def test_default_preflight_fails_closed_without_verification():
+    """A bare plugin (no run_verification override, no profile) fails preflight."""
+
+    class _NoVerify(DomainPlugin):
+        domain_id = "no_verify_domain"
+
+        def available_features(self):
+            return []
+
+    p = _NoVerify()
+    assert p.has_verification_capability() is False
+    result = p.preflight()
+    assert result.passed is False
+    assert "no verification capability" in result.reason
+    assert result.details["has_verification_capability"] is False
+
+
+def test_default_preflight_passes_when_run_verification_overridden():
+    """Overriding run_verification is a runnable verification path → preflight passes."""
+
+    class _WithVerify(DomainPlugin):
+        domain_id = "with_verify_domain"
+
+        def available_features(self):
+            return ["x"]
+
+        def run_verification(self, hypothesis, evidence=None, features=None):
+            return {"verification_method": "dummy", "lofo_r2": 0.1}
+
+    p = _WithVerify()
+    assert p.has_verification_capability() is True
+    result = p.preflight()
+    assert result.passed is True
+    assert "verification path present" in result.reason
+
+
+def test_default_preflight_passes_with_domain_profile_only():
+    """A profile-backed plugin (generic verification path) also passes fail-closed default."""
+
+    class _FakeProfile:
+        profile_id = "fake"
+
+    class _WithProfile(DomainPlugin):
+        domain_id = "with_profile_domain"
+
+        def available_features(self):
+            return ["x"]
+
+        def domain_profile(self):
+            return _FakeProfile()
+
+    p = _WithProfile()
+    assert p.has_verification_capability() is True
+    assert p.preflight().passed is True
+
+
+def test_builtin_plugins_not_spuriously_failed_by_preflight():
+    """
+    Each real built-in plugin must NOT be spuriously failed by the fail-closed
+    default. The 6 contract plugins either override preflight with a real power
+    check OR expose a verification capability, so the default (when reached) still
+    passes. We assert either an explicit passed=True or a real, non-default reason
+    (a dataset-driven failure is a legitimate check, not the fail-closed default).
+    """
+    from propab.domain_modules.materials.plugin import MaterialsPlugin
+    from propab.domain_modules.mandrake.plugin import MandrakePlugin
+    from propab.domain_modules.enzyme_kinetics.plugin import EnzymeKineticsPlugin
+    from propab.domain_modules.graph_invariants.plugin import GraphInvariantsPlugin
+    from propab.domain_modules.network_diffusion.plugin import NetworkDiffusionPlugin
+    from propab.domain_modules.math_combinatorics.plugin import MathCombinatoricsPlugin
+
+    _DEFAULT_FAIL = "no verification capability"
+
+    # network_diffusion is scope-only: no run_verification override, no profile,
+    # and it does NOT override preflight — so it falls through to the base default.
+    # It also never owns campaign routing (matches() == False), so core never
+    # calls its preflight for launch. Assert the change does not break it in a way
+    # that would matter: it must not be resolvable heuristically.
+    assert NetworkDiffusionPlugin().matches(question="a contagion diffusion study") is False
+
+    for plugin_cls in (
+        MaterialsPlugin,
+        MandrakePlugin,
+        EnzymeKineticsPlugin,
+        GraphInvariantsPlugin,
+        MathCombinatoricsPlugin,
+    ):
+        plugin = plugin_cls()
+        # All 5 override preflight with their own dataset/power check.
+        assert type(plugin).preflight is not DomainPlugin.preflight, (
+            f"{plugin.domain_id} unexpectedly uses the default preflight"
+        )
+        result = plugin.preflight()
+        # A real power check may legitimately fail on a machine without the
+        # dataset, but it must never fail with the fail-closed DEFAULT reason —
+        # that would mean our change leaked into a plugin that has a real check.
+        assert _DEFAULT_FAIL not in result.reason, (
+            f"{plugin.domain_id} spuriously hit the fail-closed default: {result.reason}"
+        )
+
+
+def test_has_verification_capability_matches_builtin_owners():
+    """The 5 verifying built-ins report a verification capability; scope-only does not."""
+    from propab.domain_modules.materials.plugin import MaterialsPlugin
+    from propab.domain_modules.enzyme_kinetics.plugin import EnzymeKineticsPlugin
+    from propab.domain_modules.graph_invariants.plugin import GraphInvariantsPlugin
+    from propab.domain_modules.math_combinatorics.plugin import MathCombinatoricsPlugin
+    from propab.domain_modules.mandrake.plugin import MandrakePlugin
+    from propab.domain_modules.network_diffusion.plugin import NetworkDiffusionPlugin
+
+    for plugin_cls in (
+        MaterialsPlugin,
+        MandrakePlugin,
+        EnzymeKineticsPlugin,
+        GraphInvariantsPlugin,
+        MathCombinatoricsPlugin,
+    ):
+        assert plugin_cls().has_verification_capability() is True
+
+    # Scope-only contributor: no verification path (but never routed to as owner).
+    assert NetworkDiffusionPlugin().has_verification_capability() is False
+
+
+# ── D3: empty/None defaults are observable, not silently "passed" ────────────
+
+def test_d3_scope_and_artifact_queries_are_observable():
+    class _Bare(DomainPlugin):
+        domain_id = "bare_d3_domain"
+
+        def available_features(self):
+            return []
+
+    p = _Bare()
+    assert p.has_scope_template() is False
+    assert p.scope_template() is None
+    assert p.has_artifact_models() is False
+    assert p.artifact_models(hypothesis={"text": "h"}) == []
+
+    from propab.domain_modules.network_diffusion.plugin import NetworkDiffusionPlugin
+
+    nd = NetworkDiffusionPlugin()
+    # network_diffusion supplies a scope template but no artifact models (no profile).
+    assert nd.has_scope_template() is True
+    assert nd.has_artifact_models() is False
