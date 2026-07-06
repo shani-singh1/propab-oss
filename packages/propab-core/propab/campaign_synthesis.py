@@ -6,13 +6,19 @@ import logging
 import re
 from difflib import SequenceMatcher
 from typing import Any
+from uuid import uuid4
 
 from propab.belief_state import CampaignBeliefState, ClosedBelief
 from propab.evidence_binding import BindingMetrics
 from propab.hypothesis_tree import HypothesisNode, HypothesisTree
 from propab.prompt_composer import compose_synthesis_prompt
 from propab.research_quality import extract_theme_vector, infer_node_role
-from propab.scoped_claim import enrich_entry_with_scope, parse_scope_from_methodology, validate_scoped_claim
+from propab.scoped_claim import (
+    compute_scope_delta,
+    enrich_entry_with_scope,
+    parse_scope_from_methodology,
+    validate_scoped_claim,
+)
 
 
 def _question_relevance(question: str, snippets: list[str], core: str) -> float:
@@ -50,11 +56,17 @@ def _is_duplicate_frontier_candidate(
     belief_state: CampaignBeliefState,
     *,
     same_round_texts: list[str],
+    allowed_parent_id: str | None = None,
     threshold: float = FRONTIER_DEDUP_SIMILARITY,
 ) -> tuple[bool, str]:
     for existing in tree.nodes.values():
-        if text_similarity(text, existing.text) >= threshold:
-            return True, f"tree_node:{existing.id}"
+        existing_text = existing.text if hasattr(existing, "text") else str(existing.get("text", ""))
+        existing_id = existing.id if hasattr(existing, "id") else str(existing.get("id", "?"))
+        similarity = text_similarity(text, existing_text)
+        if allowed_parent_id and existing_id == allowed_parent_id and similarity < 0.98:
+            continue
+        if similarity >= threshold:
+            return True, f"tree_node:{existing_id}"
     for sibling in same_round_texts:
         if text_similarity(text, sibling) >= threshold:
             return True, "same_round_sibling"
@@ -92,6 +104,158 @@ def _candidate_dicts(parsed: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(expl, dict) and expl.get("text"):
         out.append(expl)
     return out
+
+
+def _node_child_count(node: HypothesisNode) -> int:
+    return len(getattr(node, "children", None) or [])
+
+
+def _eligible_expansion_parents(tree: HypothesisTree) -> list[HypothesisNode]:
+    parents: list[HypothesisNode] = []
+    for node in tree.nodes.values():
+        if not isinstance(node, HypothesisNode):
+            continue
+        if node.verdict not in ("confirmed", "refuted", "inconclusive"):
+            continue
+        if node.id in tree.exhausted:
+            continue
+        if node.depth >= 8:
+            continue
+        if _node_child_count(node) >= 5:
+            continue
+        parents.append(node)
+    return parents
+
+
+def _candidate_parent_ids(item: dict[str, Any]) -> list[str]:
+    ids: list[str] = []
+    scalar_keys = (
+        "parent_id",
+        "parent_node_id",
+        "expand_parent_id",
+        "refinement_of",
+        "source_node_id",
+        "target_node_id",
+    )
+    list_keys = (
+        "discriminates_node_ids",
+        "related_node_ids",
+        "based_on_node_ids",
+        "supporting_nodes",
+        "contradicting_nodes",
+        "node_ids",
+    )
+    for key in scalar_keys:
+        val = item.get(key)
+        if val:
+            ids.append(str(val))
+    for key in list_keys:
+        val = item.get(key)
+        if isinstance(val, list):
+            ids.extend(str(x) for x in val if x)
+        elif val:
+            ids.append(str(val))
+    seen: set[str] = set()
+    out: list[str] = []
+    for node_id in ids:
+        if node_id not in seen:
+            seen.add(node_id)
+            out.append(node_id)
+    return out
+
+
+def _preferred_parent_verdicts(item: dict[str, Any]) -> tuple[str, ...]:
+    expansion_type = str(item.get("expansion_type") or "").lower()
+    if expansion_type == "retest":
+        return ("inconclusive", "refuted", "confirmed")
+    if expansion_type == "alternative":
+        return ("refuted", "inconclusive", "confirmed")
+    if expansion_type in {"boundary", "mechanistic", "generalization"}:
+        return ("confirmed", "inconclusive", "refuted")
+    if expansion_type == "diagnostic":
+        return ("inconclusive", "refuted", "confirmed")
+    if item.get("implements_critical_experiment"):
+        return ("confirmed", "inconclusive", "refuted")
+    return ("confirmed", "refuted", "inconclusive")
+
+
+def _resolve_synthesis_parent(
+    item: dict[str, Any],
+    raw_text: str,
+    tree: HypothesisTree,
+    eligible_parents: list[HypothesisNode],
+) -> tuple[HypothesisNode | None, str]:
+    if not eligible_parents:
+        return None, "no_completed_parent"
+
+    eligible_by_id = {node.id: node for node in eligible_parents}
+    for node_id in _candidate_parent_ids(item):
+        parent = eligible_by_id.get(node_id)
+        if parent is not None:
+            return parent, "explicit"
+
+    preferred = _preferred_parent_verdicts(item)
+    ranked: list[tuple[float, int, int, int, HypothesisNode]] = []
+    for parent in eligible_parents:
+        try:
+            verdict_rank = preferred.index(parent.verdict)
+        except ValueError:
+            verdict_rank = len(preferred)
+        similarity = text_similarity(raw_text, parent.text)
+        ranked.append((
+            -float(verdict_rank),
+            int(parent.generation or 0),
+            int(parent.depth or 0),
+            -_node_child_count(parent),
+            parent,
+        ))
+        ranked[-1] = (
+            ranked[-1][0] + similarity,
+            ranked[-1][1],
+            ranked[-1][2],
+            ranked[-1][3],
+            ranked[-1][4],
+        )
+    if not ranked:
+        return None, "no_eligible_parent"
+    ranked.sort(reverse=True, key=lambda x: (x[0], x[1], x[2], x[3]))
+    return ranked[0][4], "inferred"
+
+
+def _child_node_from_synthesis(
+    *,
+    parent: HypothesisNode,
+    entry: dict[str, Any],
+    item: dict[str, Any],
+    generation: int,
+    question_relevance_score: float | None = None,
+) -> HypothesisNode:
+    primary, secondary, theme_conf = extract_theme_vector(entry["text"])
+    parent_scope = parse_scope_from_methodology(parent.text, parent.test_methodology)
+    child_scope = parse_scope_from_methodology(entry["text"], entry.get("test_methodology"))
+    scope_delta = compute_scope_delta(parent_scope, child_scope)
+    return HypothesisNode(
+        id=str(uuid4()),
+        text=entry["text"],
+        parent_id=parent.id,
+        depth=parent.depth + 1,
+        verdict="pending",
+        generation=generation,
+        expansion_type=item.get("expansion_type") or "diagnostic",
+        expansion_reason=item.get("why_follows_from_beliefs") or "campaign_synthesis",
+        node_role=infer_node_role(entry["text"]),
+        primary_theme=primary,
+        secondary_themes=secondary,
+        theme_id=item.get("theme_id") or primary,
+        theme_confidence=theme_conf,
+        lineage_length=int(parent.lineage_length or (parent.depth + 1)) + 1,
+        question_relevance_score=question_relevance_score,
+        test_methodology=entry.get("test_methodology"),
+        feature_subset=list(item.get("feature_subset") or []),
+        mechanism_id=item.get("mechanism_id"),
+        claim_scope=entry.get("claim_scope"),
+        scope_delta=entry.get("scope_delta") or scope_delta,
+    )
 
 
 def apply_synthesis_to_frontier(
@@ -175,7 +339,7 @@ def apply_synthesis_to_frontier(
 
     belief_state.record_synthesis_exhaustion(bool(parsed.get("direction_exhausted")))
 
-    # Frontier candidates — dedup before add_seeds (fixes.md P2)
+    # Frontier candidates: bind to completed parents before inserting roots/children.
     from propab.domain_modules.registry import hypothesis_is_on_topic
     from propab.numerical_seeds import classify_hypothesis_bucket, claim_has_numeric_falsifier
     from propab.synthesis_diversity import (
@@ -197,9 +361,19 @@ def apply_synthesis_to_frontier(
         tree_problem_counts=tree_counts,
     )
 
-    seed_dicts: list[dict[str, Any]] = []
+    candidate_dicts: list[dict[str, Any]] = []
     same_round_texts: list[str] = []
+    eligible_parents = _eligible_expansion_parents(tree)
+    critical_raw: list[dict[str, Any]] = []
+    other_raw: list[dict[str, Any]] = []
     for item in _candidate_dicts(parsed):
+        if item.get("implements_critical_experiment"):
+            critical_raw.append(item)
+        else:
+            other_raw.append(item)
+    candidate_items = critical_raw + other_raw
+
+    for item in candidate_items:
         raw_text = str(item.get("text") or "")
         methodology = str(item.get("test_methodology") or "")
         if implementable and not methodology_implementable(raw_text, methodology, implementable):
@@ -229,11 +403,13 @@ def apply_synthesis_to_frontier(
             metrics["n_rejected_off_topic"] = int(metrics.get("n_rejected_off_topic") or 0) + 1
             logger.debug("Rejected off-topic frontier candidate: %s", raw_text[:80])
             continue
+        parent, parent_mode = _resolve_synthesis_parent(item, raw_text, tree, eligible_parents)
         dup, dup_reason = _is_duplicate_frontier_candidate(
             raw_text,
             tree,
             belief_state,
             same_round_texts=same_round_texts,
+            allowed_parent_id=parent.id if parent else None,
         )
         if dup:
             metrics["n_rejected_duplicate"] = int(metrics.get("n_rejected_duplicate") or 0) + 1
@@ -241,7 +417,7 @@ def apply_synthesis_to_frontier(
             continue
         entry = enrich_entry_with_scope(
             {
-                "id": str(item.get("id") or f"syn_{len(seed_dicts)}"),
+                "id": str(item.get("id") or f"syn_{len(candidate_dicts)}"),
                 "text": raw_text,
                 "test_methodology": str(item.get("test_methodology") or "sub_agent"),
             },
@@ -252,26 +428,109 @@ def apply_synthesis_to_frontier(
         if not ok:
             continue
         same_round_texts.append(raw_text)
-        seed_dicts.append({
+        entry_dict: dict[str, Any] = {
             "id": entry["id"],
             "text": entry["text"],
             "test_methodology": entry["test_methodology"],
             "claim_scope": entry.get("claim_scope"),
             "expansion_type": item.get("expansion_type") or "diagnostic",
             "expansion_reason": item.get("why_follows_from_beliefs") or "campaign_synthesis",
-        })
+            "_raw_item": item,
+        }
+        if item.get("implements_critical_experiment"):
+            entry_dict["implements_critical_experiment"] = True
+        if parent is not None:
+            entry_dict["parent_id"] = parent.id
+            entry_dict["_parent_mode"] = parent_mode
+        elif eligible_parents:
+            metrics["n_rejected_missing_parent"] = int(metrics.get("n_rejected_missing_parent") or 0) + 1
+            continue
+        else:
+            entry_dict["_parent_mode"] = parent_mode
+        candidate_dicts.append(entry_dict)
 
-    if not seed_dicts and forced_type:
+    if not candidate_dicts and forced_type:
         from propab.synthesis_diversity import fallback_synthesis_seeds
 
-        seed_dicts = fallback_synthesis_seeds(forced_type, generation=generation)
-        metrics["diversity_fallback_injected"] = len(seed_dicts)
+        fallback_items = fallback_synthesis_seeds(
+            forced_type,
+            generation=generation,
+            question=question,
+        )
+        metrics["diversity_fallback_injected"] = len(fallback_items)
+        for item in fallback_items:
+            raw_text = str(item.get("text") or "")
+            parent, parent_mode = _resolve_synthesis_parent(item, raw_text, tree, eligible_parents)
+            dup, dup_reason = _is_duplicate_frontier_candidate(
+                raw_text,
+                tree,
+                belief_state,
+                same_round_texts=same_round_texts,
+                allowed_parent_id=parent.id if parent else None,
+            )
+            if dup:
+                metrics["n_rejected_duplicate"] = int(metrics.get("n_rejected_duplicate") or 0) + 1
+                logger.debug("Rejected duplicate fallback candidate (%s): %s", dup_reason, raw_text[:80])
+                continue
+            entry = enrich_entry_with_scope(
+                {
+                    "id": str(item.get("id") or f"fallback_{forced_type}_{len(candidate_dicts)}"),
+                    "text": raw_text,
+                    "test_methodology": str(item.get("test_methodology") or "sub_agent"),
+                },
+                question,
+            )
+            scope = parse_scope_from_methodology(entry["text"], entry["test_methodology"])
+            ok, _ = validate_scoped_claim(scope)
+            if not ok:
+                continue
+            same_round_texts.append(raw_text)
+            entry_dict = {
+                "id": entry["id"],
+                "text": entry["text"],
+                "test_methodology": entry["test_methodology"],
+                "claim_scope": entry.get("claim_scope"),
+                "expansion_type": item.get("expansion_type") or "diagnostic",
+                "expansion_reason": item.get("expansion_reason") or f"diversity_fallback_{forced_type}",
+                "_raw_item": item,
+            }
+            if parent is not None:
+                entry_dict["parent_id"] = parent.id
+                entry_dict["_parent_mode"] = parent_mode
+            elif not eligible_parents:
+                entry_dict["_parent_mode"] = parent_mode
+            else:
+                metrics["n_rejected_missing_parent"] = int(metrics.get("n_rejected_missing_parent") or 0) + 1
+                continue
+            candidate_dicts.append(entry_dict)
 
-    if not seed_dicts:
+    if not candidate_dicts:
         return [], metrics
 
-    added = tree.add_seeds(seed_dicts, generation=generation)
     snippets = list(prior_snippets or [])
+    root_dicts = [entry for entry in candidate_dicts if not entry.get("parent_id")]
+    child_dicts = [entry for entry in candidate_dicts if entry.get("parent_id")]
+    added: list[HypothesisNode] = []
+    if root_dicts:
+        added.extend(tree.add_seeds(root_dicts, generation=generation))
+        metrics["n_added_as_roots"] = len(root_dicts)
+    child_nodes: list[HypothesisNode] = []
+    for entry in child_dicts:
+        parent = tree.nodes.get(str(entry.get("parent_id")))
+        if not isinstance(parent, HypothesisNode):
+            metrics["n_rejected_missing_parent"] = int(metrics.get("n_rejected_missing_parent") or 0) + 1
+            continue
+        item = entry.get("_raw_item") if isinstance(entry.get("_raw_item"), dict) else entry
+        child_nodes.append(_child_node_from_synthesis(
+            parent=parent,
+            entry=entry,
+            item=item,
+            generation=generation,
+        ))
+    added.extend(child_nodes)
+    if child_nodes:
+        metrics["n_added_as_children"] = len(child_nodes)
+
     filtered: list[HypothesisNode] = []
     for node in added:
         primary, secondary, theme_conf = extract_theme_vector(node.text)
@@ -287,6 +546,8 @@ def apply_synthesis_to_frontier(
 
         core = strip_question_suffix(node.text)
         node.question_relevance_score = _question_relevance(question, snippets, core)
+        if node.parent_id:
+            node.lineage_length = tree.lineage_length(node.parent_id) + 1
         if (node.question_relevance_score or 0) >= relevance_threshold:
             filtered.append(node)
 
@@ -302,29 +563,36 @@ def apply_diversity_fallback_seeds(
     *,
     forced_type: str,
     generation: int,
-    question: str,
+    question: str = "",
     prior_snippets: list[str] | None = None,
     relevance_threshold: float = 0.35,
+    belief_state: CampaignBeliefState | None = None,
 ) -> list[HypothesisNode]:
     """Inject deterministic seeds when LLM synthesis ignores diversity reset."""
     from propab.synthesis_diversity import fallback_synthesis_seeds
 
-    seed_dicts = fallback_synthesis_seeds(forced_type, generation=generation)
+    seed_dicts = fallback_synthesis_seeds(
+        forced_type,
+        generation=generation,
+        question=question,
+    )
     if not seed_dicts:
         return []
-    added = tree.add_seeds(seed_dicts, generation=generation)
-    # Fallback seeds are curated on-topic; do not drop them on relevance scoring.
+    added, _metrics = apply_synthesis_to_frontier(
+        tree,
+        belief_state or CampaignBeliefState(),
+        {"beliefs": [], "frontier_candidates": seed_dicts, "direction_exhausted": False},
+        question=question,
+        generation=generation,
+        # Deterministic fallback seeds are already the escape hatch after an empty
+        # synthesis pass; keep the historical behavior that they are not dropped
+        # by lexical relevance scoring.
+        relevance_threshold=0.0,
+        prior_snippets=prior_snippets,
+    )
     for node in added:
-        primary, secondary, theme_conf = extract_theme_vector(node.text)
-        node.primary_theme = primary
-        node.secondary_themes = secondary
-        node.theme_id = primary
-        node.theme_confidence = theme_conf
-        node.node_role = infer_node_role(node.text)
         node.question_relevance_score = 1.0
-    if added:
-        tree.add_to_frontier(list(added))
-    return list(added)
+    return added
 
 
 async def run_campaign_synthesis_pass(
@@ -430,7 +698,10 @@ async def run_campaign_synthesis_pass(
             payload={
                 "n_candidates_added": metrics.get("n_added", 0),
                 "n_rejected_duplicate": metrics.get("n_rejected_duplicate", 0),
+                "n_rejected_missing_parent": metrics.get("n_rejected_missing_parent", 0),
                 "n_candidates_raw": metrics.get("n_candidates_raw", 0),
+                "n_added_as_children": metrics.get("n_added_as_children", 0),
+                "n_added_as_roots": metrics.get("n_added_as_roots", 0),
                 "binding_rejected_count": metrics.get("binding_rejected_count", 0),
                 "binding_accepted_count": metrics.get("binding_accepted_count", 0),
                 "falsifiability_rejected_count": metrics.get("falsifiability_rejected_count", 0),

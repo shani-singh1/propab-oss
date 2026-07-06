@@ -37,6 +37,7 @@ def test_prompts_directory_exists() -> None:
     assert "Campaign Orchestrator" in role
     assert "BeliefObjects" in role or "belief" in role.lower()
     assert "critical_experiment" in task
+    assert "parent_id" in task
 
 
 def test_belief_cap_and_abandonment() -> None:
@@ -102,18 +103,32 @@ def test_parse_synthesis_response_json() -> None:
 
 def test_apply_synthesis_adds_frontier_candidates() -> None:
     tree = HypothesisTree()
+    parent = tree.add_seeds(
+        [{
+            "text": (
+                "Thermal features predict RT activity.\n"
+                "Population: RT enzymes\nDistribution: mandrake 7 families\n"
+                "Claimed generalization: cross-family signal\n"
+                "Expected failure modes: family leakage\nOOD test: leave-one-family-out"
+            ),
+            "test_methodology": "mandrake_verification",
+        }],
+        generation=0,
+    )[0]
+    tree.update_node(parent.id, "confirmed", 0.9, 'evidence={"verdict_reason": "lofo positive"};')
     state = CampaignBeliefState()
     parsed = {
         "beliefs": [
             {
-                "statement": "thermal features are family proxies",
+                "statement": "Thermal features predict RT activity under cross-family LOFO.",
                 "confidence": "strong",
                 "status": "strengthened",
-                "supporting_nodes": ["n1"],
+                "supporting_nodes": [parent.id],
             }
         ],
         "frontier_candidates": [{
             "id": "diag1",
+            "parent_id": parent.id,
             "text": (
                 "Finer family-split LOFO degradation test.\n"
                 "Population: RT enzymes\nDistribution: mandrake 7 families\n"
@@ -135,9 +150,91 @@ def test_apply_synthesis_adds_frontier_candidates() -> None:
         relevance_threshold=0.0,
     )
     assert metrics["n_added"] >= 1
+    assert metrics["n_added_as_children"] == 1
+    assert metrics.get("n_added_as_roots", 0) == 0
+    assert added[0].parent_id == parent.id
+    assert added[0].depth == 1
+    assert added[0].id in tree.nodes[parent.id].children
     assert len(state.active_beliefs) == 1
     assert state.active_beliefs[0].confidence == "strong"
     assert tree.next_dispatch_candidate(frozenset()) is not None
+
+
+def test_apply_synthesis_can_bootstrap_root_when_no_parent_exists() -> None:
+    tree = HypothesisTree()
+    state = CampaignBeliefState()
+    parsed = {
+        "beliefs": [],
+        "frontier_candidates": [{
+            "id": "root1",
+            "text": (
+                "Initial scoped diagnostic.\n"
+                "Population: RT enzymes\nDistribution: mandrake 7 families\n"
+                "Claimed generalization: cross-family signal\n"
+                "Expected failure modes: family leakage\nOOD test: leave-one-family-out"
+            ),
+            "test_methodology": "mandrake_verification",
+            "expansion_type": "diagnostic",
+        }],
+        "direction_exhausted": False,
+    }
+    added, metrics = apply_synthesis_to_frontier(
+        tree,
+        state,
+        parsed,
+        question="Which biophysical properties predict RT activity independently of family?",
+        generation=1,
+        relevance_threshold=0.0,
+    )
+    assert len(added) == 1
+    assert added[0].parent_id is None
+    assert added[0].depth == 0
+    assert metrics["n_added_as_roots"] == 1
+
+
+def test_synthesis_infers_parent_when_llm_omits_parent_id() -> None:
+    tree = HypothesisTree()
+    parent = tree.add_seeds(
+        [{
+            "text": (
+                "Global hydrophobicity fails under family holdout.\n"
+                "Population: RT enzymes\nDistribution: mandrake 7 families\n"
+                "Claimed generalization: cross-family signal\n"
+                "Expected failure modes: motif-specific effects\nOOD test: leave-one-family-out"
+            ),
+            "test_methodology": "mandrake_verification",
+        }],
+        generation=0,
+    )[0]
+    tree.update_node(parent.id, "refuted", 0.8, 'evidence={"verdict_reason": "lofo negative"};')
+
+    parsed = {
+        "beliefs": [],
+        "frontier_candidates": [{
+            "id": "alt1",
+            "text": (
+                "Family-local motif features replace global hydrophobicity under holdout.\n"
+                "Population: RT enzymes\nDistribution: mandrake 7 families\n"
+                "Claimed generalization: cross-family signal\n"
+                "Expected failure modes: global averages remain sufficient\nOOD test: leave-one-family-out"
+            ),
+            "test_methodology": "mandrake_verification",
+            "expansion_type": "alternative",
+        }],
+        "direction_exhausted": False,
+    }
+    added, metrics = apply_synthesis_to_frontier(
+        tree,
+        CampaignBeliefState(),
+        parsed,
+        question="Which biophysical properties predict RT activity independently of family?",
+        generation=1,
+        relevance_threshold=0.0,
+    )
+    assert len(added) == 1
+    assert metrics["n_added_as_children"] == 1
+    assert added[0].parent_id == parent.id
+    assert tree.nodes[parent.id].children == [added[0].id]
 
 
 def test_compose_synthesis_includes_pinned_context() -> None:
@@ -163,6 +260,9 @@ def test_compose_synthesis_includes_pinned_context() -> None:
     assert "thermal universal" in prompt
     assert "replication_failed" in prompt
     assert "verdict_reason: lofo negative" in prompt
+    assert "Open expansion targets" in prompt
+    assert f"target_id={node.id}" in prompt
+    assert "choose parent_id" in prompt
 
 
 def test_compress_drops_old_prose_keeps_structured_fields() -> None:

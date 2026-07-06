@@ -2,6 +2,7 @@
 
 Review the completed nodes since the last synthesis pass (full structured diagnostics below).
 Update belief state, choose one critical discriminating experiment, and propose frontier candidates.
+Every frontier candidate must be a child of one completed expansion target unless there are no completed targets yet.
 
 ### Belief update rules
 - At most **3 active beliefs**. Each must be a precise, checkable claim — not vague prose.
@@ -18,6 +19,12 @@ Update belief state, choose one critical discriminating experiment, and propose 
 Name the **single best test** that would move at least two active beliefs in opposite directions.
 If all beliefs are weak/unclear, still name a critical experiment but also include one exploratory candidate
 that does not presuppose any current belief.
+
+### Tree expansion rules
+- Use the `Open expansion targets` section. For each candidate, set `parent_id` to one listed `target_id`.
+- A candidate must reduce uncertainty relative to its parent: boundary/mechanism/generalization for confirmed parents, alternative for refuted parents, retest/diagnostic for inconclusive parents.
+- Do not create a new root unless the prompt says there are no completed expansion targets.
+- Use `discriminates_node_ids` for sibling or rival nodes whose outcomes the candidate is meant to separate.
 
 ### Branch exhaustion signal
 Set `direction_exhausted` true only if every active belief has confidence "unclear" AND you introduce no new belief.
@@ -44,6 +51,8 @@ Return JSON ONLY:
   "frontier_candidates": [
     {
       "id": "short_slug",
+      "parent_id": "target_id from Open expansion targets",
+      "discriminates_node_ids": ["node_id"],
       "text": "core claim with Population/Distribution/Claimed generalization/Expected failure modes/OOD test lines",
       "test_methodology": "...",
       "expansion_type": "diagnostic|boundary|mechanistic|generalization|alternative|retest",
@@ -53,6 +62,8 @@ Return JSON ONLY:
   ],
   "exploratory_candidate": {
     "id": "slug",
+    "parent_id": "target_id from Open expansion targets, unless no targets exist",
+    "discriminates_node_ids": ["node_id"],
     "text": "...",
     "test_methodology": "...",
     "expansion_type": "alternative"
