@@ -171,6 +171,36 @@ def artifact_gate_stage(
         return verdict, confidence, gate_result.verdict_reason or reason
 
     if evidence_type == "statistical":
+        # W1b: a statistical confirm requires BOTH a real passing null AND that
+        # the numbers the significance/permutation test ran on were NOT typed
+        # directly by the LLM agent. The worker records the provenance of those
+        # inputs on the evidence dict as `stat_input_provenance`:
+        #   "computed"      — produced inside the sandbox (trusted);
+        #   "agent_literal" — the agent typed the numbers into the tool call
+        #                     (UNTRUSTED / possibly fabricated);
+        #   "unknown"       — could not be determined.
+        # A permutation null computed on agent-fabricated arrays looks perfectly
+        # "significant", so this is the only choke point that can stop a
+        # fabricated statistical result from confirming.
+        #
+        # Fail closed ONLY on the KNOWN-untrusted "agent_literal" case. We do NOT
+        # block "unknown" here: absence of provenance is not evidence of
+        # fabrication, and many legitimate paths (older evidence, third-party
+        # tools) leave it unset/unknown — blocking those would falsely downgrade
+        # honest confirmations. If a future audit shows "unknown" is being abused,
+        # tighten it here. This guard is scoped strictly to the statistical
+        # branch; the deterministic-proof and lofo (label-shuffle) paths above
+        # compute in-sandbox and are intentionally untouched.
+        stat_provenance = evidence.get("stat_input_provenance")
+        if stat_provenance == "agent_literal":
+            return (
+                "inconclusive",
+                confidence * 0.5,
+                "stat_inputs_agent_literal_untrusted: significance/permutation "
+                "inputs were typed by the agent (not sandbox-computed); a "
+                "statistical confirm requires non-fabricated inputs",
+            )
+
         # V1: a purely statistical result is confirmable only when it carries a
         # real, independent adversarial null (an outcome permutation null or a
         # label-shuffle null) that PASSES. Route it through the artifact gate's
