@@ -635,6 +635,92 @@ pair. **CFG6 · LOW · VERIFIED — token usage never captured** (`llm.py:235-23
 `input_tokens/output_tokens` hardcoded `None` though all 3 providers return counts) → no
 honest usage-based budget signal (compounds BUD1).
 
+## LAYER BASELINES — quantified metrics (the engineering-loop scoreboard)
+
+Each layer is being turned into a measured engineering problem (like LitQA2 for
+literature). Harnesses live in `bench/` (drive the REAL code; metric-moves
+sanity-checked). Baselines established so far (verified by me — read + ran):
+
+| Layer | Harness | Metric | Baseline | Read |
+|-------|---------|--------|----------|------|
+| Literature | LitQA2 eval | accuracy | **0.76–0.78** (n=100) | done |
+| Convergence | `scripts/bench_campaign_convergence.py` | confirmed-lineage depth / narrow-reject | **3.2 / 0.001** | done |
+| Verdict | `bench/bench_verdict.py` | **false-confirm rate** / recall | **0.0 / 1.0** (clean) | ✓ ran |
+| Evidence-binding | `bench/bench_binding.py` | precision / recall | **0.5 / 1.0** | ✓ ran |
+| Generation | `bench/bench_generation.py` | dup-pass / off-topic-reject | *(agent running)* | — |
+
+**BND1 · MED · VERIFIED (via bench) — binding accepts cross-domain supporters →
+precision 0.5.** The binding benchmark shows recall 1.0 in ALL five domains (A4
+domain-generality confirmed) but precision 0.5: irrelevant + fabricated citations
+are cleanly rejected (0/5 each), yet all 5 "genuine-for-a-different-subject"
+cross-domain nodes bind, because they share ≥2 relationship/methodology salient
+terms (`elasticity`+`reduce`, `scales`+`spacing`, …) — `_MIN_SHARED_SALIENT_TERMS=2`
+counts generic relationship words. **Improvement target:** raise binding_precision
+from 0.5 toward 1.0 while KEEPING recall 1.0 — require the shared salient terms to
+be SUBJECT-specific (nouns/entities), not generic relationship verbs; or add a
+subject-mismatch reject. This is the first measurable A4-followup.
+
+**Verdict baseline caveat:** `false_confirm_rate=0.0` measures the gate given
+HONEST provenance. TOOL1 (a tool that stamps fabricated variance as `computed`)
+is upstream of this benchmark — the gate is honest, the tool lies. Fixing TOOL1 is
+what actually protects the ML domain; a future verdict-bench case could add a
+"tool-fabricated computed-provenance" probe once TOOL1 is fixed.
+
+## LAYER 7 — Domain layer (audited 2026-07-07) [deep]
+
+Auditor's worktree was STALE (pre-D1 base), so I re-verified each finding against
+the primary `campaign-convergence` tree. Its "D1 not present" note is a FALSE ALARM
+— `base.py:212-270` has `has_verification_capability()` + fail-closed `preflight()`;
+D1 is intact. Do not re-chase. The rest verified real:
+
+**DOM1 (was L7-1) · HIGH · VERIFIED (read myself on primary) — a domain PROFILE
+without a PLUGIN launches with no verification capability and no preflight, yet the
+artifact gate applies its standards.** `econometrics` has a `domain_profiles/econometrics.py`
+profile but NO plugin dir (verified: `ls domain_modules/` has no econ). So
+`resolve_domain_plugin` → None → `_enforce_domain_preflight` (campaign_loop.py:1522-1523)
+`if plugin is None: return True` → launches with no power gate; worker falls to the
+generic sandbox path (no econ adapter); but the artifact gate still applies econometrics
+profile standards. **D1 does NOT cover this** — D1 fails-closed a plugin with no
+capability, but a profile-with-no-plugin never reaches the base preflight. Any new
+domain author who adds a profile (natural — profiles drive the gate) creates the
+appearance of support with zero executable verification. Central-thesis-in-miniature.
+**Fix:** `_enforce_domain_preflight` must fail-closed when a domain PROFILE resolves
+but no plugin owns it (or require every profile to have a verifying plugin).
+
+**DOM2 (was L7-2) · HIGH · VERIFIED (read myself) — three demo domains "confirm"
+findings on SYNTHETIC seed-42 data presented as real datasets; one is a tautology.**
+`genomics/adapter.py` (`_synthetic_gtex_frame`, used unconditionally, meta
+`synthetic:True`) presents as "GTEx v8 subset"; `graph_invariants/adapter.py`
+(`_synthetic_frame`) as "SNAP subset"; enzyme_kinetics similarly (per auditor). A LOFO
+"confirmation" detects the seeded structure, not science. Worse, `graph_invariants:125`
+`modularity = 0.25*clustering + 0.1*(avg_deg/n)` is a DETERMINISTIC function of
+clustering → a "modularity↔clustering" finding is a tautology of the generator. The
+`synthetic:True` flag is discoverable in meta but NOT surfaced at verdict/paper time,
+so these flow through the same pipeline as real results. (Refines the earlier
+"enzyme/graph are not stubs" note: real verification LOGIC, but synthetic DATA dressed
+as real.) **Fix:** surface synthetic-data provenance into the verdict/paper and
+downgrade/flag, or load real datasets; never present a seed-42 confirmation as a
+real-dataset finding.
+
+**DOM3 (was L7-3) · MED · VERIFIED-by-auditor (unchanged file; ran matchers) — routing
+collisions resolve by REGISTRATION ORDER, no confidence.** `registry.py` `resolve_domain_plugin`
+returns the FIRST plugin whose `matches()` is True. A question with both combinatorics
+and graph terms fires `graph_invariants` AND `math_combinatorics` → silently routes to
+graph_invariants (registered first) → verified against synthetic SNAP data (DOM2). As
+domains proliferate, an older plugin shadows a correctly-authored newer one. **Fix:**
+`matches()` returns a score; pick max; emit a routing-ambiguity event on a near tie.
+
+**DOM4 (was L7-4) · MED · VERIFIED-by-auditor — graph_invariants `from_hypothesis`
+defaults to `spectral_gap→clustering` for ANY text, and the worker never re-checks
+on-topic.** `_plugin_verification_path` calls `run_verification` directly without
+`hypothesis_on_topic`, so an off-topic/misrouted hypothesis is verified against a fixed
+default correlation on synthetic data → can yield a confirmed verdict decoupled from the
+claim. Combines with DOM3. **Fix:** `from_hypothesis` returns a sentinel/raises when no
+invariant is confidently identified; `_plugin_verification_path` calls `hypothesis_on_topic`
+first and short-circuits to inconclusive if off-topic. **DOM5 (L7-5) · LOW · SUSPECTED —
+`_run_ap_free_sweep` marks `verified_true=1` for ≥3 points regardless of claim**, but
+`apply_claim_validation` masks it in the routed path (couldn't construct a live exploit).
+
 ---
 
 ## External report triage — `fixes.md` (weaker-model audit, 2026-07-07)
