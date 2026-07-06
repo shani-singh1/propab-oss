@@ -91,20 +91,40 @@ class EmbeddingClient:
         self._max_concurrency = max_concurrency
         self.dim = dim
         self._timeout = http_timeout
+        self._cache: dict[str, list[float]] = {}
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        try:
-            if self.provider == "google":
-                return await self._embed_google(texts)
-            if self.provider == "openai":
-                return await self._embed_openai(texts)
-        except Exception:
-            # A flaky embedding API must never take the whole service
-            # down — degrade to offline embeddings for this batch.
-            pass
-        return [_offline_embed(t, self.dim) for t in texts]
+        # Per-instance text→vector cache. The QA/eval deep-read path re-ranks the
+        # same chunks several times per question (once per candidate doc, then a
+        # pooled final rank), so without caching dense ranking re-embeds every
+        # chunk ~18× and every question times out (measured, 0.10.x). Caching
+        # embeds each unique text ONCE; subsequent ranks are local cosine only.
+        cache = self._cache
+        missing = [t for t in dict.fromkeys(texts) if t not in cache]
+        if missing:
+            try:
+                if self.provider == "google":
+                    vecs = await self._embed_google(missing)
+                elif self.provider == "openai":
+                    vecs = await self._embed_openai(missing)
+                else:
+                    vecs = [_offline_embed(t, self.dim) for t in missing]
+            except Exception:
+                # A flaky embedding API must never take the whole service down —
+                # degrade to offline embeddings for the missing texts.
+                vecs = [_offline_embed(t, self.dim) for t in missing]
+            for t, v in zip(missing, vecs):
+                cache[t] = v
+            # Bound memory for the long-running /prior service: drop the oldest
+            # entries (dict preserves insertion order) once the cache is large.
+            # The eval process is short-lived so it never trips this; a server
+            # embedding endlessly would otherwise grow the cache without limit.
+            if len(cache) > 50_000:
+                for old in list(cache)[: len(cache) - 50_000]:
+                    del cache[old]
+        return [cache[t] for t in texts]
 
     async def embed_one(self, text: str) -> list[float]:
         result = await self.embed([text])
@@ -122,27 +142,33 @@ class EmbeddingClient:
             return [item["embedding"] for item in sorted(data["data"], key=lambda x: x["index"])]
 
     async def _embed_google(self, texts: list[str]) -> list[list[float]]:
-        # Official docs: POST /v1beta/models/{model}:embedContent, x-goog-api-key
-        # header. No batch endpoint for retrieval-quality embeddings, so one
-        # call per input. Requests run concurrently (bounded by a semaphore —
-        # a /prior call can easily produce 50+ claims, and issuing those
-        # fully sequentially at ~0.3-0.8s each would make embedding the
-        # slowest part of the pipeline by far) but each result is placed back
-        # at its original index, so callers can still zip(texts, embeddings).
-        # Mirrors packages/propab-core/propab/embeddings.py's request shape
-        # exactly so both call sites behave identically against the same API.
+        # POST /v1beta/models/{model}:batchEmbedContents — the BATCH endpoint,
+        # up to 100 texts in ONE request. The per-text ``embedContent`` path
+        # (one HTTP call per input, fired concurrently) was the root cause of
+        # the ~28% ReadTimeout rate that capped every LitQA2 eval run
+        # (CHANGELOG.md 0.5.0) — dense chunk ranking could fire ~40 embed calls
+        # per question × 6 concurrent questions = ~240 in flight. Batching
+        # collapses a whole paper's chunks into a single call, which is what
+        # makes dense passage retrieval (0.10.0) viable at all. Order is
+        # preserved (the API returns embeddings in request order), so callers
+        # can still zip(texts, embeddings). Mirrors the request shape in
+        # packages/propab-core/propab/embeddings.py.
         model_id = _normalize_google_model(self.model)
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:embedContent"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:batchEmbedContents"
         headers = {"x-goog-api-key": self._google_api_key, "Content-Type": "application/json"}
         semaphore = asyncio.Semaphore(self._max_concurrency)
+        batches = [texts[i:i + 100] for i in range(0, len(texts), 100)]
 
-        async def _one(client: httpx.AsyncClient, text: str) -> list[float]:
-            payload = {"model": f"models/{model_id}", "content": {"parts": [{"text": text}]}}
+        async def _batch(client: httpx.AsyncClient, batch: list[str]) -> list[list[float]]:
+            payload = {
+                "requests": [
+                    {"model": f"models/{model_id}", "content": {"parts": [{"text": t}]}} for t in batch
+                ]
+            }
             async with semaphore:
                 response: httpx.Response | None = None
                 for attempt in range(3):
                     response = await client.post(url, headers=headers, json=payload)
-                    # Gemini embedding endpoint can intermittently return 429/503 under burst load.
                     if response.status_code not in (429, 503):
                         break
                     if attempt < 2:
@@ -151,10 +177,17 @@ class EmbeddingClient:
                 raise RuntimeError("Google embedding call did not produce a response.")
             response.raise_for_status()
             body = response.json()
-            vals = (body.get("embedding") or {}).get("values")
-            if not isinstance(vals, list):
-                raise ValueError("Google embeddings response missing embedding.values")
-            return [float(x) for x in vals]
+            embeddings = body.get("embeddings")
+            if not isinstance(embeddings, list) or len(embeddings) != len(batch):
+                raise ValueError("Google batchEmbedContents response missing/mismatched embeddings")
+            out: list[list[float]] = []
+            for item in embeddings:
+                vals = (item or {}).get("values")
+                if not isinstance(vals, list):
+                    raise ValueError("Google embeddings response missing embedding.values")
+                out.append([float(x) for x in vals])
+            return out
 
         async with httpx.AsyncClient(timeout=self._timeout) as client:
-            return list(await asyncio.gather(*(_one(client, t) for t in texts)))
+            batch_results = await asyncio.gather(*(_batch(client, b) for b in batches))
+        return [emb for batch in batch_results for emb in batch]

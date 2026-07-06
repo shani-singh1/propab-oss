@@ -3,6 +3,42 @@
 Eval scores before/after each significant change. Full score history:
 `artifacts/astabench_literature_scores.json` (append-only).
 
+## 0.10.1 — dense passage retrieval: impractical here (kept the batching win)
+
+The third "beat 0.89" lever, and the one the diagnosis pointed hardest at:
+replace BM25 keyword chunk ranking with **dense semantic passage retrieval**
+(PaperQA2's actual mechanism) — embed every chunk of the fetched papers with
+Gemini and rank the answer passage by cosine similarity, catching passages
+whose wording doesn't lexically match the question.
+
+To make it feasible at all, two real embedding-infra improvements were built
+and kept (they help the `/prior` pipeline regardless of this experiment):
+- **Batched embeddings** (`batchEmbedContents`, ≤100 texts per HTTP call)
+  replacing one concurrent `embedContent` per text — the burst that caused the
+  ~28% ReadTimeout rate in 0.5.0. Measured: 60 chunks embed in ~5s in one call.
+- A **per-instance embedding cache** (bounded at 50k entries) so the deep-read
+  path, which re-ranks the same chunks ~18× per question, embeds each chunk
+  once instead of every rank.
+
+**Verdict on dense ranking: impractical on this infrastructure, reverted.**
+Even with batching + caching, a single question took **147-293s** (vs ~60s for
+BM25) *at concurrency 1* — so the cost is inherent to the deep-read structure's
+many rerank passes against Gemini embedding latency, not cross-question
+contention. At n=50+ that means the run is dominated by 300s timeouts (each a
+scored miss), making answer quality unmeasurable, and the tiny feasible samples
+(n=2-3: 0.5-0.67 with timeouts) showed no upside. The chunk ranker stays BM25.
+This is the same latency wall that sent 0.5.0 to BM25 in the first place; the
+batch endpoint narrows it but not enough for the ~18-rerank deep-read path. The
+embedding batching + cache are kept as a net infra win; the eval ranker toggle
+was reverted.
+
+**Net after 0.10.x:** all three leader-style levers (agent, full-text search,
+dense retrieval) explored and reverted; standing result **0.76-0.78 (n=100, two
+seeds)**. Beating ~0.89 on public infra + one Gemini answer call is not
+reachable without proprietary high-precision passage retrieval — that is now a
+measured conclusion across three independent architectural attempts, not a
+guess.
+
 ## 0.10.0 — chasing 0.89: an agent and full-text search, both measured, both reverted
 
 Target raised to beat AI2's leaderboard top (~0.89). Two architecturally larger

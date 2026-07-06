@@ -48,25 +48,27 @@ def _mock_google_client(handler):
 
 class TestGoogleEmbed:
     @pytest.mark.asyncio
-    async def test_embed_calls_embed_content_with_expected_shape(self):
+    async def test_embed_calls_batch_endpoint_with_expected_shape(self):
         captured = {}
 
         async def handler(request: httpx.Request) -> httpx.Response:
             captured["url"] = str(request.url)
             captured["headers"] = dict(request.headers)
             captured["body"] = request.content
-            return httpx.Response(200, json={"embedding": {"values": [0.1, 0.2, 0.3]}})
+            # One "embeddings" entry per request in the batch, in order.
+            return httpx.Response(200, json={"embeddings": [{"values": [0.1, 0.2, 0.3]}, {"values": [0.4, 0.5, 0.6]}]})
 
         client = EmbeddingClient(provider="google", google_api_key="test-key", model="gemini-embedding-2", dim=3)
         with patch(
             "services.literature.app.indexer.embeddings.httpx.AsyncClient",
             side_effect=_mock_google_client(handler),
         ):
-            result = await client.embed(["hello"])
+            result = await client.embed(["hello", "world"])
 
-        assert result == [[0.1, 0.2, 0.3]]
+        assert result == [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
         assert captured["headers"]["x-goog-api-key"] == "test-key"
-        assert "gemini-embedding-2:embedContent" in captured["url"]
+        assert "gemini-embedding-2:batchEmbedContents" in captured["url"]
+        assert b'"requests"' in captured["body"]
         assert b'"models/gemini-embedding-2"' in captured["body"]
 
     @pytest.mark.asyncio
@@ -77,7 +79,7 @@ class TestGoogleEmbed:
             calls["n"] += 1
             if calls["n"] < 2:
                 return httpx.Response(429)
-            return httpx.Response(200, json={"embedding": {"values": [1.0, 0.0]}})
+            return httpx.Response(200, json={"embeddings": [{"values": [1.0, 0.0]}]})
 
         client = EmbeddingClient(provider="google", google_api_key="test-key", dim=2)
         with patch(
