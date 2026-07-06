@@ -1202,6 +1202,18 @@ async def _plugin_verification_path(
     if not isinstance(output, dict):
         output = {"raw": output}
 
+    # DOM2 honesty: stamp synthetic-data provenance onto the evidence so the
+    # verdict/paper pipeline can label a finding backed by a seed-generated
+    # (illustrative) dataset — never presenting it as a real-world result. The
+    # adapters record ``synthetic: True`` in their cache meta; the plugin surfaces
+    # that via ``uses_synthetic_data()``. Real-data domains report False and this
+    # field is omitted.
+    try:
+        if domain_plugin.uses_synthetic_data():
+            output["data_provenance"] = "synthetic"
+    except Exception:  # noqa: BLE001 — provenance labelling must never break a run
+        pass
+
     await emitter.emit(
         session_id=session_id,
         event_type=EventType.TOOL_RESULT,

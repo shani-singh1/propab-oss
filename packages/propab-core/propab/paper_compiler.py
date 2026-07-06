@@ -165,26 +165,45 @@ def parse_evidence(evidence_summary: str | None) -> dict[str, Any]:
         "verified_true_steps": None,
         "verified_false_steps": None,
         "claim_type": None,
+        "data_provenance": None,
     }
+
+    def _absorb(ev: dict[str, Any]) -> None:
+        for k in ("p_value", "effect_size", "n_metric_steps", "metric_value"):
+            if isinstance(ev.get(k), (int, float)):
+                out[k] = ev[k]
+        for k in ("verified_true_steps", "verified_false_steps"):
+            if isinstance(ev.get(k), int):
+                out[k] = ev[k]
+        if ev.get("claim_type"):
+            out["claim_type"] = str(ev["claim_type"])
+        # DOM2: carry synthetic-data provenance so the paper can label the finding.
+        if ev.get("data_provenance"):
+            out["data_provenance"] = str(ev["data_provenance"])
+        ci = ev.get("confidence_interval")
+        if isinstance(ci, list) and len(ci) >= 2 and all(isinstance(x, (int, float)) for x in ci[:2]):
+            out["confidence_interval"] = [float(ci[0]), float(ci[1])]
+
     raw = (evidence_summary or "").strip()
     if not raw:
         return out
     m = re.search(r"evidence=(\{[\s\S]*?\})\s*;", raw)
     if m:
         try:
-            ev = json.loads(m.group(1))
-            for k in ("p_value", "effect_size", "n_metric_steps", "metric_value"):
-                if isinstance(ev.get(k), (int, float)):
-                    out[k] = ev[k]
-            for k in ("verified_true_steps", "verified_false_steps"):
-                if isinstance(ev.get(k), int):
-                    out[k] = ev[k]
-            if ev.get("claim_type"):
-                out["claim_type"] = str(ev["claim_type"])
-            ci = ev.get("confidence_interval")
-            if isinstance(ci, list) and len(ci) >= 2 and all(isinstance(x, (int, float)) for x in ci[:2]):
-                out["confidence_interval"] = [float(ci[0]), float(ci[1])]
+            _absorb(json.loads(m.group(1)))
             return out
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    # The plugin verification path (genomics / graph_invariants / enzyme_kinetics)
+    # stores ``evidence_summary`` as a bare ``json.dumps(output)`` with no ``evidence=``
+    # prefix. Parse that top-level object too so its fields (including
+    # ``data_provenance``) reach the paper.
+    if raw.startswith("{"):
+        try:
+            obj = json.loads(raw)
+            if isinstance(obj, dict):
+                _absorb(obj)
+                return out
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
     m2 = re.search(r"n_metric_steps\s*=\s*(\d+)", raw)
@@ -302,6 +321,8 @@ def _enrich_finding_row(row: dict[str, Any], ev: dict[str, Any], verdict: str) -
         "primary_theme": primary,
         "secondary_themes": secondary,
         "node_role": "DISCOVERY",
+        # DOM2: "synthetic" when the finding is backed by a seed-generated dataset.
+        "data_provenance": ev.get("data_provenance"),
         "top_artifact": ev.get("top_artifact"),
         "top_artifact_survived": ev.get("top_artifact_survived"),
         "second_artifact_check": ev.get("second_artifact_check"),
@@ -486,7 +507,26 @@ async def compile_session_methods_latex(session_factory: async_sessionmaker, ses
         "trace and are available for independent inspection and replication."
     )
 
-    body = "\n\n".join([protocol, instruments, stats_method, verification_protocol, reproducibility])
+    sections = [protocol, instruments, stats_method, verification_protocol]
+
+    # DOM2: if any reported finding rests on a synthetic (seed-generated) dataset,
+    # the Methods section must disclose it as a limitation. This is the honest
+    # counterpart to labelling the finding in the results table and narrative.
+    from propab.paper_narrative import _any_synthetic
+
+    if _any_synthetic(findings):
+        sections.append(
+            "\\paragraph{Data provenance and limitations.} One or more reported findings were computed on a "
+            "\\emph{synthetic dataset (illustrative)}: a locally seed-generated frame produced by the domain "
+            "adapter, not the real public dataset whose name it borrows. Such findings demonstrate the pipeline "
+            "end-to-end but are illustrative only -- any relationship they exhibit may be a property of the data "
+            "generator rather than of the underlying science, and they must not be interpreted as real-world "
+            "results. Each such finding is marked \\emph{synthetic dataset (illustrative)} in the results table "
+            "and narrative."
+        )
+
+    sections.append(reproducibility)
+    body = "\n\n".join(sections)
     combined = f"\\section{{Methods}}\n{body}\n"
     return {"combined_latex": combined, "per_hypothesis": {}}
 
@@ -516,6 +556,10 @@ def _finding_sentence(f: dict[str, Any]) -> str:
     stats = f.get("stats_text") or ""
     sent = _latex_escape(claim[:400])
     meta: list[str] = []
+    # DOM2: a finding backed by a seed-generated dataset is labelled synthetic here,
+    # so the Results prose never presents it as a real-world result.
+    if str((f.get("stats") or {}).get("data_provenance") or f.get("data_provenance") or "").lower() == "synthetic":
+        meta.append("synthetic dataset (illustrative)")
     if f.get("claim_type"):
         meta.append(f"claim type: {f['claim_type']}")
     if f.get("replication_level"):

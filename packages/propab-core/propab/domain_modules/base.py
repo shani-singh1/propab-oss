@@ -328,6 +328,26 @@ class DomainPlugin(ABC):
         _ = confirmed_nodes
         return []
 
+    # --- Data provenance ----------------------------------------------------
+    def uses_synthetic_data(self) -> bool:
+        """
+        True if this domain's dataset is SYNTHETIC (seed-generated), rather than a
+        real public dataset.
+
+        DOM2 honesty fix: three demo domains (genomics, graph_invariants,
+        enzyme_kinetics) run entirely on locally seed-generated frames that present
+        under real-dataset names ("GTEx v8 subset", "SNAP subset", "BRENDA
+        subset"). The adapters already record ``synthetic: True`` in their cache
+        meta, but that flag was never surfaced at verdict/paper time, so findings
+        backed by synthetic data read as real-world results. This accessor is the
+        single place the pipeline consults to decide whether a finding must be
+        labelled "synthetic dataset (illustrative)".
+
+        Default: ``False`` — real-data domains (materials, mandrake) inherit this
+        and report False. A synthetic-data domain overrides this to return True.
+        """
+        return False
+
     # --- Link to the artifact-gate profile ---------------------------------
     def domain_profile(self):  # -> DomainProfile | None
         """The :class:`~propab.domain_profiles.base.DomainProfile` for this domain, if any."""

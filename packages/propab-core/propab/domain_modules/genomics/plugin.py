@@ -53,6 +53,11 @@ class GenomicsPlugin(DomainPlugin):
     def available_features(self) -> list[str]:
         return list(KNOWN_FEATURES)
 
+    def uses_synthetic_data(self) -> bool:
+        # The GTEx-style frame is seed-generated (adapter meta ``synthetic: True``),
+        # not the real GTEx v8 release. Findings must be labelled synthetic (DOM2).
+        return True
+
     def confirmation_criteria(self) -> dict[str, Any]:
         return {
             "min_metric_steps_for_confirm": 2,
