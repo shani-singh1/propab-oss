@@ -730,17 +730,31 @@ class HypothesisTree:
         node.frontier_score = round(score, 4)
         return score
 
+    @staticmethod
+    def _field(node: Any, name: str) -> Any:
+        """Read a node field whether the node is a HypothesisNode or a raw dict.
+        A convergence health metric must never raise into the caller (some paths,
+        and tests, carry dict-shaped nodes)."""
+        if isinstance(node, dict):
+            return node.get(name)
+        return getattr(node, name, None)
+
     def _confirmed_ancestry_depth(self, node: HypothesisNode) -> int:
         """Number of CONFIRMED ancestors up the parent chain — how deep a real
         finding has already been narrowed. Used to reward continued convergence."""
         depth = 0
-        cur = self.nodes.get(node.parent_id) if node.parent_id else None
+        parent_id = self._field(node, "parent_id")
+        cur = self.nodes.get(parent_id) if parent_id else None
         seen: set[str] = set()
-        while cur is not None and cur.id not in seen:
-            seen.add(cur.id)
-            if cur.verdict == "confirmed":
+        while cur is not None:
+            cid = self._field(cur, "id")
+            if cid in seen:
+                break
+            seen.add(cid)
+            if self._field(cur, "verdict") == "confirmed":
                 depth += 1
-            cur = self.nodes.get(cur.parent_id) if cur.parent_id else None
+            pid = self._field(cur, "parent_id")
+            cur = self.nodes.get(pid) if pid else None
         return depth
 
     def confirmed_lineage_depth(self) -> float:
@@ -748,7 +762,7 @@ class HypothesisTree:
         nodes. Rises when the search deepens real findings into narrower ones;
         stays ~0 when it only adds shallow roots (the failure this fixes). 0 when
         there are no confirmed nodes yet."""
-        confirmed = [n for n in self.nodes.values() if n.verdict == "confirmed"]
+        confirmed = [n for n in self.nodes.values() if self._field(n, "verdict") == "confirmed"]
         if not confirmed:
             return 0.0
         return sum(self._confirmed_ancestry_depth(n) + 1 for n in confirmed) / len(confirmed)

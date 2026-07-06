@@ -555,6 +555,24 @@ def apply_synthesis_to_frontier(
         tree.add_to_frontier(filtered)
     metrics["n_added"] = len(filtered)
     metrics["critical_experiment"] = parsed.get("critical_experiment")
+
+    # Lineage-derivation quality (§3.2): of the candidates that became children,
+    # how many named an explicit parent (the LLM genuinely derived the lineage)
+    # vs. fell back to similarity-inference. A low rate means the tree has
+    # structural depth but arbitrary parent→child edges — depth without real
+    # refinement. Surfaced so a campaign whose lineage is mostly inferred is
+    # visible, not silent.
+    child_modes = [e.get("_parent_mode") for e in child_dicts]
+    n_explicit = sum(1 for m in child_modes if m == "explicit")
+    n_inferred = sum(1 for m in child_modes if m == "inferred")
+    metrics["n_lineage_explicit"] = n_explicit
+    metrics["n_lineage_inferred"] = n_inferred
+    metrics["lineage_derivation_rate"] = (
+        round(n_explicit / (n_explicit + n_inferred), 3) if (n_explicit + n_inferred) else None
+    )
+    # Convergence health (§3.3): mean confirmed-ancestry depth after this round.
+    # Rises when the search deepens real findings; flat ⇒ shallow-breadth failure.
+    metrics["confirmed_lineage_depth"] = round(tree.confirmed_lineage_depth(), 3)
     return filtered, metrics
 
 
@@ -702,6 +720,10 @@ async def run_campaign_synthesis_pass(
                 "n_candidates_raw": metrics.get("n_candidates_raw", 0),
                 "n_added_as_children": metrics.get("n_added_as_children", 0),
                 "n_added_as_roots": metrics.get("n_added_as_roots", 0),
+                "n_lineage_explicit": metrics.get("n_lineage_explicit", 0),
+                "n_lineage_inferred": metrics.get("n_lineage_inferred", 0),
+                "lineage_derivation_rate": metrics.get("lineage_derivation_rate"),
+                "confirmed_lineage_depth": metrics.get("confirmed_lineage_depth", 0.0),
                 "binding_rejected_count": metrics.get("binding_rejected_count", 0),
                 "binding_accepted_count": metrics.get("binding_accepted_count", 0),
                 "falsifiability_rejected_count": metrics.get("falsifiability_rejected_count", 0),
