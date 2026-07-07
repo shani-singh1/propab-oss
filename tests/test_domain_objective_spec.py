@@ -15,13 +15,19 @@ from propab.domain_modules.registry import get_domain_plugin, resolve_domain_plu
 
 
 def test_base_default_objective_spec_is_none():
-    # A domain with no numeric extremal objective returns None (falls back to request
-    # criteria). graph_invariants does not override -> base default None.
-    # (Biology domains — genomics/enzyme_kinetics/network_diffusion/mandrake — now
-    # DO override with is_ml=False; see tests/test_biology_objective_spec.py.)
-    plugin = get_domain_plugin("graph_invariants")
-    assert plugin is not None
-    assert plugin.objective_spec() is None
+    # The BASE default is None (a domain with no numeric extremal objective falls
+    # back to request criteria). Asserted against a bare subclass rather than a real
+    # domain, since most verification domains now override it (math with is_ml=False;
+    # biology + graph_invariants with is_ml=False — see their dedicated tests).
+    from propab.domain_modules.base import DomainPlugin
+
+    class _Bare(DomainPlugin):
+        domain_id = "bare_objective_test"
+
+        def available_features(self) -> list[str]:
+            return []
+
+    assert _Bare().objective_spec() is None
 
 
 def test_math_objective_spec_is_non_ml_deterministic():
