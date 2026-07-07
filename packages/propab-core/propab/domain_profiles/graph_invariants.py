@@ -63,13 +63,16 @@ def _graph_artifact_models(ctx: EvidenceContext) -> list[ArtifactModel]:
 
 GRAPH_INVARIANTS_PROFILE = DomainProfile(
     profile_id="graph_invariants",
-    display_name="Graph invariants (SNAP network families)",
+    display_name="Graph invariants (real SNAP networks)",
     group_column="network_category",
-    group_label="SNAP network category or graph family",
+    group_label="Real SNAP network category (collaboration / communication)",
     evidence_method="cross_network_lofo",
     permutation_null="hold out network category; shuffle category labels for null",
     min_samples_per_group=30,
-    min_groups=4,
+    # Two REAL network families on disk (ca-GrQc collaboration, email-Eu-core
+    # communication); the LOFO trains on one and holds out the other. min_groups=2
+    # reflects the real data available (was 4 for the retired ER/BA/WS/lattice toys).
+    min_groups=2,
     min_metric_steps_for_confirm=1,
     question_markers=(
         "graph invariant",
