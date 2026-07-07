@@ -664,6 +664,23 @@ http://literature:8020` on orchestrator+worker. Verified: 7 client tests + full 
 Math (Sidon) is a viable target — the service has arxiv/oeis/zbmath connectors and the
 math domain declares a rich Sidon profile (Erdős-Turán, Croot-Lev-Pach, OEIS A005282).
 
+**LIT-PERF · HIGH · OPEN · VERIFIED (live test) — the literature service's cold
+`/prior` is too slow to feed a campaign in-budget.** I ran the service locally
+(`uvicorn`, `.env` keys): `/health` = ok, math sources healthy (arxiv/semantic_scholar/
+zbmath/mathoverflow up; oeis down). But a cold Sidon `/prior` at `depth="standard"`
+(60s budget) **timed out → returned EMPTY** (`papers_indexed=0`, `sources_consulted=[]`);
+`depth="deep"` (300s) **blocked past even the client's 330s timeout**. Root cause
+(`retriever/query.py`): for every doc from every source, `_fetch_and_process` downloads
+the FULL-TEXT PDF (`fetch_full_text`) + LLM-extracts claims (`process_document`), and
+`deep`/`exhaustive` add a semantic-scholar citation crawl. Thorough (that's the LitQA2
+0.76) but far too slow cold, and `asyncio.wait_for` doesn't cleanly cancel the in-flight
+PDF/LLM work (blocks past the deadline). **Impact:** with LIT-WIRE, a campaign would hit
+the timeout and fall back to the OLD embedded prior path — so the REAL literature layer
+is NOT actually exercised. **This is the reason a campaign is NOT launched yet.**
+**Fix (assigned):** a fast ABSTRACT-ONLY path for `standard` depth (skip PDF fetch;
+extract from abstracts across a few top sources) that returns a real prior in <60s, and
+have the timeout return PARTIAL results (what was gathered) instead of empty.
+
 **Readiness checklist:** ✅ 15 verified fixes across 3 waves + LIT-WIRE ✅ full suite 739
 ✅ literature wired + in compose ⏳ re-run 5 benchmarks ⏳ stack up + /health (incl. real
 Sidon prior) ⏳ low-priority backlog (CFG4/6, TOOL6/7, DOM5, flaky graph-preflight) ⏳
