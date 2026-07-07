@@ -2119,44 +2119,12 @@ async def run_campaign_loop(
                             lifetime_context=lifetime_seed_context,
                         )
                         from propab.numerical_seeds import classify_hypothesis_bucket
-                        from propab.synthesis_diversity import (
-                            bootstrap_forced_problem_type,
-                            resolve_forced_problem_type,
-                            tree_problem_counts_from_nodes,
-                        )
-                        from propab.campaign_synthesis import apply_diversity_fallback_seeds
 
-                        if not added:
-                            node_dicts = {
-                                nid: (n.to_dict() if hasattr(n, "to_dict") else n)
-                                for nid, n in campaign.hypothesis_tree.nodes.items()
-                            }
-                            tree_counts = tree_problem_counts_from_nodes(node_dicts)
-                            forced = resolve_forced_problem_type(
-                                synthesis_history_buckets,
-                                [b.statement for b in campaign.belief_state.active_beliefs],
-                                streak=3,
-                                tree_problem_counts=tree_counts,
-                            )
-                            if forced is None:
-                                forced = bootstrap_forced_problem_type(campaign.question)
-                            if forced:
-                                added = apply_diversity_fallback_seeds(
-                                    campaign.hypothesis_tree,
-                                    forced_type=forced,
-                                    generation=generation,
-                                    question=campaign.question,
-                                    prior_snippets=prior_snippets,
-                                    belief_state=campaign.belief_state,
-                                )
-                                if added:
-                                    logger.info(
-                                        "[campaign %s] Diversity fallback injected %s %s seed(s).",
-                                        campaign.id,
-                                        len(added),
-                                        forced,
-                                    )
-
+                        # NOTE: no deterministic diversity-fallback seed injection.
+                        # If synthesis produced no usable candidate, Propab does NOT
+                        # fabricate a templated hypothesis to keep the campaign alive
+                        # — it lets the round come back empty and stops honestly
+                        # (frontier-exhausted, handled below).
                         for node in added:
                             synthesis_history_buckets.append(
                                 classify_hypothesis_bucket(node.text, node.test_methodology or ""),

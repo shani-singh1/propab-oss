@@ -153,15 +153,6 @@ def test_history_streak_wins_over_sidon_beliefs() -> None:
     assert forced == "sidon"
 
 
-def test_fallback_synthesis_seeds_sidon() -> None:
-    from propab.synthesis_diversity import fallback_synthesis_seeds
-
-    seeds = fallback_synthesis_seeds("sidon", generation=1)
-    assert len(seeds) == 1
-    assert "Sidon" in seeds[0]["text"]
-    assert "decreasing" in seeds[0]["text"].lower()
-
-
 def test_forced_problem_type_after_sidon_streak() -> None:
     history = [{"problem_type": "sidon"} for _ in range(5)]
     forced = forced_problem_type(history, streak=5)
@@ -191,7 +182,14 @@ def test_resolve_forced_prefers_tree_monoculture() -> None:
     assert forced == "ap_free"
 
 
-def test_filter_seed_dicts_rejects_cap_set_when_forcing_sidon() -> None:
+def test_filter_seed_dicts_no_template_fabrication_when_none_match() -> None:
+    """When no LLM seed matches the forced problem type, the diversity filter
+    must NOT fabricate a deterministic templated seed (Propab reasons, never
+    expands templates). It returns the real LLM seeds unchanged; the diversity
+    force still applies in later synthesis rounds.
+
+    (Previously this returned a hardcoded Sidon template seed — that machinery
+    was deleted in the generation overhaul.)"""
     from propab.synthesis_diversity import filter_seed_dicts_for_diversity
 
     caps = [{
@@ -205,5 +203,24 @@ def test_filter_seed_dicts_rejects_cap_set_when_forcing_sidon() -> None:
         active_belief_statements=beliefs,
         generation=1,
     )
+    # No fabricated Sidon template — the original seed is returned unchanged.
+    assert out == caps
+
+
+def test_filter_seed_dicts_keeps_matching_forced_type() -> None:
+    """When a seed DOES match the forced type, the filter keeps only those."""
+    from propab.synthesis_diversity import filter_seed_dicts_for_diversity
+
+    seeds = [
+        {"text": "Cap-set CLP ratio in F_3^8", "test_methodology": "cap-set CLP table lookup"},
+        {"text": "Greedy Sidon density F(n)/sqrt(n) decreasing", "test_methodology": "greedy Sidon sweep"},
+    ]
+    beliefs = ["Cap-set CLP ratios decrease monotonically in F_3^n"]
+    out = filter_seed_dicts_for_diversity(
+        seeds,
+        tree_nodes={},
+        active_belief_statements=beliefs,
+        generation=1,
+    )
     assert len(out) == 1
-    assert "Sidon" in out[0]["text"] or "sidon" in out[0]["text"].lower()
+    assert "sidon" in out[0]["text"].lower()
