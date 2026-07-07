@@ -112,3 +112,67 @@ def test_register_plugin_override():
 def test_preflight_result_to_dict():
     r = PreflightResult(False, "nope", {"n": 1})
     assert r.to_dict() == {"passed": False, "reason": "nope", "details": {"n": 1}}
+
+
+# --------------------------------------------------------------------------
+# literature_profile completeness — every science domain must supply real
+# tabulation + open-problem grounding so novelty_check can reject rediscovery
+# and the /prior gap path has a real frontier to target. (Empty sources are
+# what made novelty_check return "uncertain" for every non-combinatorics
+# domain and left open_gaps unfillable.)
+# --------------------------------------------------------------------------
+
+_GROUNDED_DOMAINS = [
+    "materials",
+    "enzyme_kinetics",
+    "genomics",
+    "mandrake",
+    "math_combinatorics",
+]
+
+# Substrings that betray a placeholder rather than a real, citeable source.
+_PLACEHOLDER_MARKERS = ("todo", "tbd", "placeholder", "fixme", "xxx", "example.com")
+
+
+@pytest.mark.parametrize("domain_id", _GROUNDED_DOMAINS)
+def test_literature_profile_has_real_tabulation_and_open_problem_sources(domain_id):
+    plugin = get_domain_plugin(domain_id)
+    assert plugin is not None, f"{domain_id} plugin not registered"
+    profile = plugin.literature_profile()
+
+    tab = profile.get("tabulation_sources") or []
+    ops = profile.get("open_problem_sources") or []
+    crit = profile.get("novelty_criteria") or ""
+
+    assert tab, f"{domain_id}: tabulation_sources must be non-empty (rediscovery rejection)"
+    assert ops, f"{domain_id}: open_problem_sources must be non-empty (frontier gaps)"
+    assert isinstance(crit, str) and len(crit) > 40, f"{domain_id}: novelty_criteria too thin"
+
+    # Each tabulation source carries a name and at least one concrete
+    # identifier/anchor (not an empty stub like the old {"name": ..., "identifiers": []}).
+    for t in tab:
+        assert t.get("name"), f"{domain_id}: tabulation source missing name"
+        has_ids = bool(t.get("identifiers"))
+        # OEIS-style id lists, or numeric best-known anchors, both count as real content.
+        has_anchor = any(
+            k not in ("name",) and v not in (None, "", [], {})
+            for k, v in t.items()
+        )
+        assert has_ids or has_anchor, f"{domain_id}: tabulation source {t.get('name')!r} has no identifiers/anchors"
+
+    # No placeholder text anywhere in the grounding fields.
+    blob = repr(tab).lower() + repr(ops).lower() + crit.lower()
+    for marker in _PLACEHOLDER_MARKERS:
+        assert marker not in blob, f"{domain_id}: placeholder {marker!r} found in literature_profile grounding"
+
+
+@pytest.mark.parametrize("domain_id", ["materials", "enzyme_kinetics", "genomics", "mandrake"])
+def test_open_problem_sources_have_urls(domain_id):
+    # gap_mapper / prior overlay scrapes open_problem_sources[].url — each entry
+    # must carry a usable http(s) URL for that path to yield anything.
+    plugin = get_domain_plugin(domain_id)
+    ops = plugin.literature_profile().get("open_problem_sources") or []
+    assert ops
+    assert all(str(o.get("url", "")).startswith("http") for o in ops), (
+        f"{domain_id}: every open_problem_sources entry needs an http(s) url"
+    )

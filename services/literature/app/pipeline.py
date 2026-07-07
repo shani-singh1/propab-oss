@@ -29,7 +29,11 @@ from services.literature.app.models import (
 )
 from services.literature.app.retriever.gap_mapper import map_gaps
 from services.literature.app.retriever.novelty_check import check_novelty as _check_novelty
-from services.literature.app.retriever.query import process_document, run_query_pipeline
+from services.literature.app.retriever.query import (
+    augment_open_gaps_with_search,
+    process_document,
+    run_query_pipeline,
+)
 from services.literature.app.sources.arxiv import ArxivSource, normalize_arxiv_id
 from services.literature.app.sources.biorxiv import BiorxivSource
 from services.literature.app.sources.crossref import CrossrefSource
@@ -147,7 +151,7 @@ class LiteraturePipeline:
     ) -> PriorResponse:
         timeout = self.settings.depth_timeout_sec.get(depth, 60)
         try:
-            return await asyncio.wait_for(
+            prior = await asyncio.wait_for(
                 run_query_pipeline(
                     self.ctx,
                     research_question=research_question,
@@ -168,6 +172,25 @@ class LiteraturePipeline:
                 sources_consulted=[],
                 papers_indexed=0,
             )
+
+        # Frontier-gap augmentation: a bounded "<term> open problem" live search
+        # runs *after* the core prior has already been built, under its own
+        # separate deadline (never the core-prior deadline). This is what makes
+        # open_gaps non-empty for real questions whose fetched abstracts are all
+        # proven-only. If it overruns or finds nothing, the core prior is
+        # returned unchanged — the augmentation is strictly additive.
+        try:
+            extra = await augment_open_gaps_with_search(
+                self.ctx,
+                profile,
+                existing_gaps=prior.open_gaps,
+                timeout=self.settings.gap_augment_timeout_sec,
+            )
+            if extra:
+                prior.open_gaps = list(prior.open_gaps) + extra
+        except Exception:
+            pass
+        return prior
 
     async def check_novelty(self, *, finding: Finding, profile: dict[str, Any]) -> NoveltyResponse:
         return await _check_novelty(self.ctx, finding, profile)
