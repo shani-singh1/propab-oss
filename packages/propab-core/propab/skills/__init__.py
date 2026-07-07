@@ -160,6 +160,86 @@ def skills_prompt_block(domain_id: str | None = None, phase: str = "hypothesis")
     return render_skills_block(load_skills(domain_id, phase))
 
 
+# --------------------------------------------------------------------------------
+# Agentic catalog + on-demand read.
+#
+# Rather than auto-inject skill bodies by domain/phase (context bloat + a hardcoded
+# rule), the agent is shown a compact CATALOG (names + descriptions) of everything
+# available and READS only the skills it decides it needs. It infers its own domain
+# and picks the core methodology + domain technique it wants — nothing is pre-selected
+# from the question. ``skills_catalog``/``render_catalog`` = awareness; ``read_skills``
+# = the on-demand pull.
+# --------------------------------------------------------------------------------
+
+def skills_catalog(phase: str | None = None) -> list[Skill]:
+    """Every available skill (core + ALL domains), optionally narrowed to one phase.
+
+    Does NOT pre-filter by domain or question — the agent self-selects from the whole
+    catalog so it can infer its own domain and pull cross-cutting skills. Ordered
+    core-first, then by domain, priority, name.
+    """
+    out: list[Skill] = []
+    if _CORE_DIR.is_dir():
+        for p in sorted(_CORE_DIR.glob("*.skill.md")):
+            s = _load_skill_file(p, "core")
+            if s and (phase is None or s.applies_to_phase(phase)):
+                out.append(s)
+    if _DOMAINS_DIR.is_dir():
+        for dom in sorted(d for d in _DOMAINS_DIR.iterdir() if d.is_dir()):
+            for p in sorted(dom.glob("*.skill.md")):
+                s = _load_skill_file(p, dom.name)
+                if s and (phase is None or s.applies_to_phase(phase)):
+                    out.append(s)
+    out.sort(key=lambda s: (0 if s.scope == "core" else 1, s.scope, s.priority, s.name))
+    return out
+
+
+def render_catalog(entries: list[Skill] | None = None, phase: str | None = None) -> str:
+    """Compact, prompt-ready catalog — one line per skill (name, tag, phase, description).
+
+    This is the AWARENESS layer the agent sees; full bodies are pulled on demand via
+    ``read_skills``. Empty string when there are no skills.
+    """
+    if entries is None:
+        entries = skills_catalog(phase)
+    if not entries:
+        return ""
+    lines = [
+        "AVAILABLE RESEARCH SKILLS — you decide which to read. Infer your own domain, "
+        "then request (by exact name) the core methodology + domain-technique skills you "
+        "need; do not request skills you will not use.",
+    ]
+    for s in entries:
+        tag = "core" if s.scope == "core" else f"domain:{s.scope}"
+        lines.append(f"- {s.name} [{tag}, phase:{s.phase}] — {s.description}")
+    return "\n".join(lines)
+
+
+def read_skills(names: list[str]) -> str:
+    """On-demand READ: full rendered bodies of the skills the agent named (any scope).
+
+    This is the "demand a read" step after the agent has seen the catalog. Unknown or
+    malformed names are silently skipped; returns "" if nothing matches.
+    """
+    wanted = {str(n).strip().lower() for n in (names or []) if str(n).strip()}
+    if not wanted:
+        return ""
+    found: list[Skill] = []
+    seen: set[str] = set()
+    for s in skills_catalog():
+        key = s.name.lower()
+        if key in wanted and key not in seen:
+            found.append(s)
+            seen.add(key)
+    found.sort(key=lambda s: (0 if s.scope == "core" else 1, s.priority, s.name))
+    return render_skills_block(found)
+
+
+def catalog_skill_names(phase: str | None = None) -> set[str]:
+    """The set of valid skill names the agent may request (for parsing/validation)."""
+    return {s.name for s in skills_catalog(phase)}
+
+
 def available_skill_index() -> dict[str, list[str]]:
     """Diagnostic: {scope -> [skill names]} across all phases (for tests / tooling)."""
     index: dict[str, list[str]] = {"core": []}

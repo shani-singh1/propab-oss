@@ -60,18 +60,71 @@ def test_render_and_prompt_block_nonempty():
     assert render_skills_block([]) == ""
 
 
-def test_prompt_injects_skills():
-    # The generation prompt must actually carry the methodology skills.
+def test_prompt_injects_only_agent_selected_skills():
+    # Generation no longer auto-loads by domain: a skills_block the AGENT selected is
+    # injected; without one, no methodology is auto-injected (agentic on-demand model).
     from services.orchestrator.hypotheses import _build_hypothesis_prompt
     from services.orchestrator.intake import ParsedQuestion
     from services.orchestrator.schemas import Prior
+    from propab.skills import read_skills
 
     parsed = ParsedQuestion(text="improve the cap-set growth exponent",
                             domain="math_combinatorics", sub_questions=[])
     prior = Prior(established_facts=[], contested_claims=[], open_gaps=[], dead_ends=[], key_papers=[])
-    prompt = _build_hypothesis_prompt(parsed, prior, 6)
+
+    block = read_skills(["falsifiable-hypothesis-design"])
+    prompt = _build_hypothesis_prompt(parsed, prior, 6, skills_block=block)
     assert "RESEARCH METHODOLOGY" in prompt
     assert "falsifiable-hypothesis-design" in prompt
+
+    # No agent selection -> no auto-injected methodology (not hardcoded by domain).
+    prompt_none = _build_hypothesis_prompt(parsed, prior, 6)
+    assert "RESEARCH METHODOLOGY" not in prompt_none
+
+
+# ---- Agentic catalog + on-demand read -------------------------------------------
+
+def test_catalog_lists_names_and_descriptions_not_bodies():
+    from propab.skills import render_catalog
+
+    cat = render_catalog()
+    assert "AVAILABLE RESEARCH SKILLS" in cat
+    assert "falsifiable-hypothesis-design" in cat          # names present
+    assert "cap-set-and-extremal-constructions" in cat     # domain names present too
+    # The catalog is the AWARENESS layer — compact, NOT the full bodies (no bloat).
+    assert "Anchor on an open gap" not in cat              # body text of a core skill
+    assert "Product / tensor constructions" not in cat     # body text of a domain skill
+
+
+def test_read_skills_returns_bodies_on_demand():
+    from propab.skills import read_skills
+
+    block = read_skills(["falsifiable-hypothesis-design", "cap-set-and-extremal-constructions"])
+    assert "RESEARCH METHODOLOGY" in block
+    assert "falsifiable-hypothesis-design" in block and "cap-set-and-extremal-constructions" in block
+    # The full body IS present when read on demand.
+    assert "Anchor on an open gap" in block
+
+
+def test_read_skills_ignores_unknown_and_empty():
+    from propab.skills import read_skills
+
+    assert read_skills(["does-not-exist-skill"]) == ""
+    assert read_skills([]) == ""
+    # a mix returns only the valid one's body
+    block = read_skills(["falsifiable-hypothesis-design", "nonsense"])
+    assert "falsifiable-hypothesis-design" in block
+
+
+def test_catalog_covers_core_and_all_domains():
+    from propab.skills import catalog_skill_names, skills_catalog
+
+    names = catalog_skill_names()
+    assert "falsifiable-hypothesis-design" in names
+    assert "divergent-hypothesis-ideation" in names
+    assert "critical-evaluation-of-claims-and-results" in names
+    scopes = {s.scope for s in skills_catalog()}
+    assert "core" in scopes and "math_combinatorics" in scopes
 
 
 def test_available_index_has_core_and_a_domain():

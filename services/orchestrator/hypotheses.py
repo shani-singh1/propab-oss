@@ -145,6 +145,7 @@ def _build_hypothesis_prompt(
     prior_round_findings: str = "",
     *,
     novelty_nudge: bool = False,
+    skills_block: str = "",
 ) -> str:
     prior_block = (
         f"\nResults from previous research rounds:\n{prior_round_findings}\n"
@@ -174,14 +175,9 @@ def _build_hypothesis_prompt(
             "question back, and do not hedge into unfalsifiable generalities.\n"
         )
 
-    # Research-skills injection (DOMAIN-GENERAL loader; content split core vs domain).
-    # Core methodology skills frame every domain; the question's domain adds its own
-    # technique skills. A missing skills library simply yields an empty block.
-    try:
-        from propab.skills import skills_prompt_block
-        skills_block = skills_prompt_block(getattr(parsed, "domain", None), phase="hypothesis")
-    except Exception:  # noqa: BLE001 — skills are additive; never break generation
-        skills_block = ""
+    # Research-skills injection: the skills the AGENT selected from the catalog (see
+    # _select_and_read_skills) are passed in and injected here — no auto-load by
+    # domain/question. The agent inferred its domain and pulled what it needs.
     skills_section = f"\n{skills_block}\n" if skills_block else ""
 
     return f"""
@@ -261,6 +257,80 @@ def _is_ml_template_hypothesis(text: str) -> bool:
     return False
 
 
+async def _select_and_read_skills(
+    parsed: ParsedQuestion,
+    prior: Prior,
+    llm: LLMClient,
+    session_id: str,
+    emitter: EventEmitter,
+) -> str:
+    """Agentic skill selection (awareness -> on-demand read).
+
+    Show the agent the full skill CATALOG (names + descriptions only — cheap), let IT
+    decide which skills it needs after inferring its own domain, and read back ONLY the
+    bodies it picked. No auto-load by domain/question, no injecting every skill body.
+    Falls back to the core hypothesis-phase skills if selection fails, so generation
+    always has methodology to work with.
+    """
+    try:
+        from propab.skills import (
+            catalog_skill_names,
+            read_skills,
+            render_catalog,
+            render_skills_block,
+            skills_catalog,
+        )
+    except Exception:  # noqa: BLE001 — skills are additive; never break generation
+        return ""
+
+    catalog = render_catalog()
+    if not catalog:
+        return ""
+
+    def _core_fallback() -> str:
+        return render_skills_block([s for s in skills_catalog("hypothesis") if s.scope == "core"])
+
+    sel_prompt = (
+        "You are a research agent about to generate hypotheses. First choose which "
+        "methodology skills you need. Infer the domain yourself from the question — do "
+        "NOT assume one is pre-selected.\n\n"
+        f"Research question: {parsed.text}\n\n"
+        f"{catalog}\n\n"
+        "Return ONLY a JSON array of the exact skill names you will read (up to 8), e.g. "
+        '["falsifiable-hypothesis-design", "divergent-hypothesis-ideation"]. Include the '
+        "core methodology you need plus, if a domain clearly applies, that domain's "
+        "technique skills. Do not invent names."
+    )
+    try:
+        raw = await llm.call(prompt=sel_prompt, purpose="skill_selection", session_id=session_id)
+    except Exception:  # noqa: BLE001 — best-effort; fall back to core methodology
+        return _core_fallback()
+
+    names: list[str] = []
+    m = re.search(r"\[[\s\S]*?\]", raw or "")
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            valid = catalog_skill_names()
+            names = [str(x) for x in data if isinstance(x, str) and str(x) in valid]
+        except (json.JSONDecodeError, TypeError, ValueError):
+            names = []
+
+    block = read_skills(names) if names else ""
+    if not block:
+        block = _core_fallback()
+    try:
+        await emitter.emit(
+            session_id=session_id,
+            event_type=EventType.LLM_RESPONSE,
+            step="skills.selected",
+            payload={"selected_skills": names, "purpose": "skill_selection"},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return block
+
+
 async def generate_ranked_hypotheses(
     parsed: ParsedQuestion,
     prior: Prior,
@@ -273,7 +343,13 @@ async def generate_ranked_hypotheses(
     prior_round_findings: str = "",
     meta: dict | None = None,
 ) -> list[RankedHypothesis]:
-    prompt = _build_hypothesis_prompt(parsed, prior, max_hypotheses, prior_round_findings)
+    # Awareness -> on-demand read: the agent picks its own methodology skills from the
+    # catalog before generating (no auto-load by domain). Reused for the retry so the
+    # agent keeps the methodology it chose.
+    skills_block = await _select_and_read_skills(parsed, prior, llm, session_id, emitter)
+    prompt = _build_hypothesis_prompt(
+        parsed, prior, max_hypotheses, prior_round_findings, skills_block=skills_block
+    )
     raw = await llm.call(prompt=prompt, purpose="hypothesis_generation", session_id=session_id)
     generated = _parse_hypothesis_json(raw)
     if not generated:
@@ -281,7 +357,8 @@ async def generate_ranked_hypotheses(
         # fabrication: if the model still yields nothing usable, we return empty
         # below and the caller stops the round honestly (frontier-exhausted).
         retry_prompt = _build_hypothesis_prompt(
-            parsed, prior, max_hypotheses, prior_round_findings, novelty_nudge=True
+            parsed, prior, max_hypotheses, prior_round_findings,
+            novelty_nudge=True, skills_block=skills_block,
         )
         raw_retry = await llm.call(
             prompt=retry_prompt + "\n\nReturn ONLY a JSON array of exactly "
