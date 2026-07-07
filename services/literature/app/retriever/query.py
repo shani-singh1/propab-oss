@@ -374,6 +374,21 @@ async def _synthesize_prior(
     contradictions = await ctx.contradictions_extractor.find_contradictions(all_claims)
     gaps = await ctx.gaps_extractor.find_gaps(all_claims, all_open_problems)
 
+    # find_gaps only sees what the fetched papers themselves stated: a
+    # proven+conjectured bound pair on the same subject, or an explicit
+    # "Problem:"/conjecture marker in a paper body. Real /prior calls fetch
+    # abstract-heavy sources whose text carries neither, so gaps is routinely
+    # empty even when the domain HAS a well-known open frontier. Overlay the
+    # domain's own curated open-problem lists (declared generically in
+    # profile["open_problem_sources"]) so open_gaps reflects the real frontier.
+    # Cheap by construction: one HTTP GET per declared URL, no per-term source
+    # fan-out. The heavier live "<term> open problem" search that catches
+    # frontier questions in abstract-only corpora runs as a *separate*,
+    # independently-timeout-guarded augmentation step in pipeline.build_prior,
+    # so a slow search can never consume the core-prior deadline and blank the
+    # whole response.
+    gaps.extend(await _declared_open_problem_gaps(profile, existing_gaps=gaps))
+
     # OEIS tabulation overlay for domains that declare OEIS sequences.
     all_tables = list(all_tables)
     all_tables.extend(await _oeis_tabulations(ctx, profile))
@@ -405,6 +420,84 @@ async def _synthesize_prior(
         papers_indexed=len(docs_indexed),
         citation_verification_rate=None,
     )
+
+
+def _open_problems_to_gaps(problems: list[OpenProblem]) -> list[KnowledgeGap]:
+    """Convert OpenProblems to the KnowledgeGap shape find_gaps uses for
+    untethered open problems, so both streams are indistinguishable
+    downstream."""
+    return [
+        KnowledgeGap(
+            description=op.statement,
+            what_is_open=op.statement,
+            last_progress=op.year,
+            computationally_approachable=op.computationally_approachable,
+            approachable_angle=op.approachable_angle,
+        )
+        for op in problems
+    ]
+
+
+def _gap_statements(gaps: list[KnowledgeGap]) -> set[str]:
+    seen = {g.what_is_open for g in gaps if g.what_is_open}
+    seen |= {g.description for g in gaps if g.description}
+    return seen
+
+
+async def _declared_open_problem_gaps(
+    profile: dict[str, Any], *, existing_gaps: list[KnowledgeGap]
+) -> list[KnowledgeGap]:
+    """Cheap half of the frontier overlay: scrape each declared
+    ``open_problem_sources[].url`` once (one HTTP GET each), de-duplicated
+    against gaps already produced. Fast enough to sit inside the core prior
+    deadline. Domain-general — URLs come from the profile."""
+    from services.literature.app.retriever.gap_mapper import scrape_declared_open_problem_sources
+
+    problems = await scrape_declared_open_problem_sources(
+        profile, seen_statements=_gap_statements(existing_gaps)
+    )
+    return _open_problems_to_gaps(problems)
+
+
+async def augment_open_gaps_with_search(
+    ctx: PipelineContext,
+    profile: dict[str, Any],
+    *,
+    existing_gaps: list[KnowledgeGap],
+    timeout: float,
+) -> list[KnowledgeGap]:
+    """Heavy half of the frontier overlay, run by pipeline.build_prior *after*
+    the core prior has already succeeded, under its own deadline.
+
+    A bounded "<term> open problem" live search over the domain's primary
+    declared source surfaces the literature's own stated open questions even
+    when every fetched abstract is proven-only (the common case that left
+    open_gaps empty). Kept separate from run_query_pipeline so that if this
+    slow step overruns, the core prior (facts, tabulations, novelty bar) is
+    already returned intact — a slow frontier search degrades to "no extra
+    gaps," never to an empty prior. Domain-general: terms + primary source
+    come from the profile."""
+    from services.literature.app.retriever.gap_mapper import search_open_problems
+
+    priorities = [str(p) for p in (profile.get("source_priorities") or [])]
+    primary = [priorities[0]] if priorities else None
+    try:
+        problems = await asyncio.wait_for(
+            search_open_problems(
+                ctx,
+                profile,
+                seen_statements=_gap_statements(existing_gaps),
+                max_terms=3,
+                max_docs_per_source=3,
+                source_names=primary,
+            ),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        return []
+    except Exception:
+        return []
+    return _open_problems_to_gaps(problems)
 
 
 async def _oeis_tabulations(ctx: PipelineContext, profile: dict[str, Any]) -> list[TabulatedSequence]:

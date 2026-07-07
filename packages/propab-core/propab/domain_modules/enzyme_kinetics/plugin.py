@@ -140,8 +140,46 @@ class EnzymeKineticsPlugin(DomainPlugin):
             "classification_codes": {
                 "mesh": ["Kinetics", "Enzymes", "Catalysis", "Substrate Specificity"],
             },
-            "open_problem_sources": [],
-            "tabulation_sources": [],
+            "open_problem_sources": [
+                {
+                    "name": "BRENDA enzyme database (kcat/Km frontier)",
+                    "url": "https://www.brenda-enzymes.org/",
+                },
+            ],
+            "tabulation_sources": [
+                {
+                    "name": "BRENDA kinetic parameters",
+                    "identifiers": ["BRENDA:kcat", "BRENDA:km", "BRENDA:kcat_km"],
+                    # Authoritative per-EC-number tabulation of measured kcat,
+                    # Km and turnover values — the reference for whether a
+                    # predicted parameter is already a measured, tabulated value.
+                    "url": "https://www.brenda-enzymes.org/",
+                    "source": "Chang et al. 2021, Nucleic Acids Res. (10.1093/nar/gkaa1025)",
+                },
+                {
+                    "name": "SABIO-RK reaction kinetics",
+                    "identifiers": ["SABIO-RK"],
+                    "url": "http://sabiork.h-its.org/",
+                    "source": "Wittig et al. 2018, Nucleic Acids Res. (10.1093/nar/gkx1065)",
+                },
+                {
+                    "name": "Bar-Even 2011 kcat/Km distribution ceilings",
+                    "identifiers": ["kcat_km_ceiling"],
+                    # Best-known-value anchors for rediscovery rejection, from
+                    # analysis of ~1900 enzymes (Bar-Even et al. 2011):
+                    #   median kcat/Km   ~ 1e5   M^-1 s^-1
+                    #   median kcat      ~ 10    s^-1
+                    #   median Km        ~ 1e-4  M (~130 uM)
+                    #   diffusion limit  ~ 1e8 - 1e9 M^-1 s^-1 (hard ceiling)
+                    # A "novel high-efficiency enzyme" claiming kcat/Km above the
+                    # diffusion limit, or restating the ~1e5 median, is not novel.
+                    "median_kcat_km_M_inv_s_inv": 1e5,
+                    "median_kcat_s_inv": 10.0,
+                    "median_km_M": 1e-4,
+                    "diffusion_limit_kcat_km_M_inv_s_inv": [1e8, 1e9],
+                    "source": "Bar-Even et al. 2011, Biochemistry (10.1021/bi2002289)",
+                },
+            ],
             "canonical_surveys": [
                 {
                     "title": (
@@ -150,12 +188,18 @@ class EnzymeKineticsPlugin(DomainPlugin):
                     ),
                     "doi": "10.1021/bi2002289",
                 },
+                {
+                    "title": "BRENDA, the ELIXIR core data resource in 2021",
+                    "doi": "10.1093/nar/gkaa1025",
+                },
             ],
             "novelty_criteria": (
                 "A finding is novel if it establishes a kcat/Km relationship that survives "
-                "leave-EC-class-out holdout and is not already accounted for by the general "
-                "evolutionary/physicochemical trends (e.g. catalytic efficiency ceilings) "
-                "documented in the enzyme-parameter literature above."
+                "leave-EC-class-out holdout and is not already accounted for by the tabulated "
+                "BRENDA/SABIO-RK parameters or by the Bar-Even 2011 distribution anchors "
+                "(median kcat/Km ~1e5 M^-1 s^-1, diffusion ceiling 1e8-1e9 M^-1 s^-1). A "
+                "claimed kcat/Km above the diffusion limit, or a mere restatement of the ~1e5 "
+                "median, is rediscovery, not novelty."
             ),
         }
 

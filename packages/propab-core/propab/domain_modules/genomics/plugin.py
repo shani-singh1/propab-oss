@@ -153,19 +153,60 @@ class GenomicsPlugin(DomainPlugin):
             "classification_codes": {
                 "mesh": ["Gene Expression Profiling", "Organ Specificity", "Transcriptome"],
             },
-            "open_problem_sources": [],
-            "tabulation_sources": [],
+            "open_problem_sources": [
+                {
+                    "name": "GTEx portal (tissue-specificity frontier)",
+                    "url": "https://gtexportal.org/home/",
+                },
+            ],
+            "tabulation_sources": [
+                {
+                    "name": "Tau tissue-specificity benchmark (Kryuchkova-Mostacci & Robinson-Rechavi 2017)",
+                    "identifiers": ["tau", "tissue_specificity_index"],
+                    # Best-known reference values for rediscovery rejection. Tau
+                    # ranges [0,1]; the human transcriptome tau distribution is
+                    # bimodal with a validated split at ~0.5 (below = broadly
+                    # expressed / housekeeping, above = tissue-specific). Tau and
+                    # the Gini index were benchmarked as the best-performing
+                    # tissue-specificity metrics. A "novel housekeeping vs
+                    # tissue-specific" split that just reproduces the tau~0.5
+                    # threshold is rediscovery.
+                    "tau_range": [0.0, 1.0],
+                    "housekeeping_threshold_tau": 0.5,
+                    "source": "Kryuchkova-Mostacci & Robinson-Rechavi 2017, Brief. Bioinform. (10.1093/bib/bbw008)",
+                },
+                {
+                    "name": "GTEx v8 median gene-level TPM by tissue",
+                    "identifiers": ["GTEx:median_tpm"],
+                    # Authoritative per-gene, per-tissue expression tabulation the
+                    # tau values are computed from — the ground-truth table for
+                    # whether a cross-tissue expression value is already known.
+                    "url": "https://gtexportal.org/home/datasets",
+                    "source": "GTEx Consortium 2020, Science (10.1126/science.aaz1776)",
+                },
+                {
+                    "name": "Housekeeping gene reference set (Eisenberg & Levanon 2013)",
+                    "identifiers": ["HRT_Atlas", "housekeeping_genes"],
+                    "source": "Eisenberg & Levanon 2013, Trends Genet. (10.1016/j.tig.2013.05.010)",
+                },
+            ],
             "canonical_surveys": [
                 {
                     "title": "The GTEx Consortium atlas of genetic regulatory effects across human tissues",
                     "doi": "10.1126/science.aaz1776",
                 },
+                {
+                    "title": "A benchmark of gene expression tissue-specificity metrics",
+                    "doi": "10.1093/bib/bbw008",
+                },
             ],
             "novelty_criteria": (
                 "A finding is novel if it establishes a cross-tissue expression relationship "
                 "(e.g. a tissue-specificity/tau-index effect surviving leave-tissue-out holdout) "
-                "that is not a restatement of housekeeping-vs-tissue-specific classification "
-                "already established in the GTEx atlas and tau-index literature above."
+                "that is not a restatement of the housekeeping-vs-tissue-specific split already "
+                "captured by the tau~0.5 threshold (Kryuchkova-Mostacci & Robinson-Rechavi 2017) "
+                "and not merely a per-gene value already tabulated in the GTEx v8 median-TPM "
+                "table or the Eisenberg-Levanon housekeeping reference set."
             ),
         }
 

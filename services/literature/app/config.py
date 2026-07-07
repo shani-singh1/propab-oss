@@ -100,6 +100,11 @@ class Settings(BaseSettings):
     depth_timeout_sec: dict[str, int] = Field(
         default_factory=lambda: {"standard": 60, "deep": 300, "exhaustive": 900}
     )
+    # Separate, additive deadline for the post-prior frontier-gap search
+    # (pipeline.build_prior). Runs AFTER the core prior is built, so it extends
+    # total /prior latency by at most this much but can never blank the core
+    # response by eating the depth_timeout_sec budget.
+    gap_augment_timeout_sec: float = 30.0
 
     artifacts_dir: str = "./artifacts"
 
