@@ -144,3 +144,38 @@ false-confirm" benchmark tested `run_verdict_pipeline` — but 4/6 domains DON'T
 **CIRCULAR-VERIFICATION SCAN (audit):** math cap-set numeric-claim = CIRCULAR (F2);
 graph_invariants = CIRCULAR by construction (F4/F5); enzyme/genomics/materials/mandrake =
 independent (real LOFO + label-shuffle null) — SAFE.
+
+---
+
+## WAVE-3 OUTCOMES (verification-honesty audit + generation overhaul)
+
+**Audit reconciled against HEAD — most findings were STALE (audit branched from a
+pre-fix base):**
+- **F1 · FIXED** — the plugin worker path now routes a `confirmed` verdict through
+  the shape-aware `artifact_gate_stage` (services/worker/sub_agent_loop.py). Domain-
+  general (keys on evidence SHAPE, not domain id): deterministic proofs pass, lofo/
+  statistical confirms must survive a real adversarial null (genomics/enzyme now
+  gated — the actual hole), shapeless "unknown" cannot confirm. Verified empirically
+  + 2 new tests. Deliberately does NOT chain OOD/scope (OOD wrongly refutes
+  deterministic proofs — even run_verdict_pipeline does this).
+- **F3 · already fixed by V2** (deterministic requires a real proof method, not a
+  bare `verified_true_steps` counter).
+- **F4/F5 · already fixed by DOM2b** (graph modularity/spectral_gap made independent —
+  no longer tautological).
+- **F7 · already fixed by artifact-hardening A1** (weak-LOFO survival branches removed;
+  gate fails closed without a real null).
+- **F2 · mostly covered by DISC2** (best_known_table cap-set claims labeled
+  rediscovery, discovery_worthy=False). Residual: verdict stays "confirmed" +
+  confidence, which is acceptable for an honestly-labeled rediscovery.
+- **Lesson (both directions):** trust nothing — F1 was real and worse than believed
+  (my 0.0-false-confirm benchmark tested run_verdict_pipeline, a path 4/6 domains
+  don't use); but F3/F4/F5/F7 were NOT the fresh catastrophe the audit implied. Every
+  audit finding must be reconciled against HEAD before acting.
+
+**GEN-OVERHAUL · MERGED** (bd7a4ab) — deleted ALL template/fallback-seed fabrication;
+generate_ranked_hypotheses builds only from real LLM entries with valid scope, drops+
+counts the rest, retries once with a novelty nudge, returns [] honestly if nothing
+usable. Prompt reframed to target literature open-gaps (verified: zero domain
+vocabulary in the core generation path). New domain-general anti-retest guard
+(claim_skeleton / is_retest_of_tested_node) rejects parametric re-tests of decided
+nodes. Merged suite: 162 passed (generation+synthesis+anti-retest+F1).
