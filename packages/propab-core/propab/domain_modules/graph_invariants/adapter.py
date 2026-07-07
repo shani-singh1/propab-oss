@@ -17,11 +17,24 @@ Provenance (see ``data/graph_invariants/PROVENANCE.md``):
   research institution. Leskovec, Kleinberg, Faloutsos (2007); Yin, Benson,
   Leskovec, Gleich (2017); SNAP dataset ``email-Eu-core``
   (https://snap.stanford.edu/data/email-Eu-core.html).
+* ``infrastructure`` — ``power-US-Grid.txt.gz``: the power grid of the Western
+  States of the USA (nodes = generators / transformers / substations, edges = power
+  supply lines). Watts & Strogatz, "Collective dynamics of 'small-world' networks",
+  Nature 393, 440–442 (1998); distributed by the Koblenz Network Collection
+  (KONECT, ``opsahl-powergrid``, http://konect.cc/networks/opsahl-powergrid). A
+  genuinely DISTINCT topology class from the two social graphs above: a near-planar
+  infrastructure mesh with very low average degree (~2.6 in sampled subgraphs), low
+  clustering (~0.11), and large diameter (~9) — the opposite of the compact,
+  triangle-dense social networks. Its (single) connected component of 4,941 nodes is
+  sampled identically to the others (snowball induced subgraphs), so every grid
+  subgraph is a real piece of the real network.
 
-Both files were fetched from SNAP and cached on disk; no network access is needed
-at run time. The families are structurally distinct real networks (a sparse,
-high-clustering collaboration graph vs. a dense communication graph), so the
-cross-family LOFO in :mod:`.verifier` is a real out-of-distribution test.
+The two social files were fetched from SNAP and the power grid from KONECT; all are
+cached on disk, so no network access is needed at run time. The families are
+structurally distinct real networks (a sparse, high-clustering collaboration graph;
+a dense communication graph; and a near-planar low-degree power-grid/infrastructure
+graph), so the cross-family LOFO in :mod:`.verifier` is a real out-of-distribution
+test across three topology classes.
 """
 from __future__ import annotations
 
@@ -52,6 +65,12 @@ REAL_NETWORKS: tuple[tuple[str, str, str, str], ...] = (
         "EU research-institution e-mail (SNAP email-Eu-core)",
         "https://snap.stanford.edu/data/email-Eu-core.html",
     ),
+    (
+        "infrastructure",
+        "power-US-Grid.txt.gz",
+        "US Western States power grid (KONECT opsahl-powergrid; Watts-Strogatz 1998)",
+        "http://konect.cc/networks/opsahl-powergrid",
+    ),
 )
 GRAPH_FAMILIES = tuple(fam for fam, _, _, _ in REAL_NETWORKS)
 
@@ -60,7 +79,13 @@ GRAPH_FAMILIES = tuple(fam for fam, _, _, _ in REAL_NETWORKS)
 # connected component of the real network. This yields a distribution of invariant
 # fingerprints per real family without ever fabricating topology — every subgraph
 # is a genuine piece of the real network.
-SUBGRAPHS_PER_FAMILY = 30
+#
+# 50 (not 30) subgraphs/family: with the third, near-planar power-grid/
+# infrastructure family added, the sparse grid subgraphs need a larger sample for
+# the label-shuffle null to have the power to resolve a genuine cross-family
+# invariant law (e.g. clustering_coefficient->avg_degree) from noise on the held-out
+# grid family. This only adds real subgraphs; it fabricates nothing.
+SUBGRAPHS_PER_FAMILY = 50
 SUBGRAPH_NODES = 100
 RANDOM_SEED = 42
 

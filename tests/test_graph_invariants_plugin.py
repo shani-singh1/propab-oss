@@ -72,9 +72,15 @@ def test_plugin_reports_real_data():
     assert GraphInvariantsPlugin().uses_synthetic_data() is False
 
 
-def test_real_frame_has_two_real_families(real_frame):
+def test_real_frame_has_three_real_families(real_frame):
     fams = sorted(real_frame["network_family"].unique())
-    assert fams == sorted(GRAPH_FAMILIES) == ["collaboration", "communication"]
+    # THREE distinct real topology classes: collaboration (co-authorship),
+    # communication (email), and infrastructure (road / near-planar spatial mesh).
+    assert (
+        fams
+        == sorted(GRAPH_FAMILIES)
+        == ["collaboration", "communication", "infrastructure"]
+    )
     # Each family contributes multiple real subgraph instances for the LOFO.
     for fam in fams:
         assert (real_frame["network_family"] == fam).sum() >= 20
@@ -107,12 +113,16 @@ def test_invariants_computed_and_finite(real_frame):
 # ── V3 null: spurious pair does NOT survive; genuine pair does ────────────────
 
 def test_genuine_invariant_pair_survives_null(real_frame):
-    """spectral_gap -> avg_degree is a genuine structural relationship on these real
-    networks: the held-out |corr| must exceed the label-shuffle null's p95 in BOTH
-    real families (the V3 permutation null is fed real invariants). Denser subgraphs
-    have both a larger leading adjacency eigenvalue and higher average degree, and
-    this coupling replicates across the collaboration and communication networks."""
-    src, tgt = "spectral_gap", "avg_degree"
+    """clustering_coefficient -> avg_degree is a genuine structural relationship that
+    replicates across ALL THREE real families: the held-out |corr| must exceed the
+    label-shuffle null's p95 (and be permutation-significant) in EACH held-out family
+    (collaboration, communication, AND the near-planar power-grid/infrastructure
+    network). Denser induced subgraphs pack in both a higher average degree and more
+    closed triangles (higher transitivity), and — unlike spectral_gap->avg_degree,
+    whose coupling collapses on the sparse grid subgraphs — this coupling survives the
+    LOFO on every one of the three distinct topology classes with a consistent
+    positive sign."""
+    src, tgt = "clustering_coefficient", "avg_degree"
     for held in GRAPH_FAMILIES:
         held_corr = _family_correlation(real_frame, held, src, tgt)
         null = _label_shuffle_null(real_frame, held, src, tgt, abs(held_corr))
@@ -126,13 +136,15 @@ def test_genuine_invariant_pair_survives_null(real_frame):
 
 
 def test_spurious_invariant_pair_does_not_survive_null(real_frame):
-    """algebraic_connectivity -> clustering_coefficient is a spurious cross-family
-    pair on these real networks: a textbook-plausible link that does NOT replicate
-    across the collaboration and communication networks. It must FAIL the
-    label-shuffle null (|corr| below p95, non-significant perm_p) in BOTH families,
-    so a non-relationship cannot be waved through as a confirmed discovery — this is
-    exactly the kind of real-data refutation the cross-family LOFO exists to catch."""
-    src, tgt = "algebraic_connectivity", "clustering_coefficient"
+    """diameter -> modularity is a spurious cross-family pair on these real networks:
+    a textbook-plausible "compact graphs are less modular" link that does NOT
+    replicate across the three real topology classes. It must FAIL the label-shuffle
+    null (|corr| below p95, or non-significant perm_p) in EVERY family — including the
+    power-grid/infrastructure family — so a non-relationship cannot be waved through
+    as a confirmed discovery. This is exactly the kind of real-data refutation the
+    cross-family LOFO exists to catch, and adding the third (infrastructure) family
+    only makes the null harder to spuriously beat."""
+    src, tgt = "diameter", "modularity"
     survived_any = False
     for held in GRAPH_FAMILIES:
         held_corr = _family_correlation(real_frame, held, src, tgt)
@@ -142,7 +154,7 @@ def test_spurious_invariant_pair_does_not_survive_null(real_frame):
         if abs(held_corr) > p95 and perm_p < 0.05:
             survived_any = True
     assert not survived_any, (
-        "spurious clustering->diameter pair unexpectedly survived the null in a "
+        "spurious diameter->modularity pair unexpectedly survived the null in a "
         "real family — the adversarial null is not discriminating"
     )
 

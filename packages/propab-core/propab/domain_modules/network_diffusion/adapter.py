@@ -10,14 +10,23 @@ False for this domain):
 * ``email`` — ``email-Eu-core`` : e-mail network of a large European research
   institution (Leskovec & Krevl, SNAP; Yin, Benson, Leskovec & Gleich, 2017).
   Denser, lower clustering, different degree-mixing than the collaboration net.
+* ``infrastructure`` — ``power-US-Grid`` : the power grid of the Western States of
+  the USA (nodes = generators/transformers/substations, edges = power supply lines)
+  (Watts & Strogatz, "Collective dynamics of 'small-world' networks", Nature 393,
+  1998; KONECT ``opsahl-powergrid``). A genuinely DISTINCT topology class from the
+  two social graphs: a near-planar infrastructure mesh with very low average degree
+  (~2.6 in sampled subgraphs), low clustering (~0.11) and large diameter (~9) — the
+  opposite of the compact, hub-bearing social networks, so contagion on it barely
+  takes off. Its single connected component (4,941 nodes) is sampled with the same
+  BFS-ball scheme.
 
-Both are shipped under ``data/v1_candidates/`` as gzipped SNAP edge lists. The
-loader reads them directly; it never fabricates edges. To obtain many graph
-*instances* of a given real topology family we sample **induced subgraphs**
-(BFS-ball around random seed nodes) — every node and every edge in a sample is
-a real node/edge of the source network, so the topology of each instance is
-genuinely empirical. The source network is the *topology family* used for the
-cross-topology-family holdout.
+All three are shipped under ``data/v1_candidates/`` as gzipped edge lists (the two
+social nets from SNAP, the power grid from KONECT). The loader reads them directly;
+it never fabricates edges. To obtain many graph *instances* of a given real topology
+family we sample **induced subgraphs** (BFS-ball around random seed nodes) — every
+node and every edge in a sample is a real node/edge of the source network, so the
+topology of each instance is genuinely empirical. The source network is the
+*topology family* used for the cross-topology-family holdout.
 """
 from __future__ import annotations
 
@@ -36,6 +45,7 @@ from propab.config import settings
 REAL_NETWORKS: dict[str, str] = {
     "collaboration": "ca-GrQc.txt.gz",
     "email": "email-Eu-core.txt.gz",
+    "infrastructure": "power-US-Grid.txt.gz",
 }
 
 # Structural (topology) features computed per subgraph instance. These are the
