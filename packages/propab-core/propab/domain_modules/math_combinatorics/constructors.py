@@ -7,14 +7,19 @@ from typing import Any
 
 # Best-known cap-set sizes in F_3^n (OEIS / literature; n <= 8).
 CAP_SET_BEST_KNOWN: dict[int, int] = {
-    1: 1,
-    2: 2,
+    # Maximal cap sizes in AG(n,3) — OEIS A090245. n<=6 are PROVEN maxima (n=6=112,
+    # Potechin 2008); n=7 (236) and n=8 (496) are best-known lower bounds (the exact
+    # maximum is open for n>=7). Reference for rediscovery rejection ONLY — a
+    # computed size that merely reproduces one of these is a rediscovery, not a
+    # discovery. (Prior entries n=1,2,8 were wrong: 1->2, 2->4, 512->496.)
+    1: 2,
+    2: 4,
     3: 9,
     4: 20,
     5: 45,
     6: 112,
     7: 236,
-    8: 512,
+    8: 496,
 }
 
 # Hypothesis keywords requiring statistics the verifier does not compute.

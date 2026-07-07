@@ -361,12 +361,13 @@ def test_product_construction_yields_valid_larger_cap() -> None:
 def test_compute_cap_set_reports_honest_gap_below_best_known() -> None:
     from propab.domain_modules.math_combinatorics.verifier import compute_cap_set
 
-    # F_3^8 best-known is 512; our product construction is genuinely smaller.
+    # F_3^8 best-known is 496 (OEIS A090245, corrected from a wrong 512 entry);
+    # our product construction is genuinely smaller.
     r = compute_cap_set(8)
-    assert r["best_known_size"] == 512
-    assert r["cap_set_size"] < 512
+    assert r["best_known_size"] == 496
+    assert r["cap_set_size"] < 496
     assert r["vs_best_known"] == "below_best_known"
-    assert r["gap_to_best_known"] == 512 - r["cap_set_size"]
+    assert r["gap_to_best_known"] == 496 - r["cap_set_size"]
     assert r["cap_valid"] is True
 
 
