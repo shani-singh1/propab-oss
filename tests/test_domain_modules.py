@@ -449,3 +449,36 @@ def test_open_problem_sources_have_urls(domain_id):
     assert all(str(o.get("url", "")).startswith("http") for o in ops), (
         f"{domain_id}: every open_problem_sources entry needs an http(s) url"
     )
+
+
+# --------------------------------------------------------------------------
+# Content routing: materials + mandrake self-route from question text (>= 2
+# distinct markers) without stealing other domains' questions.
+# --------------------------------------------------------------------------
+
+def test_materials_self_routes_from_content():
+    p = resolve_domain_plugin(
+        question="predict the dielectric constant from crystal system descriptors on matbench"
+    )
+    assert p is not None and p.domain_id == "materials"
+
+
+def test_materials_single_marker_does_not_route():
+    # A lone incidental marker must NOT steal the question (2-marker gate).
+    p = resolve_domain_plugin(question="the band gap of this social network model")
+    assert p is None or p.domain_id != "materials"
+
+
+def test_mandrake_self_routes_on_extended_markers():
+    p = resolve_domain_plugin(
+        question="reverse transcriptase RT domain activity across a retrotransposon family"
+    )
+    assert p is not None and p.domain_id == "mandrake"
+
+
+def test_content_routing_does_not_steal_generic_or_other_domains():
+    assert resolve_domain_plugin(question="train a transformer on mnist and report accuracy") is None
+    # graph and math questions still route to their own domains, not materials/mandrake.
+    assert resolve_domain_plugin(
+        question="clustering coefficient and spectral gap of a network family"
+    ).domain_id == "graph_invariants"

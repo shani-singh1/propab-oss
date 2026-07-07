@@ -72,7 +72,10 @@ class MandrakePlugin(DomainPlugin):
     # is_mandrake_campaign). Two are required to gate; the count feeds
     # match_score so a mandrake-vs-enzyme_kinetics collision breaks on marker
     # density, not registration order.
-    _MATCH_MARKERS = ("rt activity", "reverse transcriptase", "evolutionary family", "biophysical propert")
+    _MATCH_MARKERS = (
+        "rt activity", "reverse transcriptase", "evolutionary family", "biophysical propert",
+        "rt domain", "retroelement", "retrotransposon",
+    )
 
     def matches(self, *, question: str = "", payload: dict[str, Any] | None = None) -> bool:
         if payload and str(payload.get("domain") or "") == "mandrake":

@@ -36,9 +36,16 @@ class MaterialsPlugin(DomainPlugin):
             "ood_test": "Leave-one-crystal-system-out LOFO; lofo_r2 must beat label-shuffle null p95",
         }
 
-    def matches(self, *, question: str = "", payload: dict[str, Any] | None = None) -> bool:
-        # Mirrors the historical is_materials_campaign: explicit tag/payload only.
-        q = (question or "").lower()
+    # Distinct materials content markers. matches() requires >= 2 to self-route
+    # (a lone "band gap of this network model" must NOT steal a graph question);
+    # an explicit tag/payload always wins. Mirrors the 2-marker gate the other
+    # content-routed domains use, so DOM3 score-based collision routing is honoured.
+    _MATCH_MARKERS = (
+        "matbench", "dielectric", "crystal system", "crystal-system",
+        "band gap", "bandgap", "formation energy", "perovskite",
+    )
+
+    def _explicit(self, q: str, payload: dict[str, Any] | None) -> bool:
         if "domain_profile:materials" in q:
             return True
         if payload:
@@ -47,6 +54,19 @@ class MaterialsPlugin(DomainPlugin):
             if str(payload.get("domain") or "") == "materials":
                 return True
         return False
+
+    def matches(self, *, question: str = "", payload: dict[str, Any] | None = None) -> bool:
+        q = (question or "").lower()
+        if self._explicit(q, payload):
+            return True
+        # Content routing: >= 2 distinct domain markers in the question text.
+        return sum(1 for m in self._MATCH_MARKERS if m in q) >= 2
+
+    def match_score(self, *, question: str = "", payload: dict[str, Any] | None = None) -> float:
+        q = (question or "").lower()
+        if self._explicit(q, payload):
+            return float(len(self._MATCH_MARKERS))
+        return float(sum(1 for m in self._MATCH_MARKERS if m in q))
 
     def available_features(self) -> list[str]:
         from propab.domain_adapters.materials_adapter import _KNOWN_FEATURES
