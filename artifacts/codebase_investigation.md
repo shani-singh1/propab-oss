@@ -664,8 +664,20 @@ http://literature:8020` on orchestrator+worker. Verified: 7 client tests + full 
 Math (Sidon) is a viable target — the service has arxiv/oeis/zbmath connectors and the
 math domain declares a rich Sidon profile (Erdős-Turán, Croot-Lev-Pach, OEIS A005282).
 
-**LIT-PERF · HIGH · OPEN · VERIFIED (live test) — the literature service's cold
-`/prior` is too slow to feed a campaign in-budget.** I ran the service locally
+**LIT-PERF · HIGH · FIXED (fix/lit-perf-fast-standard, merged + LIVE-verified by me) —
+cold `/prior` now returns a real prior within the campaign budget.** Fix: `standard`
+depth uses an ABSTRACT-ONLY path (no full-text PDF fetch; `raw_to_abstract_document`
+→ existing extractor over the search-hit abstract), capped to top-4 priority sources ×
+5 docs; the depth budget is now a soft `deadline_sec` threaded into the pipeline
+(`_gather_with_deadline`) so a slow build returns PARTIAL real results, not empty.
+**LIVE result (I ran it, real Gemini keys):** cold Sidon `/prior` standard depth →
+HTTP 200 in ~65s, `papers_indexed=2`, `established_facts=2` (a genuine cap-set bound
+from arXiv "Bounds on sizes of general caps in AG(n,q)"), `tabulated_values=3`,
+sources arxiv/oeis/semantic_scholar/zbmath. The ~65s is the standard deadline returning
+partial content — WELL within the campaign's 600s `literature_service_timeout_sec`, so a
+campaign now gets a genuine literature prior from the REAL service (no more empty/block →
+old-path fallback). 162 literature tests. Original finding below.
+**LIT-PERF (orig) · was HIGH · the cold `/prior` was too slow to feed a campaign in-budget.** I ran the service locally
 (`uvicorn`, `.env` keys): `/health` = ok, math sources healthy (arxiv/semantic_scholar/
 zbmath/mathoverflow up; oeis down). But a cold Sidon `/prior` at `depth="standard"`
 (60s budget) **timed out → returned EMPTY** (`papers_indexed=0`, `sources_consulted=[]`);
@@ -681,10 +693,13 @@ is NOT actually exercised. **This is the reason a campaign is NOT launched yet.*
 extract from abstracts across a few top sources) that returns a real prior in <60s, and
 have the timeout return PARTIAL results (what was gathered) instead of empty.
 
-**Readiness checklist:** ✅ 15 verified fixes across 3 waves + LIT-WIRE ✅ full suite 739
-✅ literature wired + in compose ⏳ re-run 5 benchmarks ⏳ stack up + /health (incl. real
-Sidon prior) ⏳ low-priority backlog (CFG4/6, TOOL6/7, DOM5, flaky graph-preflight) ⏳
-short observed Sidon campaign.
+**Readiness checklist:** ✅ 16 verified fixes across 3 waves + LIT-WIRE + TOOL6 ✅ full
+suite 750 ✅ literature wired + in compose + LIVE-verified (real Sidon prior in ~65s,
+within the 600s campaign budget) ✅ all 5 benchmarks re-confirmed (verdict 0.0, binding
+1.0/1.0, generation 0.0/1.0, convergence 3.2) ✅ LIT-PERF fixed ⏳ clean stack REBUILD
+(running containers are stale/pre-fix) + full bring-up + /health ⏳ short observed Sidon
+campaign. Remaining LOW backlog (CFG4/6, TOOL7 ML-only, DOM5 masked, flaky graph-preflight
+30s budget) — not campaign-blockers.
 
 ## LAYER BASELINES — quantified metrics (the engineering-loop scoreboard)
 
