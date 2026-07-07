@@ -20,11 +20,15 @@ def test_builtin_plugins_registered():
 def test_uses_synthetic_data_flag_per_domain():
     """DOM2: synthetic-data domains report True; real-data domains report False.
 
-    The genomics / graph_invariants / enzyme_kinetics demo domains run on
-    seed-generated frames (adapter meta ``synthetic: True``) presented under real
-    dataset names; materials and mandrake use real data.
+    ``graph_invariants`` still runs on seed-generated frames (adapter meta
+    ``synthetic: True``). ``genomics`` (GTEx v8 median TPM) and
+    ``enzyme_kinetics`` (DLKcat / BRENDA + SABIO-RK kcat) now serve real public
+    data, so — like materials and mandrake — they report ``False`` whenever the
+    real dataset is on disk. The genomics/enzyme flag reads the cache meta, so it
+    only reports ``True`` on the network-unavailable synthetic fallback; we assert
+    "not-True-under-real-cache" without hard-failing an offline CI run.
     """
-    for did in ("genomics", "graph_invariants", "enzyme_kinetics"):
+    for did in ("graph_invariants",):
         plugin = get_domain_plugin(did)
         assert plugin is not None, f"{did} plugin not registered"
         assert plugin.uses_synthetic_data() is True, f"{did} should report synthetic data"
@@ -32,6 +36,23 @@ def test_uses_synthetic_data_flag_per_domain():
         plugin = get_domain_plugin(did)
         assert plugin is not None, f"{did} plugin not registered"
         assert plugin.uses_synthetic_data() is False, f"{did} should report real data"
+    # Real-data domains: assert False when real data was served; skip only if the
+    # network-unavailable synthetic fallback was written (so offline CI is stable).
+    from propab.domain_modules.enzyme_kinetics.adapter import (
+        dataset_is_synthetic as enzyme_synth,
+    )
+    from propab.domain_modules.genomics.adapter import (
+        dataset_is_synthetic as genomics_synth,
+    )
+    for did, is_synth in (("enzyme_kinetics", enzyme_synth), ("genomics", genomics_synth)):
+        plugin = get_domain_plugin(did)
+        assert plugin is not None, f"{did} plugin not registered"
+        flag = plugin.uses_synthetic_data()  # ensures cache, then reads meta
+        if is_synth():
+            # Only the offline fallback should ever report synthetic.
+            assert flag is True, f"{did} fallback flag must match cache meta"
+        else:
+            assert flag is False, f"{did} should report real data when cached"
     # The base-class default is honest-by-omission: False.
     class _Bare(DomainPlugin):
         domain_id = "bare"

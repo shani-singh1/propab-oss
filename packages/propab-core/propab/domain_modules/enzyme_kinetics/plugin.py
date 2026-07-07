@@ -5,7 +5,12 @@ import time
 from typing import Any
 
 from propab.domain_modules.base import DomainPlugin, PreflightResult
-from propab.domain_modules.enzyme_kinetics.adapter import KNOWN_FEATURES, EnzymeExperimentSpec, EnzymeKineticsAdapter
+from propab.domain_modules.enzyme_kinetics.adapter import (
+    KNOWN_FEATURES,
+    EnzymeExperimentSpec,
+    EnzymeKineticsAdapter,
+    dataset_is_synthetic,
+)
 from propab.domain_modules.enzyme_kinetics.verifier import classify_enzyme_verdict, run_enzyme_experiment
 
 
@@ -62,10 +67,12 @@ class EnzymeKineticsPlugin(DomainPlugin):
         return list(KNOWN_FEATURES)
 
     def uses_synthetic_data(self) -> bool:
-        # The BRENDA/UniProt-style frame is seed-generated (adapter meta
-        # ``synthetic: True``), not a real BRENDA subset. Findings must be labelled
-        # synthetic (DOM2).
-        return True
+        # Real DLKcat (BRENDA + SABIO-RK derived) kcat data is served when it can
+        # be fetched/cached; ``dataset_is_synthetic()`` reads the on-disk meta so
+        # findings are labelled honestly (DOM2). Only the network-unavailable
+        # fallback frame reports synthetic.
+        EnzymeKineticsAdapter().ensure_cache()
+        return dataset_is_synthetic()
 
     def confirmation_criteria(self) -> dict[str, Any]:
         return {
@@ -95,7 +102,7 @@ class EnzymeKineticsPlugin(DomainPlugin):
             t0 = time.time()
             adapter = EnzymeKineticsAdapter()
             df = adapter.load_frame()
-            run_enzyme_experiment(EnzymeExperimentSpec(feature_subset=["log_km", "molecular_weight"]))
+            run_enzyme_experiment(EnzymeExperimentSpec(feature_subset=["molecular_weight", "sequence_length"]))
             elapsed = time.time() - t0
             if elapsed > 60:
                 return PreflightResult(False, f"enzyme LOFO too slow: {elapsed:.1f}s", {"elapsed_sec": elapsed})

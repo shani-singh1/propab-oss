@@ -11,7 +11,11 @@ from propab.domain_modules.genomics.verifier import (
     classify_genomics_verdict,
     run_genomics_experiment,
 )
-from propab.domain_modules.genomics.adapter import GenomicsAdapter, GenomicsExperimentSpec
+from propab.domain_modules.genomics.adapter import (
+    GenomicsAdapter,
+    GenomicsExperimentSpec,
+    dataset_is_synthetic,
+)
 
 
 class GenomicsPlugin(DomainPlugin):
@@ -65,9 +69,12 @@ class GenomicsPlugin(DomainPlugin):
         return list(KNOWN_FEATURES)
 
     def uses_synthetic_data(self) -> bool:
-        # The GTEx-style frame is seed-generated (adapter meta ``synthetic: True``),
-        # not the real GTEx v8 release. Findings must be labelled synthetic (DOM2).
-        return True
+        # Real GTEx v8 median-TPM data is served when it can be fetched/cached;
+        # ``dataset_is_synthetic()`` reads the on-disk meta so findings are
+        # labelled honestly (DOM2). Only the network-unavailable fallback frame
+        # reports synthetic.
+        GenomicsAdapter().ensure_cache()
+        return dataset_is_synthetic()
 
     def confirmation_criteria(self) -> dict[str, Any]:
         return {
