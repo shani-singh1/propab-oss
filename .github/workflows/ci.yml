@@ -20,12 +20,6 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
-      - name: Fetch real graph datasets
-        # graph_invariants + network_diffusion run on real SNAP/KONECT networks that
-        # are git-ignored. Fetch them so the graph tests + the routing inspector run
-        # with real data on CI (locally these tests skip cleanly when absent).
-        run: python scripts/fetch_graph_datasets.py
-
       - name: Run tests
         run: pytest tests/ -q --tb=short
 
