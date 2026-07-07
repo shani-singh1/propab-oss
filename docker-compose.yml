@@ -73,6 +73,8 @@ services:
       - EMBED_MODEL=${EMBED_MODEL:-text-embedding-3-small}
       - ORCHESTRATOR_INTERNAL_TOKEN=${ORCHESTRATOR_INTERNAL_TOKEN:-}
       - PROPAB_PROFILE=${PROPAB_PROFILE:-campaign}
+      # Use the real dedicated literature service for prior-building.
+      - LITERATURE_SERVICE_URL=${LITERATURE_SERVICE_URL:-http://literature:8020}
     restart: unless-stopped
     volumes:
       - propab_data:/data/propab
@@ -86,6 +88,8 @@ services:
       qdrant:
         condition: service_started
       minio:
+        condition: service_started
+      literature:
         condition: service_started
 
   worker:
@@ -113,6 +117,7 @@ services:
       - EMBED_PROVIDER=${EMBED_PROVIDER:-openai}
       - EMBED_MODEL=${EMBED_MODEL:-text-embedding-3-small}
       - PROPAB_PROFILE=${PROPAB_PROFILE:-campaign}
+      - LITERATURE_SERVICE_URL=${LITERATURE_SERVICE_URL:-http://literature:8020}
       # Sandbox reuses the worker image so free-form code has numpy/scipy/torch (network off).
       - SANDBOX_IMAGE=${SANDBOX_IMAGE:-propab-oss-worker:latest}
     restart: unless-stopped
@@ -130,6 +135,22 @@ services:
         condition: service_started
       minio:
         condition: service_started
+
+  # Dedicated literature intelligence service (real papers: arXiv/OEIS/Semantic
+  # Scholar/zbMath/PubMed/…). Runs standalone with in-memory backends by default;
+  # set LITERATURE_POSTGRES_BACKEND/QDRANT_BACKEND for persistence in prod.
+  literature:
+    build:
+      context: .
+      dockerfile: services/literature/Dockerfile
+    ports:
+      - "8020:8020"
+    environment:
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - SEMANTIC_SCHOLAR_API_KEY=${SEMANTIC_SCHOLAR_API_KEY:-}
+      - NCBI_API_KEY=${NCBI_API_KEY:-}
+      - LITERATURE_LLM_PROVIDER=${LITERATURE_LLM_PROVIDER:-gemini}
+    restart: unless-stopped
 
   frontend:
     build:

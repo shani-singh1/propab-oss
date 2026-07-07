@@ -647,6 +647,28 @@ pair. **CFG6 · LOW · VERIFIED — token usage never captured** (`llm.py:235-23
 `input_tokens/output_tokens` hardcoded `None` though all 3 providers return counts) → no
 honest usage-based budget signal (compounds BUD1).
 
+## CAMPAIGN READINESS (2026-07-07, overnight)
+
+**LIT-WIRE · CRITICAL · FIXED (feat/wire-literature-service + docker-compose, merged+verified) —
+the REAL dedicated literature service is now wired into campaigns.** Was: campaigns
+used the OLD orchestrator-embedded `build_prior`; the new LitQA2-benchmarked service
+(`services/literature/`, sources arxiv/oeis/semantic_scholar/zbmath/pubmed/…) was
+never called (`literature_service_url` defined-but-unread). Fix: `literature_client.build_prior_via_service`
+POSTs `{literature_service_url}/prior` (health-probe first), maps PriorResponse→Prior
+(contradictions→contested_claims, tabulated_values preserved, citation_verification_rate→
+evidence_coverage), and on ANY error logs + emits `literature.service_fallback` + falls
+back to the OLD path with a recorded diagnostic (never silent). Gated on
+`literature_service_url` (empty→OLD path, backward-compat). Added `literature` to
+docker-compose (port 8020, in-memory backends, GOOGLE_API_KEY) + `LITERATURE_SERVICE_URL=
+http://literature:8020` on orchestrator+worker. Verified: 7 client tests + full suite 739.
+Math (Sidon) is a viable target — the service has arxiv/oeis/zbmath connectors and the
+math domain declares a rich Sidon profile (Erdős-Turán, Croot-Lev-Pach, OEIS A005282).
+
+**Readiness checklist:** ✅ 15 verified fixes across 3 waves + LIT-WIRE ✅ full suite 739
+✅ literature wired + in compose ⏳ re-run 5 benchmarks ⏳ stack up + /health (incl. real
+Sidon prior) ⏳ low-priority backlog (CFG4/6, TOOL6/7, DOM5, flaky graph-preflight) ⏳
+short observed Sidon campaign.
+
 ## LAYER BASELINES — quantified metrics (the engineering-loop scoreboard)
 
 Each layer is being turned into a measured engineering problem (like LitQA2 for
