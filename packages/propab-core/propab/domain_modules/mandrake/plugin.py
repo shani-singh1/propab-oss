@@ -206,6 +206,21 @@ class MandrakePlugin(DomainPlugin):
             ),
         }
 
+    def known_value_check(
+        self, claim_text: str, evidence: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        """Flag a claim that merely rediscovers an established RT-phylogenetics fact.
+
+        Consumes this plugin's own ``literature_profile()`` anchors (Pfam RVT clan
+        CL0027 family structure + Xiong-Eickbush seven conserved RT motifs) and
+        returns a verdict dict with ``trivial_rediscovery=True`` /
+        ``discovery_worthy=False`` when the claim restates a known value, else
+        None. These are the flags ``paper_narrative._is_rediscovery`` reads.
+        """
+        from propab.domain_modules.mandrake.rediscovery import check_rediscovery
+
+        return check_rediscovery(claim_text, evidence, self.literature_profile())
+
     def apply_contrarian_belief_reset(
         self,
         belief_state: CampaignBeliefState,
