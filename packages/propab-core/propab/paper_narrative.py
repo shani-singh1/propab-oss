@@ -53,6 +53,37 @@ def _any_synthetic(findings: dict[str, Any]) -> bool:
     return False
 
 
+# ── known-value rediscovery (DISC2) ──────────────────────────────────────────
+
+REDISCOVERY_LABEL = "rediscovery (known value)"
+
+
+def _is_rediscovery(f: dict[str, Any]) -> bool:
+    """True if a finding merely rediscovers a known value (e.g. a table lookup).
+
+    DISC2 honesty fix: a confirmation whose evidence carries
+    ``trivial_rediscovery == True`` (or ``discovery_worthy == False``) reproduced
+    a value that was already known — a best-known-table lookup, not an independent
+    computation. Such a finding must be labelled a rediscovery in every paper
+    section and never counted as a novel discovery. Domain-general: it keys only
+    on the evidence flags, so it applies to any domain, not just combinatorics.
+    """
+    stats = f.get("stats") or {}
+    for src in (stats, f):
+        if src.get("trivial_rediscovery") is True:
+            return True
+        if src.get("discovery_worthy") is False:
+            return True
+    return False
+
+
+def _any_rediscovery(findings: dict[str, Any]) -> bool:
+    for verdict in ("confirmed", "refuted", "inconclusive"):
+        if any(_is_rediscovery(f) for f in findings.get(verdict) or []):
+            return True
+    return False
+
+
 # ── gated verdict lookup ─────────────────────────────────────────────────────
 
 def gated_verdict_by_id(findings: dict[str, Any]) -> dict[str, str]:
@@ -144,6 +175,7 @@ def findings_table(
     # caption must say so and each such row must be marked, so the table cannot
     # read as a set of real-world results.
     synthetic_present = any(_is_synthetic(f) for _, f in ordered[:max_rows])
+    rediscovery_present = any(_is_rediscovery(f) for _, f in ordered[:max_rows])
     caption = (
         "Decisive findings and their evidence. `Metric vs baseline' reports the "
         "measured metric against the campaign baseline where one exists; otherwise the "
@@ -153,6 +185,11 @@ def findings_table(
         caption += (
             " Rows marked [synthetic dataset (illustrative)] were computed on a "
             "seed-generated dataset and are illustrative of the pipeline, not real-world results."
+        )
+    if rediscovery_present:
+        caption += (
+            " Rows marked [rediscovery (known value)] reproduced an already-known value "
+            "(e.g. a best-known-table lookup) and are not novel discoveries."
         )
     lines = [
         "\\begin{table}[ht]",
@@ -171,6 +208,8 @@ def findings_table(
         cell = _latex_escape(claim[:140])
         if _is_synthetic(f):
             cell += f" [{_latex_escape(SYNTHETIC_LABEL)}]"
+        if _is_rediscovery(f):
+            cell += f" [{_latex_escape(REDISCOVERY_LABEL)}]"
         mvb = _metric_vs_baseline_cell(f, baseline)
         ev = _evidence_type_cell(f)
         repl = _latex_escape(str(f.get("replication_level") or "--"))
