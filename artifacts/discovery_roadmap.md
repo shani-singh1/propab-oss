@@ -75,3 +75,49 @@ the unfalsifiable-fabrication pattern we deleted).
 No new campaign until there is genuinely nothing but a campaign that can validate a fix.
 Validate with live smoke checks (cheap, few LLM calls), unit/integration suites, and
 per-component probes first. Reactive fix→campaign→fix loops are forbidden.
+
+---
+
+## WAVE COMPLETE (build wave merged + verified — 868 passed, 1 skipped)
+
+All 6 build agents verified (trust-nothing: read code + independent re-derivation +
+re-ran tests) and merged into campaign-convergence. Full suite green.
+
+- **math_combinatorics** — real cap-set computation with witness (n4=20 optimal,
+  independently re-verified valid; computed != table). [C, merged]
+- **coding_theory (NEW domain, 8th)** — real GF(2) min-distance via 2^k enumeration +
+  witness recheck; Brouwer/Grassl table for rediscovery rejection only; routes
+  deterministic via a real proof method (no V3 gaming). Independently re-verified
+  (Hamming[7,4]=3). [merged]
+- **graph_invariants** — real SNAP networks (ca-GrQc, email-Eu-core), V3 null intact,
+  fails closed if data missing. [D, merged]
+- **network_diffusion** — skeletal -> real SIS/SIR + cascade simulator on real graphs,
+  cross-topology holdout + shuffle null; fixed a perm_p==0.0 falsy bug. [E, merged]
+- **genomics** — REAL GTEx v8 median TPM (10000x7 active); LOFO + shuffle null. [A]
+- **enzyme_kinetics** — REAL DLKcat/BRENDA+SABIO-RK kcat (3553 active); LOFO + null. [A]
+- **novelty-input engine** — open_gaps fix (live 0->7) + real tabulation/open-problem
+  sources for rediscovery rejection. [B, merged]
+
+**Verification caught (trust-nothing paid off):** E silently broke test_domain_modules
+(fixed); B over-claimed "166 green" — 3 tests failed in B's own worktree, broken
+fixture (fixed); A's genomics/enzyme fell back to a STALE synthetic cache on this box
+(deleted + rebuilt -> real data now active). C flagged a real CAP_SET_BEST_KNOWN table
+error (n1/n2/n8) — deferred.
+
+**State:** 8 domains, all on REAL inputs, all behind the F1+V3 adversarial gate, with
+gap-driven novel generation (GEN-OVERHAUL) + novelty grounding (open_gaps/tabulation).
+
+## Deferred / follow-ups (non-campaign)
+- CAP_SET_BEST_KNOWN table correctness (n1=2, n2=4, n8=496?) — needs a reference + C's
+  test updates.
+- Synthetic-discovery-count design question (DOM2 "label not block" vs exclude from
+  discovery total) — open decision.
+- graph_invariants + network_diffusion would benefit from a 3rd real network family.
+- Per-domain end-to-end honesty harness (generation -> verify -> gate) as the last
+  pre-campaign validation.
+
+## Campaign readiness
+Still NOT campaign-time: the fixes are validated by suites + live smoke checks +
+independent re-derivation. The remaining pre-campaign validation is the per-domain
+end-to-end honesty harness. A campaign is only warranted once nothing but a campaign
+can validate the next change.
