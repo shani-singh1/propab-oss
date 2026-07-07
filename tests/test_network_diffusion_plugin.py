@@ -1,11 +1,12 @@
 """
 Tests for the network-diffusion domain plugin.
 
-These exercise REAL SNAP graphs (``data/v1_candidates/ca-GrQc.txt.gz`` and
-``email-Eu-core.txt.gz``). The data dir is gitignored and lives in the main
-worktree, so :func:`_real_data_dir` locates it (this worktree, or the repo root
-via git-common-dir) and the whole module is skipped when it is unavailable —
-never silently passing on missing data.
+These exercise REAL graphs (``data/v1_candidates/ca-GrQc.txt.gz`` and
+``email-Eu-core.txt.gz`` from SNAP, plus ``power-US-Grid.txt.gz`` from KONECT —
+three distinct real topology families). The data dir is gitignored and lives in the
+main worktree, so :func:`_real_data_dir` locates it (this worktree, or the repo root
+via git-common-dir) and the whole module is skipped when it is unavailable — never
+silently passing on missing data.
 """
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ from propab.domain_modules.network_diffusion.verifier import (
 )
 from propab.domain_modules.registry import get_domain_plugin, resolve_domain_plugin
 
-REQUIRED_FILES = ("ca-GrQc.txt.gz", "email-Eu-core.txt.gz")
+REQUIRED_FILES = ("ca-GrQc.txt.gz", "email-Eu-core.txt.gz", "power-US-Grid.txt.gz")
 
 
 def _real_data_dir() -> Path | None:
@@ -126,11 +127,42 @@ def test_routing_corpus_no_mismatches():
 
 
 # --- real data / simulator sanity ------------------------------------------
+def test_three_real_families_configured():
+    """The adapter must expose THREE distinct real topology families for the LOFO:
+    collaboration (co-authorship), email (communication) and infrastructure
+    (power grid / near-planar spatial mesh) — a genuinely different topology class."""
+    from propab.domain_modules.network_diffusion.adapter import REAL_NETWORKS
+
+    assert set(REAL_NETWORKS) == {"collaboration", "email", "infrastructure"}
+    assert REAL_NETWORKS["infrastructure"] == "power-US-Grid.txt.gz"
+
+
 def test_preflight_loads_real_graphs(real_data):
     r = NetworkDiffusionPlugin().preflight()
     assert r.passed, r.reason
     assert r.details.get("collaboration_nodes", 0) > 1000
     assert r.details.get("email_nodes", 0) > 500
+    # The US Western States power grid is a single connected component of 4,941
+    # nodes — a real, distinct-topology (infrastructure) third family.
+    assert r.details.get("infrastructure_nodes", 0) > 4000
+
+
+def test_infrastructure_subgraphs_are_real_and_distinct(real_data):
+    """Power-grid subgraphs are genuine pieces of the US power grid and structurally
+    distinct: a near-planar infrastructure mesh means very low clustering and low
+    mean degree vs. the dense social nets."""
+    rng = np.random.default_rng(1)
+    subs = sample_subgraphs("infrastructure", n_samples=3, target_size=100, rng=rng)
+    assert subs, "expected at least one real power-grid subgraph"
+    sub = subs[0]
+    assert sub.n_nodes >= 25 and sub.n_edges >= 30
+    assert sub.source_network == "power-US-Grid.txt.gz"
+    feats = structural_features(sub)
+    assert set(feats) == set(STRUCTURAL_FEATURES)
+    # Infrastructure topology: sparse mesh — clearly lower clustering and mean
+    # degree than a dense email subgraph would show.
+    assert feats["clustering"] < 0.25
+    assert feats["mean_degree"] < 4.0
 
 
 def test_subgraphs_are_real_and_simulation_runs(real_data):
@@ -151,6 +183,8 @@ def test_epidemic_threshold_law_confirmed(real_data):
     spec = DiffusionSpec(structural_feature="k2_over_k1", outcome="final_size", simulator="sir")
     res = run_diffusion_experiment(spec)
     assert res["uses_synthetic_data"] is False
+    # All THREE real topology families feed the cross-family LOFO.
+    assert set(res["by_family"]) == {"collaboration", "email", "infrastructure"}
     assert res["cross_family_replicates"] is True
     assert res["robust_to_simulator"] is True
     # Emits the exact lofo/null triple the artifact gate reads.
@@ -166,13 +200,17 @@ def test_null_rejects_broken_signal(real_data):
     """
     A structural feature that does NOT consistently drive diffusion must not be
     confirmed — the null/replication guard must reject it. degree_gini flips sign
-    across the two real families, so it cannot be 'confirmed'.
+    across the three real families (it does not hold a single consistent sign on
+    collaboration, email and the power-grid/infrastructure net), so it cannot be
+    'confirmed'.
     """
     spec = DiffusionSpec(structural_feature="degree_gini", outcome="final_size", simulator="sir")
     res = run_diffusion_experiment(spec)
     verdict, _r, _c = classify_diffusion_verdict("", res)
     assert verdict != "confirmed", res["by_family"]
     assert res["verified_true_steps"] == 0
+    # All three real families participate in the cross-family test.
+    assert set(res["by_family"]) == {"collaboration", "email", "infrastructure"}
 
 
 def test_perm_p_zero_is_not_treated_as_failure():
