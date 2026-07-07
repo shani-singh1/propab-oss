@@ -40,9 +40,22 @@ class ProvenOnlySource(BaseSource):
         return True
 
     async def search(self, query, profile):
+        # Abstract-heavy corpus (mirrors the live failure mode): the normal query
+        # returns a proven-only abstract; the dedicated "open problem" query returns
+        # a survey abstract with an explicit marker. Abstracts carry the extractable
+        # content — an empty RawDocument is dropped before indexing.
         if "open problem" in query.lower():
-            return [RawDocument(source="arxiv", external_id="survey")]
-        return [RawDocument(source="arxiv", external_id="result")]
+            return [RawDocument(
+                source="arxiv", external_id="survey", title="A Survey of f(n)",
+                abstract=(
+                    "Open problem: determine by exhaustive computational search the "
+                    "exact extremal value f(n) for n >= 8."
+                ),
+            )]
+        return [RawDocument(
+            source="arxiv", external_id="result", title="A Result on f(n)",
+            abstract="We prove that f(n) is at most 2.76^n for all n.",
+        )]
 
     async def fetch_full_text(self, doc):
         if doc.external_id == "survey":
