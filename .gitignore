@@ -38,28 +38,18 @@ mandrake-data/
 # matched by a trailing-slash pattern, which silently no-ops any negation
 # of a file inside it.
 artifacts/*
-!artifacts/engineering_log.md
+# Functional data that MUST stay tracked: read/consumed by packages, services,
+# tests, CI, or the bench regression harness. Everything else under artifacts/
+# is local-only run output (campaign dumps, live-validation transcripts, eval
+# result dumps, analysis notes) and is never pushed.
+!artifacts/.gitkeep
 !artifacts/routing_corpus_status.json
-!artifacts/ap_free_preflight_n50000.json
-!artifacts/econometrics_discoverybench_hms.json
-
-# Codebase investigation report (living map of architecture + failure analysis)
-!artifacts/codebase_investigation.md
-
-# Biology domains v1 — live end-to-end validation transcript + reproducible runner
-!artifacts/biology_live_validation.md
-!artifacts/biology_live_validation.json
-!artifacts/run_biology_live_validation.py
 
 # Bench-harness baselines (regression-catchable engineering metrics)
 !artifacts/bench/
 !artifacts/bench/*.json
 
-# Literature service artifacts (agent3.md "Artifacts to maintain")
-!artifacts/literature_coverage.json
-!artifacts/literature_misses.json
-!artifacts/astabench_literature_scores.json
-!artifacts/litqa2_live_results.json
+# Domain gap maps (routing/coverage reference data)
 !artifacts/domain_gap_maps/
 !artifacts/domain_gap_maps/*.json
 
