@@ -166,6 +166,10 @@ def parse_evidence(evidence_summary: str | None) -> dict[str, Any]:
         "verified_false_steps": None,
         "claim_type": None,
         "data_provenance": None,
+        # DISC2: carry the discovery/rediscovery flags so a known-value lookup
+        # confirmation is never counted as a novel discovery in the paper.
+        "trivial_rediscovery": None,
+        "discovery_worthy": None,
     }
 
     def _absorb(ev: dict[str, Any]) -> None:
@@ -180,6 +184,10 @@ def parse_evidence(evidence_summary: str | None) -> dict[str, Any]:
         # DOM2: carry synthetic-data provenance so the paper can label the finding.
         if ev.get("data_provenance"):
             out["data_provenance"] = str(ev["data_provenance"])
+        # DISC2: carry the discovery/rediscovery flags (a lookup is not a discovery).
+        for k in ("trivial_rediscovery", "discovery_worthy"):
+            if isinstance(ev.get(k), bool):
+                out[k] = ev[k]
         ci = ev.get("confidence_interval")
         if isinstance(ci, list) and len(ci) >= 2 and all(isinstance(x, (int, float)) for x in ci[:2]):
             out["confidence_interval"] = [float(ci[0]), float(ci[1])]
@@ -323,6 +331,10 @@ def _enrich_finding_row(row: dict[str, Any], ev: dict[str, Any], verdict: str) -
         "node_role": "DISCOVERY",
         # DOM2: "synthetic" when the finding is backed by a seed-generated dataset.
         "data_provenance": ev.get("data_provenance"),
+        # DISC2: a confirmation against a best-known table is a rediscovery of a
+        # known value, not a novel discovery; carry the flags so the paper labels it.
+        "trivial_rediscovery": ev.get("trivial_rediscovery"),
+        "discovery_worthy": ev.get("discovery_worthy"),
         "top_artifact": ev.get("top_artifact"),
         "top_artifact_survived": ev.get("top_artifact_survived"),
         "second_artifact_check": ev.get("second_artifact_check"),
@@ -363,7 +375,28 @@ async def compile_session_findings(session_factory: async_sessionmaker, session_
         "unexecuted": unexecuted,
     }
     counts["tested"] = counts["confirmed"] + counts["refuted"] + counts["inconclusive"]
+    # DISC2: split confirmed findings into novel discoveries vs known-value
+    # rediscoveries (e.g. best-known-table lookups). A rediscovery is honest to
+    # report as "verified (known)" but must NEVER be counted as a novel discovery.
+    rediscoveries = sum(1 for f in buckets["confirmed"] if _finding_is_rediscovery(f))
+    counts["rediscoveries"] = rediscoveries
+    counts["discoveries"] = counts["confirmed"] - rediscoveries
     return {"counts": counts, **buckets}
+
+
+def _finding_is_rediscovery(f: dict[str, Any]) -> bool:
+    """Domain-general: a confirmed finding that merely reproduced a known value.
+
+    Keys only on the evidence flags (``trivial_rediscovery`` /
+    ``discovery_worthy``) so it applies to any domain, not just combinatorics.
+    """
+    stats = f.get("stats") or {}
+    for src in (stats, f):
+        if src.get("trivial_rediscovery") is True:
+            return True
+        if src.get("discovery_worthy") is False:
+            return True
+    return False
 
 
 async def _aggregate_tool_usage(session_factory: async_sessionmaker, session_id: str) -> dict[str, Any]:
@@ -560,6 +593,12 @@ def _finding_sentence(f: dict[str, Any]) -> str:
     # so the Results prose never presents it as a real-world result.
     if str((f.get("stats") or {}).get("data_provenance") or f.get("data_provenance") or "").lower() == "synthetic":
         meta.append("synthetic dataset (illustrative)")
+    # DISC2: a confirmation that merely reproduced a known value (table lookup) is a
+    # rediscovery, not a novel result — label it so the prose never oversells it.
+    _st = f.get("stats") or {}
+    if _st.get("trivial_rediscovery") is True or _st.get("discovery_worthy") is False \
+            or f.get("trivial_rediscovery") is True or f.get("discovery_worthy") is False:
+        meta.append("rediscovery (known value)")
     if f.get("claim_type"):
         meta.append(f"claim type: {f['claim_type']}")
     if f.get("replication_level"):
