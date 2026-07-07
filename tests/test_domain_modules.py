@@ -221,12 +221,10 @@ def test_builtin_plugins_not_spuriously_failed_by_preflight():
 
     _DEFAULT_FAIL = "no verification capability"
 
-    # network_diffusion is scope-only: no run_verification override, no profile,
-    # and it does NOT override preflight — so it falls through to the base default.
-    # It also never owns campaign routing (matches() == False), so core never
-    # calls its preflight for launch. Assert the change does not break it in a way
-    # that would matter: it must not be resolvable heuristically.
-    assert NetworkDiffusionPlugin().matches(question="a contagion diffusion study") is False
+    # network_diffusion is now a real verifying domain (SIS/SIR simulator + a real
+    # cross-topology holdout null), so it self-routes on contagion questions and
+    # joins the other built-ins below.
+    assert NetworkDiffusionPlugin().matches(question="a contagion diffusion study") is True
 
     for plugin_cls in (
         MaterialsPlugin,
@@ -234,9 +232,10 @@ def test_builtin_plugins_not_spuriously_failed_by_preflight():
         EnzymeKineticsPlugin,
         GraphInvariantsPlugin,
         MathCombinatoricsPlugin,
+        NetworkDiffusionPlugin,
     ):
         plugin = plugin_cls()
-        # All 5 override preflight with their own dataset/power check.
+        # All 6 override preflight with their own dataset/power check.
         assert type(plugin).preflight is not DomainPlugin.preflight, (
             f"{plugin.domain_id} unexpectedly uses the default preflight"
         )
@@ -264,11 +263,9 @@ def test_has_verification_capability_matches_builtin_owners():
         EnzymeKineticsPlugin,
         GraphInvariantsPlugin,
         MathCombinatoricsPlugin,
+        NetworkDiffusionPlugin,
     ):
         assert plugin_cls().has_verification_capability() is True
-
-    # Scope-only contributor: no verification path (but never routed to as owner).
-    assert NetworkDiffusionPlugin().has_verification_capability() is False
 
 
 # ── D3: empty/None defaults are observable, not silently "passed" ────────────
@@ -289,9 +286,10 @@ def test_d3_scope_and_artifact_queries_are_observable():
     from propab.domain_modules.network_diffusion.plugin import NetworkDiffusionPlugin
 
     nd = NetworkDiffusionPlugin()
-    # network_diffusion supplies a scope template but no artifact models (no profile).
+    # network_diffusion now supplies BOTH a scope template and artifact models — it
+    # gained a real domain profile when it became a verifying domain.
     assert nd.has_scope_template() is True
-    assert nd.has_artifact_models() is False
+    assert nd.has_artifact_models() is True
 
 
 # ── DOM3: keyword collisions route by MATCH SCORE, not registration order ─────
