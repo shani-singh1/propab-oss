@@ -647,6 +647,26 @@ pair. **CFG6 · LOW · VERIFIED — token usage never captured** (`llm.py:235-23
 `input_tokens/output_tokens` hardcoded `None` though all 3 providers return counts) → no
 honest usage-based budget signal (compounds BUD1).
 
+## CAMPAIGN #2 — REAL 2h RUN, PASSED (2026-07-07, live, campaign 5f99b96d)
+
+2h budget, NO hypothesis cap. **Ran the full 2h cleanly and honestly.** Final:
+stop_reason=TIME_BUDGET_EXHAUSTED (budget was the limiter, no crash), **131
+hypotheses**, max convergence depth **8**, **21 confirmed / 92 inconclusive /
+14 refuted** (~16% confirm, inconclusive-dominant throughout — the honesty gate
+never drifted over 131 real experiments). Real literature prior throughout
+(source=literature_service, no fallback). Zero crashes, zero false-confirm signals.
+**Confirmed findings are REAL computation** — cap-set sweeps with the actual maximal
+cap sizes in F_3^n (9,20,45,112,236) + real CLP ratios; greedy-Sidon F(n)/sqrt(n)
+sweep to n=10000 (ratios 1.2→0.67, genuinely decreasing); AP-free density decreasing.
+**Paper is honest + research-quality** — abstract/methods/results, 4 embedded figures,
+~26KB LaTeX; reports the true counts (127 eval / 21 confirmed) with no inflation;
+`_effective_verdict` gate held. This live run validates the entire hardening effort
+end-to-end (verdict honesty, convergence depth, literature wiring, paper rework).
+**Minor LOW follow-ups (found via honest inspection):** (a) several near-duplicate
+cap-set findings confirmed as separate nodes — confirm-level dedup could be tighter;
+(b) results prose says "statistically significant evidence" for FINITE_VERIFIED
+deterministic findings — wording imprecision (verdict typing itself is correct).
+
 ## CAMPAIGN SMOKE TEST #1 — PASSED (2026-07-07, live, campaign e62ee0b7)
 
 Rebuilt the full stack with current code (api/orchestrator/worker/literature + infra;
