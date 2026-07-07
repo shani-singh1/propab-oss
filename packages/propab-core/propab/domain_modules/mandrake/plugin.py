@@ -68,13 +68,26 @@ class MandrakePlugin(DomainPlugin):
             "ood_test": "LOFO on held-out family; label-shuffle permutation p<0.05 required before confirm",
         }
 
+    # Distinct RT-family campaign markers (mirrors the historical
+    # is_mandrake_campaign). Two are required to gate; the count feeds
+    # match_score so a mandrake-vs-enzyme_kinetics collision breaks on marker
+    # density, not registration order.
+    _MATCH_MARKERS = (
+        "rt activity", "reverse transcriptase", "evolutionary family", "biophysical propert",
+        "rt domain", "retroelement", "retrotransposon",
+    )
+
     def matches(self, *, question: str = "", payload: dict[str, Any] | None = None) -> bool:
-        # Mirrors the historical is_mandrake_campaign.
         if payload and str(payload.get("domain") or "") == "mandrake":
             return True
         q = (question or "").lower()
-        markers = ("rt activity", "reverse transcriptase", "evolutionary family", "biophysical propert")
-        return sum(1 for m in markers if m in q) >= 2
+        return sum(1 for m in self._MATCH_MARKERS if m in q) >= 2
+
+    def match_score(self, *, question: str = "", payload: dict[str, Any] | None = None) -> float:
+        if payload and str(payload.get("domain") or "") == "mandrake":
+            return float(len(self._MATCH_MARKERS))
+        q = (question or "").lower()
+        return float(sum(1 for m in self._MATCH_MARKERS if m in q))
 
     def available_features(self) -> list[str]:
         from propab.domain_adapters.mandrake_adapter import _KNOWN_FEATURES
@@ -140,20 +153,56 @@ class MandrakePlugin(DomainPlugin):
             "classification_codes": {
                 "mesh": ["RNA-Directed DNA Polymerase", "Retroelements", "Evolution, Molecular"],
             },
-            "open_problem_sources": [],
-            "tabulation_sources": [],
+            "open_problem_sources": [
+                {
+                    "name": "Pfam / InterPro reverse-transcriptase clan",
+                    "url": "https://www.ebi.ac.uk/interpro/entry/pfam/PF07727/",
+                },
+            ],
+            "tabulation_sources": [
+                {
+                    "name": "Pfam RT domains (RVT clan CL0027)",
+                    "identifiers": ["PF00078", "PF07727", "PF13456", "CL0027"],
+                    # Authoritative family tabulation for rediscovery rejection:
+                    # PF00078 (RVT_1), PF07727 (RVT_2), PF13456 (RVT_3) are the
+                    # curated RT-domain families in the RVT clan CL0027. A RT-
+                    # family assignment already covered by these HMMs is a lookup,
+                    # not a discovery.
+                    "url": "https://www.ebi.ac.uk/interpro/set/pfam/CL0027/",
+                    "source": "Mistry et al. 2021, Nucleic Acids Res. (10.1093/nar/gkaa913)",
+                },
+                {
+                    "name": "Xiong & Eickbush RT phylogeny anchors",
+                    "identifiers": ["RT_seven_motifs", "cross_class_identity_ceiling"],
+                    # Best-known structural anchors: the RT catalytic core is the
+                    # seven conserved sequence motifs over a ~240-aa domain, and
+                    # cross-retroid-class RT sequence identity is characteristically
+                    # LOW (< ~25%). A "novel" within-family signal that is really
+                    # just the known motif conservation, or an apparent signal
+                    # driven by high within-class identity, is rediscovery/artifact.
+                    "conserved_motifs": 7,
+                    "domain_length_aa": 240,
+                    "cross_class_identity_ceiling_pct": 25,
+                    "source": "Xiong & Eickbush 1990, EMBO J. (10.1002/j.1460-2075.1990.tb07536.x)",
+                },
+            ],
             "canonical_surveys": [
                 {
                     "title": "Origin and evolution of retroelements based upon their reverse transcriptase sequences.",
                     "doi": "10.1002/j.1460-2075.1990.tb07536.x",
                 },
+                {
+                    "title": "Pfam: The protein families database in 2021",
+                    "doi": "10.1093/nar/gkaa913",
+                },
             ],
             "novelty_criteria": (
                 "A finding is novel if it establishes a within-family predictive signal for RT "
                 "activity that survives both leave-one-family-out holdout and a low-sequence-"
-                "identity split (ruling out the sequence-redundancy artifact), rather than "
-                "restating the RT phylogenetic family structure already established by Xiong & "
-                "Eickbush (1990)."
+                "identity (< ~25%) split (ruling out the sequence-redundancy artifact), rather "
+                "than restating the RT phylogenetic family structure already tabulated in the "
+                "Pfam RVT clan (PF00078/PF07727/PF13456, CL0027) or the seven conserved RT "
+                "catalytic motifs established by Xiong & Eickbush (1990)."
             ),
         }
 

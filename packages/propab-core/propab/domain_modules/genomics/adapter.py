@@ -1,7 +1,26 @@
-"""GTEx-style gene expression subset — synthetic fallback, cache on disk."""
+"""Real GTEx v8 cross-tissue gene-expression subset (median TPM).
+
+The frame is built from the GTEx v8 *median gene-level TPM* release
+(``GTEx_Analysis_2017-06-05_v8_...gene_median_tpm.gct.gz``), a real public
+transcriptomic atlas. We take one representative tissue column for each of 10
+organs, log2-transform, keep the 1000 most-variable genes, and derive the
+standard gene-level features (mean, variance, coefficient of variation, and the
+Yanai tau tissue-specificity index) from the **real** expression matrix.
+
+Grouping is by each gene's dominant (max-expression) tissue so the verifier's
+leave-one-tissue-out (LOFO) + tissue-label-shuffle null runs on real tissues.
+
+Provenance / license: see ``data/genomics/README.md``. If GTEx cannot be
+reached and no real cache exists, a clearly-labelled synthetic fallback is
+generated; ``dataset_is_synthetic()`` reports which one is on disk and the
+plugin's ``uses_synthetic_data()`` reads it.
+"""
 from __future__ import annotations
 
+import gzip
+import io
 import json
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,8 +35,26 @@ TISSUES: tuple[str, ...] = (
     "Skin", "Blood", "Adipose", "Thyroid", "Colon",
 )
 N_GENES = 1000
-SAMPLES_PER_TISSUE = 10
+SAMPLES_PER_TISSUE = 10  # synthetic-fallback only
 RANDOM_SEED = 42
+
+GTEX_URL = (
+    "https://storage.googleapis.com/adult-gtex/bulk-gex/v8/rna-seq/"
+    "GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_median_tpm.gct.gz"
+)
+# Representative detailed GTEx tissue column per organ label above.
+_GTEX_TISSUE_MAP: dict[str, str] = {
+    "Brain": "Brain - Cortex",
+    "Heart": "Heart - Left Ventricle",
+    "Liver": "Liver",
+    "Lung": "Lung",
+    "Muscle": "Muscle - Skeletal",
+    "Skin": "Skin - Not Sun Exposed (Suprapubic)",
+    "Blood": "Whole Blood",
+    "Adipose": "Adipose - Subcutaneous",
+    "Thyroid": "Thyroid",
+    "Colon": "Colon - Sigmoid",
+}
 
 KNOWN_FEATURES: tuple[str, ...] = (
     "expression_variance",
@@ -37,35 +74,28 @@ def cache_path() -> Path:
     return cache_dir() / "gtex_subset_v1.csv"
 
 
-def _synthetic_gtex_frame() -> pd.DataFrame:
-    """10 tissues × 1000 genes — ~50MB class, generated in seconds."""
-    rng = np.random.default_rng(RANDOM_SEED)
-    rows: list[dict[str, Any]] = []
-    gene_ids = [f"ENSG{i:011d}" for i in range(N_GENES)]
-    # Housekeeping-like genes: low tau, high cross-tissue correlation
-    for gi, gid in enumerate(gene_ids):
-        base = rng.lognormal(mean=2.0 + 0.3 * (gi % 7), sigma=0.4)
-        tissue_effects = rng.normal(0, 0.15 if gi % 5 == 0 else 0.8, len(TISSUES))
-        for ti, tissue in enumerate(TISSUES):
-            for _ in range(SAMPLES_PER_TISSUE):
-                expr = max(0.01, base + tissue_effects[ti] + rng.normal(0, 0.25))
-                rows.append({
-                    "gene_id": gid,
-                    "tissue": tissue,
-                    "expression": float(expr),
-                })
-    df = pd.DataFrame(rows)
-    features = compute_gene_features(df)
-    return df.merge(features, on="gene_id", how="left")
+def meta_path() -> Path:
+    return cache_dir() / "gtex_subset_v1.meta.json"
+
+
+def dataset_is_synthetic() -> bool:
+    """True when the on-disk cache was produced by the synthetic fallback."""
+    mp = meta_path()
+    if not mp.is_file():
+        return True
+    try:
+        return bool(json.loads(mp.read_text(encoding="utf-8")).get("synthetic", True))
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def compute_gene_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Gene-level features from tissue expression matrix."""
+    """Gene-level features from a (gene_id, tissue, expression) long frame."""
     pivot = df.pivot_table(index="gene_id", columns="tissue", values="expression", aggfunc="mean")
     means = pivot.mean(axis=1)
     stds = pivot.std(axis=1).replace(0, np.nan)
     cv = (stds / means.replace(0, np.nan)).fillna(0.0)
-    # Tau index (Yanai et al.) — 0 = housekeeping, 1 = tissue-specific
+    # Tau index (Yanai et al.) — 0 = housekeeping, 1 = tissue-specific.
     ranked = pivot.rank(axis=1, method="average")
     n = pivot.shape[1]
     tau = ((ranked.sum(axis=1) - n) / (n - 1) / n).clip(0, 1)
@@ -77,6 +107,74 @@ def compute_gene_features(df: pd.DataFrame) -> pd.DataFrame:
         "cv_across_tissues": cv.values,
     })
     return out
+
+
+def _build_real_long_frame(gz_bytes: bytes) -> pd.DataFrame:
+    """Parse GTEx median-TPM .gct.gz into a (gene_id, tissue, expression) frame."""
+    with gzip.open(io.BytesIO(gz_bytes), "rt") as fh:
+        fh.readline()  # '#1.2'
+        fh.readline()  # dims
+        raw = pd.read_csv(fh, sep="\t")
+    cols: dict[str, str] = {}
+    for label, detailed in _GTEX_TISSUE_MAP.items():
+        if detailed in raw.columns:
+            cols[label] = detailed
+            continue
+        organ = detailed.split(" - ")[0]
+        candidates = [c for c in raw.columns if c.startswith(organ)]
+        if candidates:
+            cols[label] = candidates[0]
+    if len(cols) < 3:
+        return pd.DataFrame()
+    mat = raw[["Name", *cols.values()]].copy()
+    mat.columns = ["gene_id", *cols.keys()]
+    mat["gene_id"] = mat["gene_id"].astype(str).str.split(".").str[0]
+    mat = mat.drop_duplicates(subset="gene_id").set_index("gene_id")
+    expr = mat[(mat > 0.1).sum(axis=1) >= 5]
+    logexpr = np.log2(expr + 1.0)
+    top = logexpr.var(axis=1).sort_values(ascending=False).head(N_GENES).index
+    sub = logexpr.loc[top]
+    long = (
+        sub.reset_index()
+        .melt(id_vars="gene_id", var_name="tissue", value_name="expression")
+    )
+    features = compute_gene_features(long)
+    return long.merge(features, on="gene_id", how="left")
+
+
+def _write_readme(*, synthetic: bool, source: str) -> None:
+    kind = "SYNTHETIC FALLBACK" if synthetic else "REAL DATA"
+    cache_dir().joinpath("README.md").write_text(
+        f"# genomics cache — {kind}\n\n"
+        f"Source: {source}\n\n"
+        "Full provenance, license and column documentation:\n"
+        "`packages/propab-core/propab/domain_modules/genomics/DATA_PROVENANCE.md`\n\n"
+        "This directory is git-ignored; the adapter regenerates it from the source "
+        "on first use. Delete the CSV + meta to force a refresh.\n",
+        encoding="utf-8",
+    )
+
+
+def _fetch_gtex(timeout: float = 180.0) -> bytes:
+    req = urllib.request.Request(GTEX_URL, headers={"User-Agent": "propab-genomics-adapter/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (trusted GTEx host)
+        return resp.read()
+
+
+def _synthetic_gtex_frame() -> pd.DataFrame:
+    """Labelled synthetic fallback (used only if GTEx is unavailable)."""
+    rng = np.random.default_rng(RANDOM_SEED)
+    rows: list[dict[str, Any]] = []
+    gene_ids = [f"ENSG{i:011d}" for i in range(N_GENES)]
+    for gi, gid in enumerate(gene_ids):
+        base = rng.lognormal(mean=2.0 + 0.3 * (gi % 7), sigma=0.4)
+        tissue_effects = rng.normal(0, 0.15 if gi % 5 == 0 else 0.8, len(TISSUES))
+        for ti, tissue in enumerate(TISSUES):
+            for _ in range(SAMPLES_PER_TISSUE):
+                expr = max(0.01, base + tissue_effects[ti] + rng.normal(0, 0.25))
+                rows.append({"gene_id": gid, "tissue": tissue, "expression": float(expr)})
+    df = pd.DataFrame(rows)
+    return df.merge(compute_gene_features(df), on="gene_id", how="left")
 
 
 @dataclass
@@ -102,18 +200,40 @@ class GenomicsExperimentSpec:
 
 
 class GenomicsAdapter:
+    def _write(self, df: pd.DataFrame, *, synthetic: bool, source: str) -> Path:
+        path = cache_path()
+        df.to_csv(path, index=False)
+        meta = {
+            "synthetic": synthetic,
+            "source": source,
+            "n_genes": int(df["gene_id"].nunique()) if not df.empty else 0,
+            "n_tissues": int(df["tissue"].nunique()) if not df.empty else 0,
+            "tissues": sorted(df["tissue"].unique().tolist()) if not df.empty else list(TISSUES),
+            "features": list(KNOWN_FEATURES),
+        }
+        meta_path().write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        _write_readme(synthetic=synthetic, source=source)
+        return path
+
     def ensure_cache(self) -> Path:
         path = cache_path()
         if path.is_file():
             return path
-        df = _synthetic_gtex_frame()
-        df.to_csv(path, index=False)
-        meta = {"n_genes": N_GENES, "n_tissues": len(TISSUES), "synthetic": True}
-        cache_dir().joinpath("gtex_subset_v1.meta.json").write_text(
-            json.dumps(meta, indent=2), encoding="utf-8",
-        )
-        return path
+        try:
+            gz = _fetch_gtex()
+            df = _build_real_long_frame(gz)
+            if not df.empty and df["tissue"].nunique() >= 3 and df["gene_id"].nunique() >= 30:
+                return self._write(
+                    df,
+                    synthetic=False,
+                    source=(
+                        "GTEx v8 median gene-level TPM "
+                        "(GTEx_Analysis_2017-06-05_v8 gene_median_tpm)"
+                    ),
+                )
+        except Exception:  # noqa: BLE001 (network/parse failures fall back)
+            pass
+        return self._write(_synthetic_gtex_frame(), synthetic=True, source="synthetic-fallback")
 
     def load_frame(self) -> pd.DataFrame:
-        path = self.ensure_cache()
-        return pd.read_csv(path)
+        return pd.read_csv(self.ensure_cache())

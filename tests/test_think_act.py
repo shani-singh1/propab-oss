@@ -7,9 +7,40 @@ import pytest
 from services.worker.think_act import (
     AgentContext,
     _fallback_significance_action,
+    _is_spec_example_params,
+    _lists_trivially_equal,
     _parse_action,
+    _params_match_example,
     should_stop,
 )
+
+# Minimal live-spec fixtures mirroring the real TOOL_SPEC["example"]["params"]
+# for the three significance tools. These are what registry.get_cluster_with_significance
+# passes into decide_next_action as `specs`.
+_SIG_SPECS = [
+    {
+        "name": "statistical_significance",
+        "significance_capable": True,
+        "example": {"params": {"results_a": [0.9, 0.88, 0.91], "results_b": [0.82, 0.8, 0.79]}},
+    },
+    {
+        "name": "bootstrap_confidence",
+        "significance_capable": True,
+        "example": {"params": {"values": [0.1, 0.2, 0.15, 0.18]}},
+    },
+    {
+        "name": "literature_baseline_compare",
+        "significance_capable": True,
+        "example": {"params": {"our_results": [0.42, 0.44, 0.41], "baseline_value": 0.5}},
+    },
+    # A non-significance tool with numeric example params must never be treated
+    # as a significance example source.
+    {
+        "name": "compute_flops",
+        "significance_capable": False,
+        "example": {"params": {"input_shape": [32, 784]}},
+    },
+]
 
 
 def _make_ctx(**kwargs) -> AgentContext:
@@ -132,3 +163,84 @@ def test_agent_context_significance_status_with_p_value():
     ctx = _make_ctx(results_so_far=[{"p_value": 0.03, "effect_size": 0.45}])
     sig = ctx.significance_status()
     assert sig.gate_passed is True
+
+
+# ─── Generalized spec-example fabrication guard ───────────────────────────────
+
+
+def test_guard_flags_own_spec_example_stat_sig():
+    # statistical_significance passed its own spec example -> flagged.
+    params = {"results_a": [0.9, 0.88, 0.91], "results_b": [0.82, 0.8, 0.79]}
+    assert _is_spec_example_params("statistical_significance", params, _SIG_SPECS) is True
+
+
+def test_guard_flags_own_spec_example_bootstrap():
+    params = {"values": [0.1, 0.2, 0.15, 0.18]}
+    assert _is_spec_example_params("bootstrap_confidence", params, _SIG_SPECS) is True
+
+
+def test_guard_flags_own_spec_example_litbaseline():
+    params = {"our_results": [0.42, 0.44, 0.41], "baseline_value": 0.5}
+    assert _is_spec_example_params("literature_baseline_compare", params, _SIG_SPECS) is True
+
+
+def test_guard_flags_cross_tool_copied_example():
+    # KEY NEW BEHAVIOR: agent copies statistical_significance's example array into
+    # bootstrap_confidence's `values`. The old 3-array denylist keyed by tool name
+    # would MISS this; the value-based guard catches it.
+    params = {"values": [0.9, 0.88, 0.91]}
+    assert _is_spec_example_params("bootstrap_confidence", params, _SIG_SPECS) is True
+
+
+def test_guard_flags_trivially_scaled_example():
+    # Example multiplied by a constant (10x) — a trivial derivation, still fake.
+    params = {"values": [1.0, 2.0, 1.5, 1.8]}
+    assert _is_spec_example_params("bootstrap_confidence", params, _SIG_SPECS) is True
+
+
+def test_guard_flags_reordered_example():
+    params = {"results_a": [0.88, 0.91, 0.9], "results_b": [0.79, 0.8, 0.82]}
+    assert _is_spec_example_params("statistical_significance", params, _SIG_SPECS) is True
+
+
+def test_guard_accepts_genuine_values():
+    # Real measurements that do not match any spec example -> accepted.
+    params = {
+        "results_a": [0.312, 0.298, 0.305, 0.301],
+        "results_b": [0.277, 0.281, 0.269, 0.274],
+    }
+    assert _is_spec_example_params("statistical_significance", params, _SIG_SPECS) is False
+
+
+def test_guard_does_not_use_nonsignificance_tool_example():
+    # compute_flops' input_shape [32, 784] is a non-sig tool example. An agent
+    # legitimately passing [32, 784] as `values` should NOT be flagged from it.
+    params = {"values": [32.0, 784.0]}
+    assert _is_spec_example_params("bootstrap_confidence", params, _SIG_SPECS) is False
+
+
+def test_guard_legacy_floor_without_specs():
+    # No specs supplied (e.g. correction re-check) -> legacy hardcoded floor still
+    # catches the three known examples, so we never regress below the old behavior.
+    assert _is_spec_example_params(
+        "statistical_significance",
+        {"results_a": [0.9, 0.88, 0.91], "results_b": [0.82, 0.8, 0.79]},
+        None,
+    ) is True
+    assert _is_spec_example_params(
+        "bootstrap_confidence", {"values": [0.1, 0.2, 0.15, 0.18]}, None
+    ) is True
+
+
+def test_params_match_example_value_based():
+    assert _params_match_example({"x": [0.1, 0.2, 0.15, 0.18]}, {"values": [0.1, 0.2, 0.15, 0.18]})
+    assert not _params_match_example({"x": [0.5, 0.6, 0.7]}, {"values": [0.1, 0.2, 0.15, 0.18]})
+
+
+def test_lists_trivially_equal_variants():
+    base = [0.1, 0.2, 0.15, 0.18]
+    assert _lists_trivially_equal(base, base)
+    assert _lists_trivially_equal([0.2, 0.1, 0.18, 0.15], base)  # reorder
+    assert _lists_trivially_equal([1.0, 2.0, 1.5, 1.8], base)  # 10x scale
+    assert _lists_trivially_equal([1.1, 1.2, 1.15, 1.18], base)  # +1 offset
+    assert not _lists_trivially_equal([0.3, 0.5, 0.9, 0.1], base)  # unrelated

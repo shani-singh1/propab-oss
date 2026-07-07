@@ -7,14 +7,19 @@ from typing import Any
 
 # Best-known cap-set sizes in F_3^n (OEIS / literature; n <= 8).
 CAP_SET_BEST_KNOWN: dict[int, int] = {
-    1: 1,
-    2: 2,
+    # Maximal cap sizes in AG(n,3) — OEIS A090245. n<=6 are PROVEN maxima (n=6=112,
+    # Potechin 2008); n=7 (236) and n=8 (496) are best-known lower bounds (the exact
+    # maximum is open for n>=7). Reference for rediscovery rejection ONLY — a
+    # computed size that merely reproduces one of these is a rediscovery, not a
+    # discovery. (Prior entries n=1,2,8 were wrong: 1->2, 2->4, 512->496.)
+    1: 2,
+    2: 4,
     3: 9,
     4: 20,
     5: 45,
     6: 112,
     7: 236,
-    8: 512,
+    8: 496,
 }
 
 # Hypothesis keywords requiring statistics the verifier does not compute.
@@ -557,6 +562,32 @@ def evaluate_experiment_claim(
     return {"claim_checked": True, "claim_supported": False, "notes_suffix": suffix}
 
 
+def _is_table_lookup_evidence(result: dict[str, Any]) -> bool:
+    """True when the result's evidence came from a best-known lookup table.
+
+    A best-known-table lookup is a *known value*, not an independent
+    computation. Such evidence may confirm arithmetic but must never be
+    called a discovery. We inspect (a) the top-level construction_source,
+    (b) every entry of a ``sweep``/``comparison_sweep`` list, and
+    (c) any nested ``threshold_search`` sub-result.
+    """
+    if result.get("construction_source") == "best_known_table":
+        return True
+    for key in ("sweep", "comparison_sweep"):
+        entries = result.get(key)
+        if isinstance(entries, list):
+            for entry in entries:
+                if (
+                    isinstance(entry, dict)
+                    and entry.get("construction_source") == "best_known_table"
+                ):
+                    return True
+    threshold = result.get("threshold_search")
+    if isinstance(threshold, dict) and threshold.get("construction_source") == "best_known_table":
+        return True
+    return False
+
+
 def apply_claim_validation(
     result: dict[str, Any],
     statement: str,
@@ -597,8 +628,19 @@ def apply_claim_validation(
     if claim.get("claim_supported"):
         out["verified_true_steps"] = 1
         out["verified_false_steps"] = 0
-        out["discovery_worthy"] = True
-        out["trivial_rediscovery"] = False
+        if _is_table_lookup_evidence(out):
+            # The claim is merely "supported" by a best-known lookup value.
+            # The arithmetic verdict stands, but this is a REDISCOVERY of a
+            # known value, not an independent discovery.
+            out["discovery_worthy"] = False
+            out["trivial_rediscovery"] = True
+            out["notes"] = str(out.get("notes") or "") + (
+                "; rediscovery: verified against best-known table "
+                "(a known value, not an independent computation)"
+            )
+        else:
+            out["discovery_worthy"] = True
+            out["trivial_rediscovery"] = False
     else:
         out["verified_true_steps"] = 0
         out["verified_false_steps"] = 1

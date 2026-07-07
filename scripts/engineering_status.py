@@ -20,7 +20,9 @@ ROUTING_STATUS = ROOT / "artifacts" / "routing_corpus_status.json"
 
 # Remaining deferred items still called out in component_map.md (not T3-003 scope).
 DEFERRED_PATTERNS = (
-    (r"hypotheses\.py.*_domain_fallback_options", "DEFERRED — seed fallbacks in orchestrator"),
+    # _domain_fallback_options / hardcoded seed fallbacks REMOVED in the
+    # generation overhaul (Propab reasons, never expands templates) — no longer
+    # a deferred item.
     (r"theory_objects\.py", "DEFERRED — offline lifetime aggregation naming"),
     (r"policy_buckets\.py", "DEFERRED — infrastructure taxonomy by design"),
 )

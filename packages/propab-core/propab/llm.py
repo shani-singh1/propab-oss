@@ -20,9 +20,49 @@ logger = logging.getLogger(__name__)
 # Status codes worth retrying: rate limits and transient server-side failures.
 _RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 
+# Providers the client can actually dispatch to. Anything else (a typo, "anthropic",
+# "claude", …) is a misconfiguration, not a runnable request.
+SUPPORTED_LLM_PROVIDERS = frozenset({"openai", "gemini", "ollama"})
+# Providers that require a non-empty API key. Ollama is a local server needing none.
+_KEY_REQUIRED_PROVIDERS = frozenset({"openai", "gemini"})
+
+
+class LLMConfigError(RuntimeError):
+    """Raised when the LLM client is misconfigured (unknown provider or missing key).
+
+    A config error must FAIL LOUD: never fall back to a fabricated placeholder
+    response, which downstream would treat as a real model answer and quietly
+    "research" one canned claim across every domain while looking healthy.
+    """
+
+
+def _normalize_provider(provider: str | None) -> str:
+    """Lower-cased, stripped provider name; empty defaults to 'openai'."""
+    return (provider or "openai").strip().lower()
+
+
+def _validate_llm_config(provider: str | None, api_key: str | None) -> str:
+    """Validate provider + key, returning the normalized provider or raising.
+
+    Raises LLMConfigError for an unsupported provider or a supported provider
+    that requires a key but was given an empty one.
+    """
+    prov = _normalize_provider(provider)
+    if prov not in SUPPORTED_LLM_PROVIDERS:
+        raise LLMConfigError(
+            f"unsupported LLM provider {provider!r} "
+            f"(supported: {', '.join(sorted(SUPPORTED_LLM_PROVIDERS))})"
+        )
+    if prov in _KEY_REQUIRED_PROVIDERS and not (api_key or "").strip():
+        raise LLMConfigError(f"missing API key for provider {prov!r}")
+    return prov
+
 
 def _is_transient_llm_error(exc: Exception) -> bool:
     """True for network/timeout/rate-limit errors that a retry can plausibly fix."""
+    # Config errors are never transient — do not waste retries hiding a misconfig.
+    if isinstance(exc, LLMConfigError):
+        return False
     if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError)):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
@@ -40,7 +80,9 @@ class LLMClient:
         emitter: EventEmitter,
         session_factory: async_sessionmaker,
     ) -> None:
-        self.provider = provider
+        # Fail loud on misconfiguration at construction time rather than silently
+        # fabricating a placeholder hypothesis on first call.
+        self.provider = _validate_llm_config(provider, api_key)
         self.model = model
         self.api_key = api_key
         self.emitter = emitter
@@ -110,24 +152,13 @@ class LLMClient:
         raise last_exc if last_exc else RuntimeError("LLM call failed without an exception")
 
     async def _call_provider_once(self, prompt: str) -> str:
-        prov = (self.provider or "openai").strip().lower()
+        # Provider/key are validated in __init__; re-validate defensively so a
+        # mutated client (or a subclass) can never fall through to a placeholder.
+        prov = _validate_llm_config(self.provider, self.api_key)
         if prov == "ollama":
             return await self._ollama_chat(prompt)
         if prov == "gemini":
             return await self._gemini_generate_content(prompt)
-
-        if prov != "openai" or not self.api_key:
-            return json.dumps(
-                [
-                    {
-                        "id": "h1",
-                        "text": "A controlled intervention can improve measurable outcome quality.",
-                        "test_methodology": "Run baseline versus intervention and compare primary metrics.",
-                        "gap_reference": "No indexed literature yet",
-                        "expected_result": "Intervention outperforms baseline by statistically significant margin.",
-                    }
-                ]
-            )
 
         url = "https://api.openai.com/v1/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
@@ -165,17 +196,7 @@ class LLMClient:
 
     async def _gemini_generate_content(self, prompt: str) -> str:
         if not (self.api_key or "").strip():
-            return json.dumps(
-                [
-                    {
-                        "id": "h1",
-                        "text": "A controlled intervention can improve measurable outcome quality.",
-                        "test_methodology": "Run baseline versus intervention and compare primary metrics.",
-                        "gap_reference": "No indexed literature yet",
-                        "expected_result": "Intervention outperforms baseline by statistically significant margin.",
-                    }
-                ]
-            )
+            raise LLMConfigError("missing API key for provider 'gemini'")
         mid = (self.model or "gemini-2.0-flash").strip()
         if mid.startswith("models/"):
             mid = mid[len("models/") :]

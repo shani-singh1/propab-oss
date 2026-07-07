@@ -347,24 +347,130 @@ def _tools_summary(specs: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _is_spec_example_params(tool_name: str, params: dict) -> bool:
-    """Detect when agent is using hardcoded tool-spec example values."""
-    if tool_name == "statistical_significance":
-        ra = params.get("results_a")
-        rb = params.get("results_b")
-        example_a = [0.9, 0.88, 0.91]
-        example_b = [0.82, 0.8, 0.79]
-        if ra == example_a or rb == example_b:
-            return True
-    if tool_name == "bootstrap_confidence":
-        vals = params.get("values")
-        if vals == [0.1, 0.2, 0.15, 0.18]:
-            return True
-    if tool_name == "literature_baseline_compare":
-        our = params.get("our_results")
-        if our == [0.42, 0.44, 0.41]:
+# Legacy hardcoded significance-tool spec examples. Kept ONLY as a belt-and-braces
+# fallback for the (rare) case where the caller cannot supply the live tool specs
+# to _is_spec_example_params — e.g. a correction re-check where specs are not in
+# scope. The generalized, spec-driven check below is the primary guard.
+_LEGACY_SPEC_EXAMPLES: dict[str, dict[str, list[float]]] = {
+    "statistical_significance": {"results_a": [0.9, 0.88, 0.91], "results_b": [0.82, 0.8, 0.79]},
+    "bootstrap_confidence": {"values": [0.1, 0.2, 0.15, 0.18]},
+    "literature_baseline_compare": {"our_results": [0.42, 0.44, 0.41]},
+}
+
+
+def _spec_by_name(specs: list[dict] | None, tool_name: str) -> dict | None:
+    if not specs:
+        return None
+    for s in specs:
+        if isinstance(s, dict) and s.get("name") == tool_name:
+            return s
+    return None
+
+
+def _numeric_list(v: Any) -> list[float] | None:
+    """Return a list of floats iff v is a homogeneous numeric list, else None."""
+    if not isinstance(v, list) or not v:
+        return None
+    out: list[float] = []
+    for x in v:
+        if isinstance(x, bool) or not isinstance(x, (int, float)):
+            return None
+        out.append(float(x))
+    return out
+
+
+def _lists_trivially_equal(a: list[float], b: list[float]) -> bool:
+    """
+    Equal, or one is the other with a constant scale/offset (a trivial derivation:
+    copying the example and multiplying by 10, adding a constant, or reordering it).
+    We flag these because they carry no independent measurement — they are just the
+    spec example dressed up.
+    """
+    if a == b:
+        return True
+    if len(a) != len(b) or len(a) < 2:
+        return False
+    # Reordering: same multiset of values.
+    if sorted(a) == sorted(b):
+        return True
+    # Constant offset: a[i] - b[i] is (nearly) the same for all i.
+    diffs = [a[i] - b[i] for i in range(len(a))]
+    if max(diffs) - min(diffs) < 1e-9:
+        return True
+    # Constant positive scale: a[i] / b[i] is (nearly) the same for all i.
+    if all(abs(x) > 1e-12 for x in b):
+        ratios = [a[i] / b[i] for i in range(len(a))]
+        if max(ratios) - min(ratios) < 1e-9:
             return True
     return False
+
+
+def _params_match_example(params: dict, example_params: dict) -> bool:
+    """
+    True when any numeric-list param in ``params`` equals (or is a trivial
+    derivation of) the corresponding numeric-list value in the tool's spec
+    ``example_params``. This is deliberately general: it matches by VALUE, so
+    an agent that copies statistical_significance's example into
+    literature_baseline_compare's ``our_results`` is still caught, and any
+    future significance tool is covered without a code change.
+    """
+    if not isinstance(example_params, dict):
+        return False
+    example_lists: list[list[float]] = []
+    for ev in example_params.values():
+        el = _numeric_list(ev)
+        if el is not None:
+            example_lists.append(el)
+    if not example_lists:
+        return False
+    for pv in params.values():
+        pl = _numeric_list(pv)
+        if pl is None:
+            continue
+        for el in example_lists:
+            if _lists_trivially_equal(pl, el):
+                return True
+    return False
+
+
+def _is_spec_example_params(tool_name: str, params: dict, specs: list[dict] | None = None) -> bool:
+    """
+    Detect when an agent is passing a tool's own spec-example values (or a trivial
+    derivation of them) as significance-tool inputs.
+
+    Spec-driven and value-based: reads THIS run's live tool specs (which carry
+    ``spec["example"]["params"]``) and flags a match against ANY significance-tool
+    example — not a hardcoded 3-array denylist. Because matching is by value, it
+    also catches an agent that copies one tool's example into a different tool.
+
+    ``specs`` is optional so legacy call sites (and the correction re-check, where
+    specs may not be in scope) still get the old three known examples as a floor.
+    """
+    if not isinstance(params, dict):
+        return False
+
+    matched_examples: list[dict] = []
+    # 1. This tool's own live spec example.
+    spec = _spec_by_name(specs, tool_name)
+    if spec is not None:
+        ex = (spec.get("example") or {}).get("params")
+        if isinstance(ex, dict):
+            matched_examples.append(ex)
+    # 2. Every OTHER significance tool's live spec example (cross-tool copy guard).
+    if specs:
+        for s in specs:
+            if not isinstance(s, dict) or not s.get("significance_capable"):
+                continue
+            ex = (s.get("example") or {}).get("params")
+            if isinstance(ex, dict) and ex not in matched_examples:
+                matched_examples.append(ex)
+    # 3. Legacy hardcoded floor (covers the case where specs are unavailable, and
+    #    guarantees we never REGRESS below the previous three-array check).
+    for ex in _LEGACY_SPEC_EXAMPLES.values():
+        if ex not in matched_examples:
+            matched_examples.append(ex)
+
+    return any(_params_match_example(params, ex) for ex in matched_examples)
 
 
 async def decide_next_action(
@@ -442,7 +548,7 @@ async def decide_next_action(
     if (
         action.action_type == "tool"
         and action.tool_name in ("statistical_significance", "bootstrap_confidence", "literature_baseline_compare")
-        and _is_spec_example_params(action.tool_name, action.params)
+        and _is_spec_example_params(action.tool_name, action.params, specs)
     ):
         logger.info(
             "Agent %s used spec-example params for %s. Issuing extraction correction.",
@@ -461,7 +567,7 @@ async def decide_next_action(
         data2 = _extract_json(raw2) or {}
         action2 = _parse_action(data2)
         # Accept corrected action unless it still uses spec examples
-        if not _is_spec_example_params(action2.tool_name or "", action2.params):
+        if not _is_spec_example_params(action2.tool_name or "", action2.params, specs):
             action = action2
         else:
             # Last resort: extract actual values and force bootstrap

@@ -224,6 +224,12 @@ class FrontierScoringContext:
     question: str = ""
     prior_snippets: list[str] = field(default_factory=list)
     theme_saturation_penalty: float = 0.15
+    # LL2: the learned search policy loaded for this campaign. When present, its
+    # per-theme weights and blocked failure signatures NUDGE live frontier
+    # selection (see _information_gain_score) — a boosted theme ranks slightly
+    # higher, a penalized/blocked one slightly lower. Bounded so it never
+    # dominates or zeroes the information-gain signal (convergence must survive).
+    policy: Any = None
 
 
 @dataclass
@@ -255,11 +261,13 @@ class HypothesisTree:
         prior_snippets: list[str] | None = None,
         *,
         theme_saturation_penalty: float = 0.15,
+        policy: Any = None,
     ) -> None:
         self._scoring_context = FrontierScoringContext(
             question=question,
             prior_snippets=list(prior_snippets or []),
             theme_saturation_penalty=theme_saturation_penalty,
+            policy=policy,
         )
 
     def theme_counts(self) -> dict[str, int]:
@@ -680,32 +688,136 @@ class HypothesisTree:
         novelty = max(0.05, 1.0 - saturation * penalty * 3.0)
 
         parent = self.nodes.get(node.parent_id) if node.parent_id else None
+        # Does this child NARROW its parent (the convergence move — a boundary,
+        # mechanistic, or generalization refinement, or an explicit scope delta)?
+        narrows = bool(node.scope_delta) or (node.expansion_type or "").lower() in {
+            "boundary", "mechanistic", "generalization", "refinement",
+        }
+        deepening_confirmed = parent is not None and parent.verdict == "confirmed" and narrows
+
         if parent is None:
             uncertainty = 0.55
         elif parent.verdict == "inconclusive":
-            uncertainty = 0.85
+            uncertainty = 0.75
         elif parent.verdict == "refuted":
-            uncertainty = 0.70
-        elif parent.verdict == "confirmed":
-            uncertainty = 0.45
-        else:
             uncertainty = 0.60
+        elif parent.verdict == "confirmed":
+            # A confirmed result with an OPEN boundary is the most valuable thing
+            # to narrow next (convergence); a lateral re-test of an already-
+            # confirmed result is not. Previously this was a flat 0.45, which
+            # de-ranked deepening below inconclusive breadth and structurally
+            # prevented confirmed lineages from growing (CHANGELOG / investigation
+            # report §3.3 — "generation increases, depth does not").
+            uncertainty = 0.80 if narrows else 0.45
+        else:
+            uncertainty = 0.55
 
         coverage_bonus = max(0.0, 1.0 - min(1.0, theme_count / 12.0))
         lineage = float(node.lineage_length or self.lineage_length(node.id))
         lineage_bonus = min(0.15, lineage * 0.03)
 
+        # Convergence/exploit bonus: reward deepening a confirmed lineage so the
+        # search turns a real finding into a narrower one (log-style convergence)
+        # instead of spending every dispatch on fresh inconclusive breadth. Scales
+        # with how deep the confirmed ancestry already is.
+        exploit_bonus = 0.0
+        if deepening_confirmed:
+            conf_depth = self._confirmed_ancestry_depth(node)
+            exploit_bonus = min(0.30, 0.12 + 0.06 * conf_depth)
+
         info_gain = (
-            0.30 * relevance
-            + 0.25 * novelty
-            + 0.25 * uncertainty
-            + 0.10 * coverage_bonus
-            + 0.10 * min(1.0, lineage_bonus * 5)
+            0.28 * relevance
+            + 0.22 * novelty
+            + 0.22 * uncertainty
+            + 0.08 * coverage_bonus
+            + 0.08 * min(1.0, lineage_bonus * 5)
+            + exploit_bonus
         )
         closure = estimate_closure_probability(node, parent=parent)
         score = info_gain * closure
+        # LL2: bounded learned-policy nudge on top of the information-gain signal.
+        # A boosted theme ranks slightly higher, a penalized/saturated/blocked one
+        # slightly lower — enough to flip the order of two otherwise-equal nodes,
+        # never enough to dominate or zero the information-gain signal. With a
+        # null/empty policy this multiplier is exactly 1.0 (backward compatible).
+        score *= self._policy_score_multiplier(node, theme_id)
         node.frontier_score = round(score, 4)
         return score
+
+    # ── LL2: learned-policy nudge on live frontier selection ─────────────────
+    # How much the learned SearchPolicy is allowed to move a frontier score.
+    # theme_weight ∈ [0.1, 2.0] centered at 1.0; we scale the deviation from 1.0
+    # by POLICY_NUDGE_BOUND so a fully-boosted theme gains at most +15% and a
+    # fully-penalized theme loses at most ~13.5% — a nudge, not a takeover.
+    POLICY_NUDGE_BOUND: float = 0.15
+    # Extra multiplicative deprioritization for a candidate whose failure
+    # signature matches a policy-blocked one. Conservative (deprioritize, not
+    # skip): a blocked candidate can still be dispatched if nothing else remains.
+    BLOCKED_SIGNATURE_FACTOR: float = 0.75
+
+    def _policy_score_multiplier(self, node: HypothesisNode, theme_id: str) -> float:
+        """Bounded multiplier in ~[0.66, 1.15] derived from the loaded policy.
+
+        Returns exactly 1.0 when no policy is present (backward compatible)."""
+        policy = getattr(self._scoring_context, "policy", None)
+        if policy is None:
+            return 1.0
+        mult = 1.0
+        theme_weight = getattr(policy, "theme_weight", None)
+        if callable(theme_weight):
+            try:
+                w = float(theme_weight(theme_id))
+            except (TypeError, ValueError):
+                w = 1.0
+            # Clamp the weight to the SearchPolicy's documented range [0.1, 2.0]
+            # BEFORE mapping, so the nudge is bounded no matter what a policy
+            # returns — a misbehaving/extreme weight can never dominate or zero
+            # the information-gain signal.
+            w = max(0.1, min(2.0, w))
+            # Map theme_weight deviation from 1.0 into a bounded nudge.
+            mult *= 1.0 + self.POLICY_NUDGE_BOUND * (w - 1.0)
+        blocked = getattr(policy, "blocked_failure_signatures", None) or ()
+        sig = getattr(node, "failure_signature", None)
+        if sig and sig in blocked:
+            mult *= self.BLOCKED_SIGNATURE_FACTOR
+        return mult
+
+    @staticmethod
+    def _field(node: Any, name: str) -> Any:
+        """Read a node field whether the node is a HypothesisNode or a raw dict.
+        A convergence health metric must never raise into the caller (some paths,
+        and tests, carry dict-shaped nodes)."""
+        if isinstance(node, dict):
+            return node.get(name)
+        return getattr(node, name, None)
+
+    def _confirmed_ancestry_depth(self, node: HypothesisNode) -> int:
+        """Number of CONFIRMED ancestors up the parent chain — how deep a real
+        finding has already been narrowed. Used to reward continued convergence."""
+        depth = 0
+        parent_id = self._field(node, "parent_id")
+        cur = self.nodes.get(parent_id) if parent_id else None
+        seen: set[str] = set()
+        while cur is not None:
+            cid = self._field(cur, "id")
+            if cid in seen:
+                break
+            seen.add(cid)
+            if self._field(cur, "verdict") == "confirmed":
+                depth += 1
+            pid = self._field(cur, "parent_id")
+            cur = self.nodes.get(pid) if pid else None
+        return depth
+
+    def confirmed_lineage_depth(self) -> float:
+        """Convergence health metric: mean confirmed-ancestry depth over confirmed
+        nodes. Rises when the search deepens real findings into narrower ones;
+        stays ~0 when it only adds shallow roots (the failure this fixes). 0 when
+        there are no confirmed nodes yet."""
+        confirmed = [n for n in self.nodes.values() if self._field(n, "verdict") == "confirmed"]
+        if not confirmed:
+            return 0.0
+        return sum(self._confirmed_ancestry_depth(n) + 1 for n in confirmed) / len(confirmed)
 
     def _expected_value_score(self, node: HypothesisNode) -> float:
         """Legacy alias — delegates to information-gain scoring."""

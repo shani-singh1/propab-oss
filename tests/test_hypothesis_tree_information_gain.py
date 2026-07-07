@@ -45,6 +45,49 @@ def test_theme_saturation_penalizes_oversaturated_theme() -> None:
     assert tree._information_gain_score(fresh) > tree._information_gain_score(saturated)
 
 
+def test_convergence_prefers_deepening_confirmed_over_inconclusive_breadth() -> None:
+    """A scope-narrowing child of a CONFIRMED finding must outrank a child of an
+    inconclusive parent (convergence/exploit over breadth) — the fix for
+    'generation increases, depth does not' (investigation report §3.3)."""
+    tree = HypothesisTree()
+    tree.set_scoring_context("crossing threshold for greedy ratio", [])
+    confirmed_parent = HypothesisNode(
+        id="pc", text="ratio crosses 0.60 near n=35000", parent_id=None, depth=0,
+        verdict="confirmed", theme_id="threshold", question_relevance_score=0.6,
+    )
+    inconclusive_parent = HypothesisNode(
+        id="pi", text="unrelated variance probe", parent_id=None, depth=0,
+        verdict="inconclusive", theme_id="variance", question_relevance_score=0.6,
+    )
+    tree.nodes[confirmed_parent.id] = confirmed_parent
+    tree.nodes[inconclusive_parent.id] = inconclusive_parent
+    # Narrowing child of the confirmed finding (boundary refinement, scope delta).
+    deepen = HypothesisNode(
+        id="cc", text="does the crossing hold in [34000,36000] specifically", parent_id="pc",
+        depth=1, verdict="pending", theme_id="threshold", question_relevance_score=0.6,
+        expansion_type="boundary", scope_delta={"narrowed": "n range"},
+    )
+    # Child of the inconclusive parent (breadth).
+    breadth = HypothesisNode(
+        id="ci", text="another variance angle", parent_id="pi",
+        depth=1, verdict="pending", theme_id="variance", question_relevance_score=0.6,
+    )
+    tree.nodes[deepen.id] = deepen
+    tree.nodes[breadth.id] = breadth
+    assert tree._information_gain_score(deepen) > tree._information_gain_score(breadth)
+
+
+def test_confirmed_lineage_depth_metric() -> None:
+    tree = HypothesisTree()
+    assert tree.confirmed_lineage_depth() == 0.0  # no confirmed nodes yet
+    root = HypothesisNode(id="r", text="root finding", parent_id=None, depth=0, verdict="confirmed")
+    child = HypothesisNode(id="c", text="narrower finding", parent_id="r", depth=1, verdict="confirmed")
+    tree.nodes[root.id] = root
+    tree.nodes[child.id] = child
+    # root has confirmed-ancestry depth 1, child has 2 → mean 1.5.
+    assert tree.confirmed_lineage_depth() == 1.5
+
+
 def test_expansion_merit_gate() -> None:
     tree = HypothesisTree()
     node = HypothesisNode(

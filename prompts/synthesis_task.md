@@ -20,6 +20,18 @@ Name the **single best test** that would move at least two active beliefs in opp
 If all beliefs are weak/unclear, still name a critical experiment but also include one exploratory candidate
 that does not presuppose any current belief.
 
+### Novelty rules (advance knowledge, do not re-measure it)
+- Every candidate must move the frontier: target something whose answer is currently UNKNOWN.
+- Do NOT propose a claim whose answer is a known or tabulated value, a re-derivation of an
+  established result, or a measurement of an already-characterized method/procedure.
+- Do NOT restate an already-tested node's claim with different parameters (a new
+  size/dimension/threshold/identifier is NOT a new hypothesis). Re-running the same structural
+  claim with new numbers will be rejected. Deepening a CONFIRMED finding by genuinely narrowing
+  its regime is allowed — but only as a boundary/mechanistic/generalization refinement of that
+  confirmed parent, not as a fresh parameter sweep.
+- Across the candidates, prefer CONCEPTUALLY DISTINCT directions (different mechanisms,
+  invariants, or questions), not several variations of the same idea.
+
 ### Tree expansion rules
 - Use the `Open expansion targets` section. For each candidate, set `parent_id` to one listed `target_id`.
 - A candidate must reduce uncertainty relative to its parent: boundary/mechanism/generalization for confirmed parents, alternative for refuted parents, retest/diagnostic for inconclusive parents.

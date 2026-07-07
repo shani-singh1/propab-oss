@@ -11,7 +11,7 @@ from propab.domain_modules.graph_invariants.verifier import classify_graph_verdi
 
 class GraphInvariantsPlugin(DomainPlugin):
     domain_id = "graph_invariants"
-    display_name = "Graph invariants (SNAP network families)"
+    display_name = "Graph invariants (real SNAP networks: collaboration, communication)"
     version = "1.0"
     scope_question_markers = (
         "graph invariant",
@@ -46,17 +46,39 @@ class GraphInvariantsPlugin(DomainPlugin):
         hits = sum(1 for m in self.scope_question_markers if m in q)
         return hits >= 2 or "[domain_profile:graph_invariants]" in q
 
+    def match_score(self, *, question: str = "", payload: dict[str, Any] | None = None) -> float:
+        # Score = number of distinct graph-invariant markers present. Lets the
+        # registry prefer this domain over a colliding one only when more of its
+        # own specific vocabulary appears.
+        if payload and str(payload.get("domain") or payload.get("domain_profile") or "") == "graph_invariants":
+            return float(len(self.scope_question_markers))
+        q = (question or "").lower()
+        if "[domain_profile:graph_invariants]" in q:
+            return float(len(self.scope_question_markers))
+        return float(sum(1 for m in self.scope_question_markers if m in q))
+
     def scope_template(self) -> dict[str, str]:
         return {
-            "population": "SNAP subset: 160 graphs × 4 families (ER, BA, WS, lattice)",
+            "population": (
+                "Real SNAP networks: connected subgraphs of ca-GrQc (collaboration) "
+                "and email-Eu-core (communication), 30 subgraphs × 2 real families"
+            ),
             "distribution": "Leave-one-network-family-out holdout",
-            "claimed_generalization": "Invariant relationship survives held-out graph family",
+            "claimed_generalization": "Invariant relationship survives held-out real network family",
             "expected_failure_modes": "Family-specific topology masks invariant; small-n correlation noise",
-            "ood_test": "Deterministic correlation/inequality on held-out network category",
+            "ood_test": "Deterministic correlation/inequality on held-out real network category",
         }
 
     def available_features(self) -> list[str]:
         return list(KNOWN_INVARIANTS)
+
+    def uses_synthetic_data(self) -> bool:
+        # The invariant frame is now built from REAL SNAP networks (ca-GrQc
+        # collaboration, email-Eu-core communication) via connected-subgraph
+        # sampling — adapter meta records ``synthetic: False`` / provenance "real"
+        # (see adapter.REAL_NETWORKS and data/graph_invariants/PROVENANCE.md).
+        # Findings are real-data results, so no synthetic label is stamped (DOM2).
+        return False
 
     def confirmation_criteria(self) -> dict[str, Any]:
         return {

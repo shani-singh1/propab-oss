@@ -29,25 +29,33 @@ def classify_evidence_type(evidence: dict[str, Any]) -> str:
     if has_lofo:
         return "lofo"
 
+    # V2: deterministic gate-bypass requires an actual proof method. A bare
+    # `verified_true_steps` counter is NOT sufficient — a counter without an
+    # adversarial control must be routed through the artifact gate like any
+    # other result, so it cannot silently bypass artifact verification.
+    _PROOF_METHODS = {
+        "symbolic_proof",
+        "exact_check",
+        "counterexample_search",
+        "combinatorial_verification",
+        "combinatorial_computation",
+        "counterexample",
+    }
+    method = evidence.get("verification_method")
+    # V3: a "deterministic" (gate-bypassing) classification requires an EXPLICIT
+    # proof method or an explicit `deterministic` flag. The former "any
+    # non-significance method name + a verified_true counter" clause was a
+    # gate-bypass hole — a domain emitting e.g. verification_method=
+    # "cross_network_lofo" with verified_true_steps=1 earned a free "confirmed"
+    # with NO adversarial null. A genuine statistical/lofo result that carries real
+    # null statistics is already classified as "lofo" above (has_lofo) or
+    # "statistical" below (has_stats); anything left with only a step counter and
+    # an unrecognized method must go THROUGH the artifact gate, not around it, so
+    # it falls to "unknown" and is gated. Domain-general: keyed on evidence shape,
+    # never on domain id.
     is_deterministic = (
         evidence.get("deterministic") is True
-        or evidence.get("verification_method")
-        in {
-            "symbolic_proof",
-            "exact_check",
-            "counterexample_search",
-            "combinatorial_verification",
-            "combinatorial_computation",
-            "counterexample",
-        }
-        or (
-            vt > 0
-            and vf == 0
-            and (
-                evidence.get("verification_method") not in {None, "", "significance"}
-                or vt >= 2
-            )
-        )
+        or method in _PROOF_METHODS
     )
     if is_deterministic:
         return "deterministic"
@@ -166,11 +174,57 @@ def artifact_gate_stage(
         return verdict, confidence, gate_result.verdict_reason or reason
 
     if evidence_type == "statistical":
+        # W1b: a statistical confirm requires BOTH a real passing null AND that
+        # the numbers the significance/permutation test ran on were NOT typed
+        # directly by the LLM agent. The worker records the provenance of those
+        # inputs on the evidence dict as `stat_input_provenance`:
+        #   "computed"      — produced inside the sandbox (trusted);
+        #   "agent_literal" — the agent typed the numbers into the tool call
+        #                     (UNTRUSTED / possibly fabricated);
+        #   "unknown"       — could not be determined.
+        # A permutation null computed on agent-fabricated arrays looks perfectly
+        # "significant", so this is the only choke point that can stop a
+        # fabricated statistical result from confirming.
+        #
+        # Fail closed ONLY on the KNOWN-untrusted "agent_literal" case. We do NOT
+        # block "unknown" here: absence of provenance is not evidence of
+        # fabrication, and many legitimate paths (older evidence, third-party
+        # tools) leave it unset/unknown — blocking those would falsely downgrade
+        # honest confirmations. If a future audit shows "unknown" is being abused,
+        # tighten it here. This guard is scoped strictly to the statistical
+        # branch; the deterministic-proof and lofo (label-shuffle) paths above
+        # compute in-sandbox and are intentionally untouched.
+        stat_provenance = evidence.get("stat_input_provenance")
+        if stat_provenance == "agent_literal":
+            return (
+                "inconclusive",
+                confidence * 0.5,
+                "stat_inputs_agent_literal_untrusted: significance/permutation "
+                "inputs were typed by the agent (not sandbox-computed); a "
+                "statistical confirm requires non-fabricated inputs",
+            )
+
+        # V1: a purely statistical result is confirmable only when it carries a
+        # real, independent adversarial null (an outcome permutation null or a
+        # label-shuffle null) that PASSES. Route it through the artifact gate's
+        # permutation-null path instead of auto-downgrading. If the required null
+        # statistics are absent, the gate cannot mark it as surviving, so a bare
+        # significance number can never confirm.
+        #
+        # Fail-closed policy: only a genuinely PASSING null yields "confirmed".
+        # Any non-confirm gate outcome (including a hard "refuted" that the gate
+        # emits merely because no null was supplied) is collapsed to
+        # "inconclusive": absence of an adversarial control is not positive
+        # evidence of an artifact, so we must not manufacture a "refuted".
+        gate_result = run_full_artifact_gate(evidence, campaign_context=campaign_context)
+        merge_artifact_into_evidence(evidence, gate_result)
+        if gate_result.verdict == "confirmed":
+            return verdict, confidence, gate_result.verdict_reason or reason
         return (
             "inconclusive",
             confidence * 0.7,
-            "significance gate passed but no cross-group holdout "
-            "available to rule out artifact; treat as preliminary",
+            "significance gate passed but no passing adversarial null / holdout "
+            f"available to rule out artifact; treat as preliminary ({gate_result.verdict_reason})",
         )
 
     return "inconclusive", 0.0, f"unrecognized evidence type: {evidence_type}"

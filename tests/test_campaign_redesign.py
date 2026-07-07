@@ -158,6 +158,12 @@ def test_apply_synthesis_adds_frontier_candidates() -> None:
     assert len(state.active_beliefs) == 1
     assert state.active_beliefs[0].confidence == "strong"
     assert tree.next_dispatch_candidate(frozenset()) is not None
+    # Lineage-derivation quality (§3.2): the candidate named an explicit parent.
+    assert metrics["n_lineage_explicit"] == 1
+    assert metrics["n_lineage_inferred"] == 0
+    assert metrics["lineage_derivation_rate"] == 1.0
+    # Convergence metric (§3.3): one confirmed node (the parent) → depth 1.0.
+    assert metrics["confirmed_lineage_depth"] == 1.0
 
 
 def test_apply_synthesis_can_bootstrap_root_when_no_parent_exists() -> None:
@@ -235,6 +241,12 @@ def test_synthesis_infers_parent_when_llm_omits_parent_id() -> None:
     assert metrics["n_added_as_children"] == 1
     assert added[0].parent_id == parent.id
     assert tree.nodes[parent.id].children == [added[0].id]
+    # Lineage was INFERRED (LLM omitted parent_id) — the metric must show it, so a
+    # campaign whose lineage is mostly inferred (structural depth without real
+    # derivation) is visible rather than silent (§3.2).
+    assert metrics["n_lineage_inferred"] == 1
+    assert metrics["n_lineage_explicit"] == 0
+    assert metrics["lineage_derivation_rate"] == 0.0
 
 
 def test_compose_synthesis_includes_pinned_context() -> None:

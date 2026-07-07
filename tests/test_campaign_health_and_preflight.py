@@ -130,9 +130,47 @@ def test_preflight_no_domain_proceeds():
         question="a question with no scientific domain owner at all",
         hypothesis_tree=HypothesisTree(),
     )
-    proceed = asyncio.run(_enforce_domain_preflight(campaign, _fake_session_factory, _FakeEmitter()))
+    emitter = _FakeEmitter()
+    proceed = asyncio.run(_enforce_domain_preflight(campaign, _fake_session_factory, emitter))
     assert proceed is True
     assert campaign.status == STATUS_ACTIVE
+    # A genuinely generic question resolves neither a plugin nor a profile, so the
+    # generic sandbox path must stay open — no preflight-failed event should fire.
+    assert not any(e.get("step") == "campaign.preflight_failed" for e in emitter.events)
+
+
+def test_preflight_profile_without_plugin_blocks_campaign():
+    """DOM1: econometrics has a verification PROFILE but no executing plugin.
+
+    The artifact gate would apply econometrics standards, yet no plugin can honestly
+    execute verification — so the campaign must be blocked (fail-closed), not launched
+    into the generic sandbox path where those standards can never be met.
+    """
+    # Precondition: this is the exact hole DOM1 describes — profile resolves, plugin does not.
+    from propab.artifact_verification import EvidenceContext
+    from propab.domain_profiles import resolve_domain_profile
+
+    question = "econometrics panel data fixed effects wage regression"
+    assert registry.resolve_domain_plugin(question=question) is None
+    assert (
+        resolve_domain_profile(EvidenceContext(hypothesis_text=question), question=question)
+        is not None
+    )
+
+    campaign = ResearchCampaign(
+        id="00000000-0000-0000-0000-0000000000f4",
+        question=question,
+        hypothesis_tree=HypothesisTree(),
+    )
+    emitter = _FakeEmitter()
+    proceed = asyncio.run(_enforce_domain_preflight(campaign, _fake_session_factory, emitter))
+    assert proceed is False
+    assert campaign.stop_reason == STOP_REASON_DOMAIN_PREFLIGHT_FAILED
+    assert campaign.status != STATUS_ACTIVE
+    failed = [e for e in emitter.events if e.get("step") == "campaign.preflight_failed"]
+    assert failed, emitter.events
+    assert failed[0]["payload"]["reason"] == "domain_profile_without_verifying_plugin"
+    assert failed[0]["payload"]["domain"] == "econometrics"
 
 
 # ── Item 2: health-metric computations ───────────────────────────────────────
@@ -192,3 +230,80 @@ def test_rate_and_norm_helpers():
     assert hm._rate(2, 10) == 0.2
     assert hm._rate(1, 0) is None
     assert hm._norm_statement("  Hello   World  ") == "hello world"
+
+
+# ── Evidence-binding health warnings (too-loose vs symmetric too-strict) ──────
+
+class _TotalsDB(_FakeDB):
+    """Fake DB whose cumulative-totals query returns configurable (rej, acc)."""
+
+    def __init__(self, tot_rej: int, tot_acc: int):
+        self._tot = (tot_rej, tot_acc)
+
+    async def execute(self, *a, **k):
+        totals = self._tot
+
+        class _R:
+            def scalar_one_or_none(self_inner):
+                return None  # no previous round → stability path is a no-op
+
+            def one(self_inner):
+                return totals
+
+        return _R()
+
+
+def _run_synth_health(tot_rej: int, tot_acc: int, *, rej: int = 1, acc: int = 1):
+    def factory():
+        return _TotalsDB(tot_rej, tot_acc)
+
+    return asyncio.run(
+        hm.log_synthesis_health(
+            factory,
+            campaign_id="00000000-0000-0000-0000-0000000000aa",
+            generation=1,
+            metrics={
+                "n_candidates_raw": 0,
+                "n_added": 0,
+                "n_rejected_duplicate": 0,
+                "binding_rejected_count": rej,
+                "binding_accepted_count": acc,
+            },
+            active_belief_statements=[],
+        )
+    )
+
+
+def test_binding_too_strict_warns_at_high_cumulative_rejection(caplog):
+    """Near-100% rejection over >= min calls fires the over-strict warning."""
+    with caplog.at_level("WARNING", logger="propab.health_metrics"):
+        _run_synth_health(tot_rej=95, tot_acc=5)  # 95% over 100 calls
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("over-strict" in m for m in msgs), msgs
+    assert not any("0 rejections" in m for m in msgs)
+
+
+def test_binding_normal_rejection_does_not_warn_too_strict(caplog):
+    """A healthy mid-range rejection rate must NOT fire the over-strict warning."""
+    with caplog.at_level("WARNING", logger="propab.health_metrics"):
+        _run_synth_health(tot_rej=10, tot_acc=90)  # 10% over 100 calls
+    msgs = [r.getMessage() for r in caplog.records]
+    assert not any("over-strict" in m for m in msgs), msgs
+    assert not any("0 rejections" in m for m in msgs)
+
+
+def test_binding_high_rate_below_min_calls_does_not_warn(caplog):
+    """High rejection rate but too few calls must not fire (mirror the zero-check gate)."""
+    with caplog.at_level("WARNING", logger="propab.health_metrics"):
+        _run_synth_health(tot_rej=9, tot_acc=1)  # 90% but only 10 calls < 50
+    msgs = [r.getMessage() for r in caplog.records]
+    assert not any("over-strict" in m for m in msgs), msgs
+
+
+def test_binding_zero_rejection_still_warns_too_loose(caplog):
+    """The pre-existing too-loose warning is unchanged and mutually exclusive."""
+    with caplog.at_level("WARNING", logger="propab.health_metrics"):
+        _run_synth_health(tot_rej=0, tot_acc=60)  # 0 rejections over 60 calls
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("0 rejections" in m for m in msgs), msgs
+    assert not any("over-strict" in m for m in msgs)

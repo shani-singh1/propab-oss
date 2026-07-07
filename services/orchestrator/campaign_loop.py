@@ -107,7 +107,7 @@ from services.orchestrator.hypothesis_ranking import (
     strip_question_suffix,
 )
 from services.orchestrator.hypotheses import _is_ml_template_hypothesis
-from services.orchestrator.intake import parse_question
+from services.orchestrator.intake import ParsedQuestion, parse_question
 from services.orchestrator.lifetime_knowledge import (
     enrich_prior_from_lifetime,
     ingest_campaign,
@@ -119,6 +119,7 @@ from propab.layer05.simulation_fitness_ledger import SimulationFitnessLedger
 from propab.policy_fitness_ledger import PolicyFitnessLedger
 from services.orchestrator.policy_analyst import llm_policy_analyst
 from services.orchestrator.literature import build_prior
+from services.orchestrator.literature_client import build_prior_via_service
 from services.orchestrator.paper import _session_experiment_step_count, write_paper_minimal
 from services.orchestrator.schemas import Prior
 from services.worker.peer_findings import build_peer_finding_payload, publish_peer_finding
@@ -151,6 +152,78 @@ def _campaign_ledger_from_tree(tree: HypothesisTree) -> dict[str, Any]:
     }
 
 
+def confirmed_findings_count(campaign: "ResearchCampaign") -> int:
+    """The honest, paper-reported count of confirmed findings for O3 signalling.
+
+    ``campaign.total_confirmed`` is the number of distinct confirmed *discovery*
+    nodes (controls excluded), kept fresh by ``recount_from_tree`` — the same count
+    the paper abstract and DB present. This is the honest "did we confirm anything
+    the paper reports" number, so a zero here means the run produced no verified
+    result even though it finalizes with a normal stop reason.
+    """
+    return int(getattr(campaign, "total_confirmed", 0) or 0)
+
+
+def _campaign_reasoning_trace(campaign: ResearchCampaign) -> dict[str, Any]:
+    """Trace-derived reasoning context for the paper's Chain-of-Reasoning section.
+
+    Emits ONLY structural facts read straight off the hypothesis tree and belief state
+    (parent->child lineage, per-node verdict/generation, and the belief history). No
+    finding is *claimed* here: verdicts are the tree's own labels and are re-gated against
+    the authoritative DB rows at render time. Controls are excluded from lineage edges.
+    """
+    tree = campaign.hypothesis_tree
+    nodes_out: dict[str, dict[str, Any]] = {}
+    for nid, n in tree.nodes.items():
+        nodes_out[str(nid)] = {
+            "id": str(nid),
+            "text": (n.text or "")[:400],
+            "parent_id": str(n.parent_id) if n.parent_id else None,
+            "depth": int(n.depth or 0),
+            "generation": int(n.generation or 0),
+            "verdict": str(n.verdict or "pending"),
+            "expansion_type": n.expansion_type,
+            "node_role": n.node_role,
+            "primary_theme": n.primary_theme or n.theme_id,
+            "mechanism": (n.mechanism or "")[:300] or None,
+            "confidence": float(n.confidence or 0.0),
+        }
+    # Lineage edges (parent -> child) among discovery nodes only.
+    edges: list[dict[str, str]] = []
+    for nid, meta in nodes_out.items():
+        pid = meta["parent_id"]
+        if pid and pid in nodes_out and meta["node_role"] != NODE_ROLE_CONTROL:
+            edges.append({"parent": pid, "child": nid, "expansion_type": meta["expansion_type"] or "expansion"})
+
+    bs = campaign.belief_state
+    beliefs = {
+        "active": [b.to_dict() for b in bs.active_beliefs],
+        "closed": [c.to_dict() for c in bs.closed_beliefs],
+        "recent_activity": (bs.recent_activity_summary or "")[:600],
+        "branch_exhausted": bool(bs.branch_exhausted),
+    }
+    # Per-generation verdict histogram: how beliefs/outcomes evolved across rounds.
+    gen_hist: dict[int, dict[str, int]] = {}
+    for meta in nodes_out.values():
+        if meta["node_role"] == NODE_ROLE_CONTROL:
+            continue
+        g = int(meta["generation"])
+        row = gen_hist.setdefault(g, {"confirmed": 0, "refuted": 0, "inconclusive": 0, "pending": 0})
+        v = meta["verdict"] if meta["verdict"] in row else "pending"
+        row[v] += 1
+    generations = [
+        {"generation": g, **gen_hist[g]} for g in sorted(gen_hist)
+    ]
+    return {
+        "nodes": nodes_out,
+        "lineage_edges": edges[:400],
+        "beliefs": beliefs,
+        "generations": generations,
+        "max_depth": max((m["depth"] for m in nodes_out.values()), default=0),
+        "max_generation": max((m["generation"] for m in nodes_out.values()), default=0),
+    }
+
+
 def _prior_snippets(prior_dict: dict[str, Any]) -> list[str]:
     snippets: list[str] = []
     for f in prior_dict.get("established_facts") or []:
@@ -178,6 +251,48 @@ def _resolve_synthesis_domain_id(campaign: ResearchCampaign, parsed_domain: str 
     if m:
         return m.group(1).lower()
     return parsed_domain
+
+
+async def _build_campaign_prior(
+    parsed: ParsedQuestion,
+    *,
+    campaign: ResearchCampaign,
+    emitter: EventEmitter,
+    session_factory: async_sessionmaker,
+    llm: LLMClient,
+) -> Prior:
+    """Build the campaign's literature prior.
+
+    Uses the NEW dedicated literature service (``services/literature/``) when
+    ``settings.literature_service_url`` is set — resolving the campaign's domain
+    plugin so its ``literature_profile()`` reaches the service, and falling back
+    to the OLD embedded ``build_prior`` inside ``build_prior_via_service`` on any
+    service failure. When the URL is empty, uses the OLD embedded path directly
+    (backward compatible).
+    """
+    if settings.literature_service_url:
+        from propab.domain_modules.registry import resolve_domain_plugin
+
+        domain_plugin = resolve_domain_plugin(
+            question=campaign.question,
+            payload={"domain_profile": getattr(campaign, "domain_profile", None)},
+        )
+        return await build_prior_via_service(
+            parsed,
+            session_id=campaign.id,
+            emitter=emitter,
+            session_factory=session_factory,
+            llm=llm,
+            domain_plugin=domain_plugin,
+        )
+    return await build_prior(
+        parsed,
+        session_id=campaign.id,
+        emitter=emitter,
+        session_factory=session_factory,
+        paper_ttl_days=30,
+        llm=llm,
+    )
 
 
 def _apply_result_diagnostics(
@@ -347,6 +462,7 @@ def build_campaign_synthesis_payload(campaign: ResearchCampaign) -> dict[str, An
         },
         "counts_source": "tree_preview_db_authoritative_at_paper_time",
         "confirmed_findings": ledger_findings,
+        "reasoning_trace": _campaign_reasoning_trace(campaign),
     }
 
 
@@ -371,7 +487,7 @@ def _coerce_scalar_float(val: Any) -> float | None:
             if isinstance(x, (int, float)):
                 return float(x)
         except Exception:
-            return None
+            return None  # deliberately best-effort: non-numeric .item() → no scalar
     return None
 
 
@@ -465,19 +581,77 @@ def _deep_scan_accuracy_candidates(obj: Any, *, depth: int = 0) -> list[float]:
     return found
 
 
+# Sub-dicts a worker/tool result may nest its scalar metrics under.
+_METRIC_SUBDICT_KEYS = ("metrics", "scores", "results", "evidence", "output")
+
+
+def _is_accuracy_metric(metric_name: str) -> bool:
+    """True when the declared metric is classification-accuracy-family (ML default path)."""
+    return "acc" in (metric_name or "").lower()
+
+
+def _find_declared_metric(obj: Any, metric_name: str) -> float | None:
+    """Domain-general: pull the campaign's DECLARED metric from a worker result.
+
+    Checks, in order: the metric's own key at this level, a generic
+    ``metric_value`` carrier whose sibling ``metric_name`` matches the declared
+    metric (or an unlabelled ``metric_value`` at the top level), then a small set
+    of common sub-dicts (``metrics``/``scores``/``results``/``evidence``/``output``).
+    Never substitutes a differently-named metric.
+    """
+    if not isinstance(obj, dict):
+        return None
+
+    # 1. The declared metric under its own key.
+    v = _coerce_scalar_float(obj.get(metric_name))
+    if v is not None:
+        return _sanity_check_metric(metric_name, v)
+
+    # 2. Generic metric_value + metric_name pair. Accept when the sibling
+    #    metric_name matches the declared metric, or when metric_name is absent
+    #    (a bare metric_value is the worker's generic primary-metric carrier).
+    if "metric_value" in obj:
+        sibling = obj.get("metric_name")
+        if sibling is None or str(sibling).strip().lower() == str(metric_name).strip().lower():
+            v = _coerce_scalar_float(obj.get("metric_value"))
+            if v is not None:
+                return _sanity_check_metric(metric_name, v)
+
+    # 3. Recurse into common metric sub-dicts (one level of well-known containers).
+    for sub_key in _METRIC_SUBDICT_KEYS:
+        sub = obj.get(sub_key)
+        if isinstance(sub, dict):
+            got = _find_declared_metric(sub, metric_name)
+            if got is not None:
+                return got
+    return None
+
+
 def _extract_primary_metric_from_worker_result(result: dict, metric_name: str) -> float | None:
-    """Parse val_accuracy (etc.) from Celery sub-agent return dict or embedded evidence JSON."""
+    """Extract the campaign's declared metric from a Celery sub-agent return dict.
+
+    Domain-general: prefers the DECLARED ``metric_name`` (top-level, a
+    ``metric_value``/``metric_name`` pair, or a common sub-dict). Only falls back
+    to ML accuracy-family keys / deep scans when the declared metric is itself an
+    accuracy metric. Fails closed (``None``) for a non-accuracy metric that is
+    absent — it never substitutes a differently-named value.
+    """
     if not isinstance(result, dict):
         return None
 
-    for key in (
-        metric_name,
-        "metric_value",
-        "val_accuracy",
-        "test_accuracy",
-        "accuracy",
-        "validation_accuracy",
-    ):
+    # Preferred, domain-agnostic path: the declared metric wherever it lives.
+    got = _find_declared_metric(result, metric_name)
+    if got is not None:
+        return got
+
+    # ── ML default path ──────────────────────────────────────────────────────
+    # Accuracy-family fallbacks (val_accuracy / accuracy / deep scans / text
+    # regexes) apply ONLY when the campaign metric is itself accuracy-family.
+    # For any other declared metric we fail closed rather than invent a value.
+    if not _is_accuracy_metric(metric_name):
+        return None
+
+    for key in ("val_accuracy", "test_accuracy", "accuracy", "validation_accuracy"):
         v = _coerce_scalar_float(result.get(key))
         if v is not None:
             got = _sanity_check_metric(metric_name, v)
@@ -504,7 +678,7 @@ def _extract_primary_metric_from_worker_result(result: dict, metric_name: str) -
             if got is not None:
                 return got
         except ValueError:
-            pass
+            pass  # deliberately best-effort: unparseable scalar → try next pattern
     matches = re.findall(r"(?:val_accuracy|accuracy|test_accuracy)[^\d]*([0-9]+\.?[0-9]*)", text_blob)
     if matches:
         try:
@@ -512,7 +686,7 @@ def _extract_primary_metric_from_worker_result(result: dict, metric_name: str) -
             if got is not None:
                 return got
         except ValueError:
-            pass
+            pass  # deliberately best-effort: unparseable scalar → give up (return None)
     return None
 
 
@@ -730,7 +904,16 @@ Return JSON only:
             )
             json_match = re.search(r"\{.*\}", raw, re.DOTALL)
             config = json.loads(json_match.group()) if json_match else {}
-        except Exception:
+        except Exception as cfg_exc:
+            # Fall back to defaults, but make the failure visible: a silently empty
+            # config means the baseline ran with fallback dataset/metric/steps, which
+            # would otherwise look like an intentional configuration.
+            logger.warning(
+                "[campaign %s] baseline config LLM/JSON parse failed (%s) — "
+                "using default dataset/metric/n_steps for the baseline experiment.",
+                campaign.id,
+                cfg_exc,
+            )
             config = {}
 
     metric_name = _normalize_metric_name(
@@ -1367,7 +1550,7 @@ async def _iter_campaign_pipelined_results(
         try:
             await _redis.close()
         except Exception:
-            pass
+            pass  # deliberately best-effort: connection teardown errors are irrelevant
 
     for item in pending:
         yield {
@@ -1402,7 +1585,7 @@ async def _try_salvage_paper(
         try:
             campaign.recount_from_tree()
         except Exception:
-            pass
+            pass  # deliberately best-effort: salvage proceeds with existing counts
         await db_set_research_session_stage(campaign.id, session_factory, stage="campaign.paper")
         synthesis = build_campaign_synthesis_payload(campaign)
         await write_paper_minimal(
@@ -1441,7 +1624,58 @@ async def _enforce_domain_preflight(
 
     plugin = resolve_domain_plugin(question=campaign.question)
     if plugin is None:
-        return True  # no scientific-domain owner → no domain-specific power gate
+        # No plugin owns this question. But the artifact gate resolves standards by
+        # PROFILE, not plugin — so a domain that has a profile but no executing plugin
+        # (e.g. econometrics) would launch with no real verification capability yet
+        # still be held to that profile's standards. That is a domain that "looks
+        # supported but can never honestly verify." Resolve the profile with the SAME
+        # resolver the artifact gate uses (propab.domain_profiles.resolve_domain_profile,
+        # see artifact_verification.run_artifact_gate) so the fail-closed trigger is
+        # exactly "a profile the gate will apply."
+        from propab.artifact_verification import EvidenceContext
+        from propab.domain_profiles import resolve_domain_profile
+
+        profile = resolve_domain_profile(
+            EvidenceContext(hypothesis_text=campaign.question),
+            question=campaign.question,
+        )
+        if profile is None:
+            return True  # no plugin AND no profile → genuinely generic → generic sandbox path
+
+        reason = (
+            f"the '{profile.profile_id}' domain applies verification standards but has no "
+            "plugin that can execute verification — refusing to launch a campaign that "
+            "cannot confirm honestly"
+        )
+        logger.warning(
+            "[campaign %s] domain preflight FAILED (%s): %s",
+            campaign.id, profile.profile_id, reason,
+        )
+        campaign.finalize_stop(STOP_REASON_DOMAIN_PREFLIGHT_FAILED)
+        try:
+            await db_save_campaign(campaign, session_factory)
+        except Exception:
+            logger.exception("[campaign %s] db_save after preflight-fail failed", campaign.id)
+        try:
+            await db_mark_research_session_failed(campaign.id, session_factory)
+        except Exception:
+            logger.exception(
+                "[campaign %s] mark-failed after preflight-block failed — session row may stay 'running'",
+                campaign.id,
+            )
+        await emitter.emit(
+            session_id=campaign.id,
+            event_type=EventType.CAMPAIGN_BUDGET_EXHAUSTED,
+            step="campaign.preflight_failed",
+            payload={
+                "domain": profile.profile_id,
+                "stop_reason": STOP_REASON_DOMAIN_PREFLIGHT_FAILED,
+                "reason": "domain_profile_without_verifying_plugin",
+                "details": {"profile_id": profile.profile_id, "message": reason},
+                **campaign.summary(),
+            },
+        )
+        return False
 
     try:
         result = plugin.preflight()
@@ -1471,7 +1705,12 @@ async def _enforce_domain_preflight(
     try:
         await db_mark_research_session_failed(campaign.id, session_factory)
     except Exception:
-        pass
+        # Make it visible: if this fails the session row is stuck 'running' after a
+        # preflight block, which otherwise looks like a live campaign that stalled.
+        logger.exception(
+            "[campaign %s] mark-failed after preflight-block failed — session row may stay 'running'",
+            campaign.id,
+        )
     await emitter.emit(
         session_id=campaign.id,
         event_type=EventType.CAMPAIGN_BUDGET_EXHAUSTED,
@@ -1627,11 +1866,9 @@ async def run_campaign_loop(
             )
             try:
                 prior = await asyncio.wait_for(
-                    build_prior(
-                        parsed, session_id=campaign.id, emitter=emitter,
-                        session_factory=session_factory,
-                        paper_ttl_days=30,
-                        llm=llm,
+                    _build_campaign_prior(
+                        parsed, campaign=campaign, emitter=emitter,
+                        session_factory=session_factory, llm=llm,
                     ),
                     timeout=prior_timeout,
                 )
@@ -1728,6 +1965,11 @@ async def run_campaign_loop(
             campaign.question,
             prior_snippets,
             theme_saturation_penalty=theme_penalty,
+            # LL2: thread the loaded learned policy into live frontier scoring so
+            # per-theme boosts/penalties and blocked failure signatures actually
+            # steer which hypotheses the engine dispatches next (bounded nudge —
+            # see HypothesisTree._policy_score_multiplier).
+            policy=search_policy,
         )
         await emitter.emit(
             session_id=campaign.id,
@@ -1877,44 +2119,12 @@ async def run_campaign_loop(
                             lifetime_context=lifetime_seed_context,
                         )
                         from propab.numerical_seeds import classify_hypothesis_bucket
-                        from propab.synthesis_diversity import (
-                            bootstrap_forced_problem_type,
-                            resolve_forced_problem_type,
-                            tree_problem_counts_from_nodes,
-                        )
-                        from propab.campaign_synthesis import apply_diversity_fallback_seeds
 
-                        if not added:
-                            node_dicts = {
-                                nid: (n.to_dict() if hasattr(n, "to_dict") else n)
-                                for nid, n in campaign.hypothesis_tree.nodes.items()
-                            }
-                            tree_counts = tree_problem_counts_from_nodes(node_dicts)
-                            forced = resolve_forced_problem_type(
-                                synthesis_history_buckets,
-                                [b.statement for b in campaign.belief_state.active_beliefs],
-                                streak=3,
-                                tree_problem_counts=tree_counts,
-                            )
-                            if forced is None:
-                                forced = bootstrap_forced_problem_type(campaign.question)
-                            if forced:
-                                added = apply_diversity_fallback_seeds(
-                                    campaign.hypothesis_tree,
-                                    forced_type=forced,
-                                    generation=generation,
-                                    question=campaign.question,
-                                    prior_snippets=prior_snippets,
-                                    belief_state=campaign.belief_state,
-                                )
-                                if added:
-                                    logger.info(
-                                        "[campaign %s] Diversity fallback injected %s %s seed(s).",
-                                        campaign.id,
-                                        len(added),
-                                        forced,
-                                    )
-
+                        # NOTE: no deterministic diversity-fallback seed injection.
+                        # If synthesis produced no usable candidate, Propab does NOT
+                        # fabricate a templated hypothesis to keep the campaign alive
+                        # — it lets the round come back empty and stops honestly
+                        # (frontier-exhausted, handled below).
                         for node in added:
                             synthesis_history_buckets.append(
                                 classify_hypothesis_bucket(node.text, node.test_methodology or ""),
@@ -2202,6 +2412,7 @@ async def run_campaign_loop(
         # Ownership-contracts per-campaign health metrics: worker experiment
         # success rate + worker utilization onto research_campaigns, and the
         # artifact-gate precision (confirmed findings backed by a null test).
+        _confirmed, _survived = 0, 0  # raw tree audit counts (populated below)
         try:
             from propab.health_metrics import (
                 compute_confirmed_audit_counts,
@@ -2225,6 +2436,31 @@ async def run_campaign_loop(
                 )
         except Exception:  # noqa: BLE001 — metric logging must never break a campaign
             logger.exception("[campaign %s] campaign-end health logging failed", campaign.id)
+
+        # ── O3: honest "finalized with zero confirmed findings" signal ──────
+        # A campaign that confirmed nothing still finalizes with a normal-looking
+        # stop reason and writes a paper, so a broken run presents as a completed
+        # one. Layer an explicit, queryable signal on top of the existing stop
+        # reason (this does NOT change control flow or the stop-reason enum — it is
+        # purely additive observability, and it fires under EVERY normal stop
+        # reason). ``total_confirmed`` is the paper-reported number (distinct
+        # confirmed *discovery* nodes, controls excluded, kept fresh by
+        # ``recount_from_tree`` in the result loop) — the same count the paper
+        # abstract and DB present, hence the honest one. The raw tree audit count
+        # (all confirmed nodes, incl. controls) is logged alongside for context.
+        n_confirmed_findings = confirmed_findings_count(campaign)
+        finalized_without_findings = n_confirmed_findings == 0
+        if finalized_without_findings:
+            logger.warning(
+                "[campaign %s] FINALIZED WITH ZERO CONFIRMED FINDINGS "
+                "(stop_reason=%s, total_hypotheses=%s, tree_confirmed_nodes=%s) — "
+                "a paper will be written but the campaign confirmed nothing; "
+                "this run produced no verified result.",
+                campaign.id,
+                campaign.stop_reason,
+                getattr(campaign, "total_hypotheses", 0),
+                _confirmed,
+            )
 
         await asyncio.to_thread(write_campaign_snapshot, "pre_paper", campaign, prior_dict)
 
@@ -2314,7 +2550,16 @@ async def run_campaign_loop(
             session_id=campaign.id,
             event_type=EventType.CAMPAIGN_COMPLETED,
             step="campaign.complete",
-            payload=campaign.summary(),
+            # Carry the honest zero-findings signal (O3) on the terminal event so
+            # logs/frontend can surface "completed but confirmed nothing" without
+            # having to re-derive it. Additive to campaign.summary(); does not
+            # change the stop reason or completion semantics.
+            payload={
+                **campaign.summary(),  # already carries stop_reason + total_confirmed
+                "finalized_without_findings": finalized_without_findings,
+                "confirmed_findings_count": n_confirmed_findings,
+                "tree_confirmed_nodes": _confirmed,
+            },
         )
 
     except Exception as exc:
@@ -2333,6 +2578,18 @@ async def run_campaign_loop(
                 await db_mark_research_session_completed(campaign.id, session_factory)
             except Exception:
                 logger.exception("[campaign %s] salvage paper written but mark-completed failed", campaign.id)
+            # O3: the salvage path also finalizes a completed-looking run, so it
+            # gets the same honest zero-findings signal (recount_from_tree above
+            # keeps total_confirmed fresh).
+            salvage_confirmed = confirmed_findings_count(campaign)
+            salvage_without_findings = salvage_confirmed == 0
+            if salvage_without_findings:
+                logger.warning(
+                    "[campaign %s] SALVAGED WITH ZERO CONFIRMED FINDINGS "
+                    "(stop_reason=%s) — paper salvaged from trace but nothing was confirmed.",
+                    campaign.id,
+                    campaign.stop_reason,
+                )
             await emitter.emit(
                 session_id=campaign.id,
                 event_type=EventType.CAMPAIGN_COMPLETED,
@@ -2340,6 +2597,8 @@ async def run_campaign_loop(
                 payload={
                     "salvaged_after_error": type(exc).__name__,
                     "stop_reason": campaign.stop_reason,
+                    "finalized_without_findings": salvage_without_findings,
+                    "confirmed_findings_count": salvage_confirmed,
                     "campaign_summary": campaign.summary(),
                 },
             )
@@ -2347,14 +2606,21 @@ async def run_campaign_loop(
         try:
             await db_mark_research_session_failed(campaign.id, session_factory)
         except Exception:
-            pass
+            # Make it visible: a swallowed failure here leaves the session 'running'
+            # forever after a fatal error, masking the crash as a live campaign.
+            logger.exception(
+                "[campaign %s] mark-failed after fatal error failed — session row may stay 'running'",
+                campaign.id,
+            )
         # Record an explicit terminal reason so the campaign never stays "active"
         # with a null stop_reason after a fatal, unsalvageable error.
         campaign.finalize_stop(STOP_REASON_FATAL_ERROR)
         try:
             await db_save_campaign(campaign, session_factory)
         except Exception:
-            pass
+            logger.exception(
+                "[campaign %s] db_save of FATAL_ERROR stop reason failed", campaign.id
+            )
         await emitter.emit(
             session_id=campaign.id,
             event_type=EventType.SESSION_FAILED,

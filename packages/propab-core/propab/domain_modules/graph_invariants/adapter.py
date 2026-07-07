@@ -1,19 +1,92 @@
-"""Synthetic SNAP-style graph invariant dataset."""
+"""Real SNAP network invariant dataset.
+
+This module builds a cross-network invariant frame from **REAL** public networks
+(Stanford SNAP edge lists shipped under ``data/v1_candidates/``), NOT from
+seed-generated textbook graph families. Each row is an invariant fingerprint of a
+genuine connected induced subgraph sampled (randomised snowball / BFS) from a real
+network, so a cross-family invariant correlation tests whether the relationship
+holds across *real* network types — a genuinely open question — rather than
+re-deriving a Newman-2003 textbook fact from ER/BA/WS/lattice toys.
+
+Provenance (see ``data/graph_invariants/PROVENANCE.md``):
+
+* ``collaboration`` — ``ca-GrQc.txt.gz``: arXiv General Relativity (GR-QC)
+  co-authorship network. Leskovec, Kleinberg, Faloutsos (2007); SNAP dataset
+  ``ca-GrQc`` (https://snap.stanford.edu/data/ca-GrQc.html).
+* ``communication`` — ``email-Eu-core.txt.gz``: e-mail network of a large European
+  research institution. Leskovec, Kleinberg, Faloutsos (2007); Yin, Benson,
+  Leskovec, Gleich (2017); SNAP dataset ``email-Eu-core``
+  (https://snap.stanford.edu/data/email-Eu-core.html).
+* ``infrastructure`` — ``power-US-Grid.txt.gz``: the power grid of the Western
+  States of the USA (nodes = generators / transformers / substations, edges = power
+  supply lines). Watts & Strogatz, "Collective dynamics of 'small-world' networks",
+  Nature 393, 440–442 (1998); distributed by the Koblenz Network Collection
+  (KONECT, ``opsahl-powergrid``, http://konect.cc/networks/opsahl-powergrid). A
+  genuinely DISTINCT topology class from the two social graphs above: a near-planar
+  infrastructure mesh with very low average degree (~2.6 in sampled subgraphs), low
+  clustering (~0.11), and large diameter (~9) — the opposite of the compact,
+  triangle-dense social networks. Its (single) connected component of 4,941 nodes is
+  sampled identically to the others (snowball induced subgraphs), so every grid
+  subgraph is a real piece of the real network.
+
+The two social files were fetched from SNAP and the power grid from KONECT; all are
+cached on disk, so no network access is needed at run time. The families are
+structurally distinct real networks (a sparse, high-clustering collaboration graph;
+a dense communication graph; and a near-planar low-degree power-grid/infrastructure
+graph), so the cross-family LOFO in :mod:`.verifier` is a real out-of-distribution
+test across three topology classes.
+"""
 from __future__ import annotations
 
+import gzip
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import networkx as nx
 import numpy as np
 import pandas as pd
 
 from propab.config import settings
 
-GRAPH_FAMILIES = ("erdos_renyi", "barabasi_albert", "watts_strogatz", "grid_lattice")
-GRAPHS_PER_FAMILY = 40
-N_NODES = 200
+# --- Real network sources (SNAP edge lists cached on disk) -------------------
+# family_id -> (edge-list filename, human description, SNAP url for citation)
+REAL_NETWORKS: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "collaboration",
+        "ca-GrQc.txt.gz",
+        "arXiv GR-QC co-authorship (SNAP ca-GrQc)",
+        "https://snap.stanford.edu/data/ca-GrQc.html",
+    ),
+    (
+        "communication",
+        "email-Eu-core.txt.gz",
+        "EU research-institution e-mail (SNAP email-Eu-core)",
+        "https://snap.stanford.edu/data/email-Eu-core.html",
+    ),
+    (
+        "infrastructure",
+        "power-US-Grid.txt.gz",
+        "US Western States power grid (KONECT opsahl-powergrid; Watts-Strogatz 1998)",
+        "http://konect.cc/networks/opsahl-powergrid",
+    ),
+)
+GRAPH_FAMILIES = tuple(fam for fam, _, _, _ in REAL_NETWORKS)
+
+# Sampling parameters. Each family contributes ``SUBGRAPHS_PER_FAMILY`` connected
+# induced subgraphs of ``SUBGRAPH_NODES`` nodes, snowball-sampled from the largest
+# connected component of the real network. This yields a distribution of invariant
+# fingerprints per real family without ever fabricating topology — every subgraph
+# is a genuine piece of the real network.
+#
+# 50 (not 30) subgraphs/family: with the third, near-planar power-grid/
+# infrastructure family added, the sparse grid subgraphs need a larger sample for
+# the label-shuffle null to have the power to resolve a genuine cross-family
+# invariant law (e.g. clustering_coefficient->avg_degree) from noise on the held-out
+# grid family. This only adds real subgraphs; it fabricates nothing.
+SUBGRAPHS_PER_FAMILY = 50
+SUBGRAPH_NODES = 100
 RANDOM_SEED = 42
 
 KNOWN_INVARIANTS: tuple[str, ...] = (
@@ -36,121 +109,210 @@ def cache_path() -> Path:
     return cache_dir() / "snap_subset_v1.csv"
 
 
-def _erdos_renyi(n: int, p: float, rng: np.random.Generator) -> np.ndarray:
-    adj = (rng.random((n, n)) < p).astype(float)
-    adj = np.triu(adj, 1)
-    return adj + adj.T
+def _source_dir() -> Path:
+    """Directory holding the cached real SNAP edge-list files.
+
+    Resolved relative to the repo's ``data/v1_candidates`` so the real networks are
+    found regardless of ``propab_data_dir`` (which points at a scratch cache dir in
+    tests). ``adapter.py`` lives at
+    ``packages/propab-core/propab/domain_modules/graph_invariants/adapter.py``; the
+    repo root is five parents up.
+    """
+    repo_root = Path(__file__).resolve().parents[5]
+    return repo_root / "data" / "v1_candidates"
 
 
-def _barabasi_albert(n: int, m: int, rng: np.random.Generator) -> np.ndarray:
-    adj = np.zeros((n, n))
-    for i in range(1, n):
-        deg = adj.sum(axis=0) + 1e-9
-        probs = deg[:i] / deg[:i].sum()
-        targets = rng.choice(i, size=min(m, i), replace=False, p=probs)
-        for j in targets:
-            adj[i, j] = adj[j, i] = 1.0
-    return adj
+class RealNetworkUnavailable(FileNotFoundError):
+    """Raised when a cached real SNAP edge list cannot be found on disk.
+
+    We fail closed (raise) rather than silently falling back to synthetic graphs —
+    a "real" cross-family finding must never be computed from fabricated topology.
+    """
 
 
-def _watts_strogatz(n: int, k: int, beta: float, rng: np.random.Generator) -> np.ndarray:
-    adj = np.zeros((n, n))
-    for i in range(n):
-        for j in range(1, k // 2 + 1):
-            a, b = i, (i + j) % n
-            adj[a, b] = adj[b, a] = 1.0
-    for i in range(n):
-        for j in range(i + 1, n):
-            if adj[i, j] and rng.random() < beta:
-                adj[i, j] = adj[j, i] = 0.0
-                t = rng.integers(0, n)
-                adj[i, t] = adj[t, i] = 1.0
-    return adj
+def _load_real_network(filename: str) -> nx.Graph:
+    """Load a real SNAP edge list (gzipped, whitespace-separated, ``#`` comments)."""
+    path = _source_dir() / filename
+    if not path.is_file():
+        raise RealNetworkUnavailable(
+            f"real SNAP network {filename!r} not found at {path}; refusing to "
+            "fabricate synthetic topology in its place"
+        )
+    graph = nx.Graph()
+    with gzip.open(path, "rt", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            a, b = parts[0], parts[1]
+            if a != b:  # drop self-loops
+                graph.add_edge(int(a), int(b))
+    return graph
 
 
-def _grid_lattice(n: int) -> np.ndarray:
-    side = int(np.sqrt(n))
-    side = max(side, 2)
-    adj = np.zeros((n, n))
-    for i in range(n):
-        r, c = divmod(i, side)
-        for dr, dc in ((0, 1), (1, 0)):
-            nr, nc = r + dr, c + dc
-            if nr < side and nc < side:
-                j = nr * side + nc
-                if j < n:
-                    adj[i, j] = adj[j, i] = 1.0
-    return adj
+def _largest_component(graph: nx.Graph) -> nx.Graph:
+    if graph.number_of_nodes() == 0:
+        return graph
+    lcc = max(nx.connected_components(graph), key=len)
+    return graph.subgraph(lcc).copy()
 
 
-def _bfs_farthest(adj: np.ndarray, start: int) -> tuple[int, int]:
-    n = adj.shape[0]
-    dist = np.full(n, -1, dtype=int)
-    dist[start] = 0
-    frontier = [start]
-    farthest, farthest_dist = start, 0
-    while frontier:
-        nxt: list[int] = []
-        for u in frontier:
-            for v in np.where(adj[u] > 0)[0]:
-                if dist[v] >= 0:
-                    continue
-                dist[v] = dist[u] + 1
-                if dist[v] > farthest_dist:
-                    farthest, farthest_dist = int(v), int(dist[v])
-                nxt.append(int(v))
-        frontier = nxt
-    return farthest, farthest_dist
+def _sample_connected_subgraph(
+    graph: nx.Graph, size: int, rng: np.random.Generator, nodes: list[int]
+) -> nx.Graph:
+    """Randomised snowball (BFS) sample of a connected induced subgraph.
+
+    Starts from a random seed node and expands over shuffled neighbours until
+    ``size`` nodes are collected, then returns the induced subgraph — which is
+    connected by construction. This is a standard real-network subsampling scheme;
+    the result is a genuine piece of the real network, not a generated graph.
+    """
+    if not nodes:
+        return graph.subgraph([]).copy()
+    start = int(nodes[int(rng.integers(len(nodes)))])
+    order: list[int] = [start]
+    seen: set[int] = {start}
+    i = 0
+    while i < len(order) and len(order) < size:
+        u = order[i]
+        i += 1
+        neighbours = list(graph.neighbors(u))
+        rng.shuffle(neighbours)
+        for v in neighbours:
+            if v not in seen:
+                seen.add(v)
+                order.append(v)
+                if len(order) >= size:
+                    break
+    return graph.subgraph(seen).copy()
 
 
-def _approx_diameter(adj: np.ndarray) -> float:
-    if adj.shape[0] <= 1:
-        return 0.0
-    mid, _ = _bfs_farthest(adj, 0)
-    _, diameter = _bfs_farthest(adj, mid)
-    return float(diameter)
+def _fiedler_vector(lap: np.ndarray) -> np.ndarray:
+    """Second-smallest eigenvector of the Laplacian (the Fiedler vector)."""
+    _, eigvecs = np.linalg.eigh(lap)
+    if eigvecs.shape[1] < 2:
+        return np.zeros(lap.shape[0])
+    return eigvecs[:, 1]
 
 
-def _graph_metrics(adj: np.ndarray) -> dict[str, float]:
-    n = adj.shape[0]
+def _newman_modularity(adj: np.ndarray, communities: np.ndarray) -> float:
+    """
+    Real Newman modularity Q for a partition of nodes into communities.
+
+    Q = (1 / 2m) * sum_ij [ A_ij - k_i k_j / 2m ] * delta(c_i, c_j)
+
+    DOM2b honesty: this is a genuine structural quantity computed from the
+    adjacency matrix and a community partition — NOT a closed-form function of
+    the clustering coefficient. It measures how much more densely nodes connect
+    within their assigned community than expected under a degree-preserving null,
+    so ``modularity`` and ``clustering_coefficient`` are independent invariants
+    (a "modularity↔clustering" finding is no longer a tautology).
+    """
     deg = adj.sum(axis=1)
-    avg_deg = float(deg.mean())
+    two_m = float(deg.sum())
+    if two_m <= 0:
+        return 0.0
+    same = (communities[:, None] == communities[None, :]).astype(float)
+    expected = np.outer(deg, deg) / two_m
+    q = float(((adj - expected) * same).sum() / two_m)
+    return q
+
+
+def _graph_metrics(subgraph: nx.Graph) -> dict[str, float]:
+    """Compute the six exposed invariants for a real (connected) subgraph.
+
+    Uses the SAME definitions the verifier expects — real Newman modularity,
+    transitivity (global clustering), algebraic connectivity (Fiedler value),
+    adjacency spectral gap (λ1 − λ2), diameter, and average degree — computed
+    directly on the real subgraph. DOM2b: the six invariants remain independent
+    (none is a closed-form function of another).
+    """
+    graph = nx.convert_node_labels_to_integers(subgraph)
+    n = graph.number_of_nodes()
+    adj = nx.to_numpy_array(graph)
+    deg = adj.sum(axis=1)
+    avg_deg = float(deg.mean()) if n else 0.0
+
     lap = np.diag(deg) - adj
-    eigvals = np.linalg.eigvalsh(lap)
-    spectral_gap = float(eigvals[1]) if len(eigvals) > 1 else 0.0
-    tris = np.trace(adj @ adj @ adj) / 6.0
-    possible = n * (n - 1) * (n - 2) / 6.0 if n > 2 else 1.0
-    clustering = float(tris / possible) if possible else 0.0
-    diameter = _approx_diameter(adj)
-    modularity = float(0.25 * clustering + 0.1 * (avg_deg / max(n, 1)))
+    lap_eigvals = np.linalg.eigvalsh(lap)
+    # Algebraic connectivity = Fiedler value = second-smallest Laplacian eigenvalue.
+    algebraic_connectivity = float(lap_eigvals[1]) if len(lap_eigvals) > 1 else 0.0
+    # Spectral gap: a DISTINCT quantity — the gap between the two largest
+    # adjacency-matrix eigenvalues (λ1 - λ2), decoupled from algebraic connectivity.
+    adj_eigvals = np.linalg.eigvalsh(adj)
+    spectral_gap = (
+        float(adj_eigvals[-1] - adj_eigvals[-2]) if len(adj_eigvals) > 1 else 0.0
+    )
+    # Global clustering coefficient (transitivity) — real triangle density.
+    clustering = float(nx.transitivity(graph)) if n > 2 else 0.0
+    # Diameter of the (connected) subgraph.
+    try:
+        diameter = float(nx.diameter(graph)) if n > 1 else 0.0
+    except (nx.NetworkXError, nx.NetworkXException):
+        diameter = 0.0
+    # Real modularity of a Fiedler (spectral) bipartition — a structural community
+    # measure, independent of clustering. See _newman_modularity.
+    communities = (_fiedler_vector(lap) >= 0).astype(int)
+    modularity = _newman_modularity(adj, communities)
     return {
         "spectral_gap": spectral_gap,
-        "algebraic_connectivity": spectral_gap,
+        "algebraic_connectivity": algebraic_connectivity,
         "clustering_coefficient": clustering,
-        "diameter": float(diameter),
+        "diameter": diameter,
         "avg_degree": avg_deg,
         "modularity": modularity,
     }
 
 
-def _synthetic_frame() -> pd.DataFrame:
-    rng = np.random.default_rng(RANDOM_SEED)
+def _real_frame() -> pd.DataFrame:
+    """Build the invariant frame from REAL SNAP networks (no synthetic topology)."""
     rows: list[dict[str, Any]] = []
     gid = 0
-    for family in GRAPH_FAMILIES:
-        for _ in range(GRAPHS_PER_FAMILY):
-            if family == "erdos_renyi":
-                adj = _erdos_renyi(N_NODES, 0.03, rng)
-            elif family == "barabasi_albert":
-                adj = _barabasi_albert(N_NODES, 3, rng)
-            elif family == "watts_strogatz":
-                adj = _watts_strogatz(N_NODES, 6, 0.1, rng)
-            else:
-                adj = _grid_lattice(N_NODES)
-            metrics = _graph_metrics(adj)
-            rows.append({"graph_id": f"G{gid:04d}", "network_family": family, **metrics})
+    for family, filename, _desc, _url in REAL_NETWORKS:
+        graph = _largest_component(_load_real_network(filename))
+        nodes = list(graph.nodes())
+        # Per-family deterministic seed derived from the fixed RANDOM_SEED and the
+        # family index (so the frame is reproducible without cross-family aliasing).
+        fam_seed = RANDOM_SEED * 1000 + GRAPH_FAMILIES.index(family)
+        rng = np.random.default_rng(fam_seed)
+        size = min(SUBGRAPH_NODES, len(nodes))
+        for _ in range(SUBGRAPHS_PER_FAMILY):
+            subgraph = _sample_connected_subgraph(graph, size, rng, nodes)
+            metrics = _graph_metrics(subgraph)
+            rows.append(
+                {"graph_id": f"G{gid:04d}", "network_family": family, **metrics}
+            )
             gid += 1
     return pd.DataFrame(rows)
+
+
+class GraphInvariantNotIdentified(ValueError):
+    """
+    Raised by :meth:`GraphInvariantSpec.from_hypothesis` when no graph invariant
+    can be confidently identified in the hypothesis text.
+
+    DOM4 honesty: the previous ``from_hypothesis`` ALWAYS fell back to
+    ``spectral_gap → clustering_coefficient`` for any text lacking specific
+    keywords, so an off-topic / misrouted hypothesis was silently verified
+    against a fixed default pair and could produce a "confirmed" verdict
+    decoupled from the actual claim. Refusing (raising) here lets the caller map
+    the result to ``inconclusive`` instead of fabricating a check.
+    """
+
+
+# Phrases that confidently name an exposed invariant. Ordered so more-specific
+# phrases match before bare ones (e.g. "clustering coefficient" before "cluster").
+_INVARIANT_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("modularity", ("modularity",)),
+    ("algebraic_connectivity", ("algebraic connectivity", "algebraic", "fiedler")),
+    ("spectral_gap", ("spectral gap", "spectral")),
+    ("clustering_coefficient", ("clustering coefficient", "clustering", "transitivity")),
+    ("diameter", ("diameter",)),
+    ("avg_degree", ("average degree", "avg degree", "average-degree", "degree distribution")),
+)
 
 
 @dataclass
@@ -162,14 +324,49 @@ class GraphInvariantSpec:
 
     @classmethod
     def from_hypothesis(cls, hypothesis: dict[str, Any]) -> GraphInvariantSpec:
+        """
+        Resolve source/target invariants from hypothesis text.
+
+        DOM4: identify invariants only from explicit markers. If NO invariant is
+        named at all, raise :class:`GraphInvariantNotIdentified` rather than
+        silently defaulting to ``spectral_gap → clustering`` — a text mentioning
+        no graph invariant is off-topic / misrouted and must not be verified
+        against a fabricated default pair. When exactly ONE invariant is named
+        (a threshold / band / cross-family self-check), it is paired with a
+        distinct default correlate so the check is a real cross-invariant
+        comparison rather than a trivial self-correlation.
+        """
         text = str(hypothesis.get("text") or hypothesis.get("statement") or "").lower()
-        src, tgt = "spectral_gap", "clustering_coefficient"
-        if "diameter" in text:
-            tgt = "diameter"
-        if "modularity" in text:
-            src, tgt = "modularity", "clustering_coefficient"
-        if "algebraic" in text:
-            src = "algebraic_connectivity"
+
+        # Collect invariants in the order they appear in the text so the leading
+        # invariant becomes the source and the next distinct one the target.
+        found: list[tuple[int, str]] = []
+        seen: set[str] = set()
+        for invariant, phrases in _INVARIANT_MARKERS:
+            pos = min(
+                (text.find(p) for p in phrases if p in text),
+                default=-1,
+            )
+            if pos >= 0 and invariant not in seen:
+                found.append((pos, invariant))
+                seen.add(invariant)
+        found.sort(key=lambda t: t[0])
+
+        if not found:
+            raise GraphInvariantNotIdentified(
+                "could not confidently identify any graph invariant in hypothesis "
+                "text; refusing default spectral_gap->clustering_coefficient"
+            )
+
+        if len(found) >= 2:
+            src, tgt = found[0][1], found[1][1]
+        else:
+            # Exactly one invariant named: pair with a distinct default correlate
+            # (never itself, which would be a trivial r=1 self-correlation).
+            only = found[0][1]
+            default_other = "clustering_coefficient" if only != "clustering_coefficient" else "spectral_gap"
+            src, tgt = only, default_other
+
         claim = "correlation_positive"
         if "negative" in text or "inverse" in text or "decreases" in text:
             claim = "correlation_negative"
@@ -177,7 +374,7 @@ class GraphInvariantSpec:
             claim = "holds_all_families"
         held = None
         for fam in GRAPH_FAMILIES:
-            if fam.replace("_", " ") in text or fam.replace("_", "-") in text:
+            if fam.replace("_", " ") in text or fam.replace("_", "-") in text or fam in text:
                 held = fam
                 break
         return cls(source_invariant=src, target_invariant=tgt, claim_type=claim, held_out_family=held)
@@ -188,10 +385,28 @@ class GraphInvariantsAdapter:
         path = cache_path()
         if path.is_file():
             return path
-        df = _synthetic_frame()
+        df = _real_frame()
         df.to_csv(path, index=False)
         cache_dir().joinpath("snap_subset_v1.meta.json").write_text(
-            json.dumps({"graphs": len(df), "families": list(GRAPH_FAMILIES), "synthetic": True}, indent=2),
+            json.dumps(
+                {
+                    "graphs": len(df),
+                    "families": list(GRAPH_FAMILIES),
+                    "synthetic": False,
+                    "data_provenance": "real",
+                    "sources": [
+                        {"family": fam, "file": fn, "description": desc, "url": url}
+                        for fam, fn, desc, url in REAL_NETWORKS
+                    ],
+                    "sampling": {
+                        "method": "randomised snowball (BFS) connected induced subgraph",
+                        "subgraphs_per_family": SUBGRAPHS_PER_FAMILY,
+                        "subgraph_nodes": SUBGRAPH_NODES,
+                        "random_seed": RANDOM_SEED,
+                    },
+                },
+                indent=2,
+            ),
             encoding="utf-8",
         )
         return path

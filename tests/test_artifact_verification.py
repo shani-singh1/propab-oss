@@ -6,6 +6,8 @@ from propab.artifact_verification import (
     ARTIFACT_SIGNIFICANCE_ONLY,
     ARTIFACT_TOPOLOGY_DEPENDENCE,
     EvidenceContext,
+    _survives_label_shuffle_lofo,
+    _survives_permutation,
     apply_artifact_gate_override,
     apply_two_stage_gate,
     audit_confirmed_rows,
@@ -134,6 +136,58 @@ def test_network_artifact_vocabulary_owned_by_plugin():
     assert plugin is not None
     markers = set(plugin.artifact_question_markers)
     assert {"contagion", "topology", "modular", "k-shell"} <= markers
+
+
+# ── A1: survival tests must fail-closed without real null statistics ──────────
+
+def test_permutation_survives_with_strict_outcome_null_and_large_n():
+    ctx = EvidenceContext(hypothesis_text="stat claim", p_value=0.001, n_samples=400)
+    v = _survives_permutation(ctx, {"permutation_p": 0.002, "n_samples": 400})
+    assert v.survived is True
+
+
+def test_permutation_fails_when_only_reported_p_no_null():
+    """A raw worker-reported p_value is NOT a null test — must fail closed."""
+    ctx = EvidenceContext(hypothesis_text="stat claim", p_value=0.0001, n_samples=1000)
+    v = _survives_permutation(ctx, {"p_value": 0.0001, "n_samples": 1000})
+    assert v.survived is False
+
+
+def test_permutation_fails_when_perm_p_present_but_n_small():
+    ctx = EvidenceContext(hypothesis_text="stat claim", p_value=0.001, n_samples=30)
+    v = _survives_permutation(ctx, {"permutation_p": 0.001, "n_samples": 30})
+    assert v.survived is False
+
+
+def test_permutation_no_longer_rubber_stamps_positive_lofo():
+    """The removed rubber-stamp: a positive LOFO number alone must NOT survive
+    the permutation test without an actual null."""
+    ctx = EvidenceContext(hypothesis_text="stat claim", lofo_r2=0.42, n_samples=500)
+    v = _survives_permutation(ctx, {"lofo_r2": 0.42, "mean_r2": 0.42, "n_samples": 500})
+    assert v.survived is False
+
+
+def test_label_shuffle_full_null_path_still_confirms():
+    """Constraint (d): the intact full-LOFO path survives when LOFO beats the
+    shuffle-null p95 with a strict permutation p."""
+    v = _survives_label_shuffle_lofo({
+        "lofo_r2": 0.20,
+        "label_shuffle_null_p95": 0.05,
+        "label_shuffle_permutation_p": 0.01,
+    })
+    assert v.survived is True
+
+
+def test_label_shuffle_heuristic_gap_path_removed():
+    """The old `lofo>0.05 and gap<0.85` (no-null) heuristic must no longer pass."""
+    v = _survives_label_shuffle_lofo({"lofo_r2": 0.30, "lofo_gap": 0.10})
+    assert v.survived is False
+
+
+def test_label_shuffle_almost_always_true_fallback_removed():
+    """The old `lofo>-0.05 and y_perm_p<0.05` fallback must no longer pass."""
+    v = _survives_label_shuffle_lofo({"lofo_r2": 0.01, "permutation_p": 0.01})
+    assert v.survived is False
 
 
 def test_topology_artifact_detected_via_plugin_markers_without_domain_bucket():

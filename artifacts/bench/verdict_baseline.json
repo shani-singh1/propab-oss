@@ -1,0 +1,71 @@
+{
+  "metrics": {
+    "false_confirm_rate": 0.0,
+    "confirm_recall": 1.0,
+    "balanced_accuracy": 1.0,
+    "specificity": 1.0,
+    "n_positive_cases": 36,
+    "n_negative_cases": 60,
+    "per_evidence_type": {
+      "real_effect_statistical": {
+        "should_confirm": true,
+        "confirm_rate": 1.0,
+        "correct": true,
+        "n": 12
+      },
+      "null_effect_statistical": {
+        "should_confirm": false,
+        "confirm_rate": 0.0,
+        "correct": true,
+        "n": 12
+      },
+      "fabricated_input_statistical": {
+        "should_confirm": false,
+        "confirm_rate": 0.0,
+        "correct": true,
+        "n": 12
+      },
+      "small_n_statistical": {
+        "should_confirm": false,
+        "confirm_rate": 0.0,
+        "correct": true,
+        "n": 12
+      },
+      "genuine_lofo": {
+        "should_confirm": true,
+        "confirm_rate": 1.0,
+        "correct": true,
+        "n": 12
+      },
+      "artifact_lofo": {
+        "should_confirm": false,
+        "confirm_rate": 0.0,
+        "correct": true,
+        "n": 12
+      },
+      "deterministic_proof": {
+        "should_confirm": true,
+        "confirm_rate": 1.0,
+        "correct": true,
+        "n": 12
+      },
+      "bare_counter_deterministic": {
+        "should_confirm": false,
+        "confirm_rate": 0.0,
+        "correct": true,
+        "n": 12
+      }
+    }
+  },
+  "n_seeds": 12,
+  "config": {
+    "n_seeds": 12,
+    "n_case_types": 8,
+    "cases_per_seed": 8,
+    "permutation_null": "services.worker.permutation_null.compute_label_permutation_null",
+    "entry_point": "propab.verdict_pipeline.run_verdict_pipeline",
+    "main_checkout": "C:\\Users\\cyber\\OneDrive\\Documents\\propab-oss"
+  },
+  "git_sha": "97d8779384c05c5205b1daaea02681147201135e",
+  "timestamp": "2026-07-06T20:05:48.238358+00:00"
+}

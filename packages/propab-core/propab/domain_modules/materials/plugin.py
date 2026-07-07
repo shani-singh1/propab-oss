@@ -36,9 +36,16 @@ class MaterialsPlugin(DomainPlugin):
             "ood_test": "Leave-one-crystal-system-out LOFO; lofo_r2 must beat label-shuffle null p95",
         }
 
-    def matches(self, *, question: str = "", payload: dict[str, Any] | None = None) -> bool:
-        # Mirrors the historical is_materials_campaign: explicit tag/payload only.
-        q = (question or "").lower()
+    # Distinct materials content markers. matches() requires >= 2 to self-route
+    # (a lone "band gap of this network model" must NOT steal a graph question);
+    # an explicit tag/payload always wins. Mirrors the 2-marker gate the other
+    # content-routed domains use, so DOM3 score-based collision routing is honoured.
+    _MATCH_MARKERS = (
+        "matbench", "dielectric", "crystal system", "crystal-system",
+        "band gap", "bandgap", "formation energy", "perovskite",
+    )
+
+    def _explicit(self, q: str, payload: dict[str, Any] | None) -> bool:
         if "domain_profile:materials" in q:
             return True
         if payload:
@@ -47,6 +54,19 @@ class MaterialsPlugin(DomainPlugin):
             if str(payload.get("domain") or "") == "materials":
                 return True
         return False
+
+    def matches(self, *, question: str = "", payload: dict[str, Any] | None = None) -> bool:
+        q = (question or "").lower()
+        if self._explicit(q, payload):
+            return True
+        # Content routing: >= 2 distinct domain markers in the question text.
+        return sum(1 for m in self._MATCH_MARKERS if m in q) >= 2
+
+    def match_score(self, *, question: str = "", payload: dict[str, Any] | None = None) -> float:
+        q = (question or "").lower()
+        if self._explicit(q, payload):
+            return float(len(self._MATCH_MARKERS))
+        return float(sum(1 for m in self._MATCH_MARKERS if m in q))
 
     def available_features(self) -> list[str]:
         from propab.domain_adapters.materials_adapter import _KNOWN_FEATURES
@@ -117,9 +137,38 @@ class MaterialsPlugin(DomainPlugin):
             "classification_codes": {
                 "arxiv": ["cond-mat.mtrl-sci"],
             },
-            "open_problem_sources": [],
+            "open_problem_sources": [
+                {
+                    "name": "Matbench leaderboard (matbench_dielectric task)",
+                    "url": "https://matbench.materialsproject.org/Leaderboards%20Per-Task/matbench_v0.1_matbench_dielectric/",
+                },
+            ],
             "tabulation_sources": [
-                {"name": "materials_project", "identifiers": []},
+                {
+                    "name": "Matbench matbench_dielectric",
+                    "identifiers": ["matbench_v0.1/matbench_dielectric"],
+                    # Best-known-value baseline for rediscovery rejection. The
+                    # matbench_dielectric task (predict refractive index n from
+                    # structure, 4764 compounds, 5-fold nested CV) has a public
+                    # per-task leaderboard; the Automatminer reference algorithm
+                    # scores MAE = 0.3057 (log10 refractive index units) /
+                    # ~29.09 in the raw-refractive-index reporting, and the
+                    # current SOTA (coGN / MODNet) sits near MAE ~0.27. A model
+                    # that does not beat these is rediscovery, not novelty.
+                    "best_known_metric": "MAE (refractive index)",
+                    "automatminer_baseline_mae": 0.3057,
+                    "sota_reference_mae": 0.27,
+                    "source": "Dunn et al. 2020, npj Comput. Mater. (10.1038/s41524-020-00406-3)",
+                },
+                {
+                    "name": "Materials Project dielectric tensor dataset",
+                    "identifiers": ["MP:dielectric"],
+                    # DFT (DFPT) dielectric-tensor tabulation underlying the
+                    # Matbench task — the authoritative per-material best-known
+                    # eps_electronic / refractive-index values.
+                    "url": "https://next-gen.materialsproject.org/",
+                    "source": "Petousis et al. 2017, Sci. Data (10.1038/sdata.2016.134)",
+                },
             ],
             "canonical_surveys": [
                 {
@@ -129,10 +178,19 @@ class MaterialsPlugin(DomainPlugin):
                     ),
                     "doi": "10.1038/s41524-020-00406-3",
                 },
+                {
+                    "title": (
+                        "High-throughput screening of inorganic compounds for the discovery "
+                        "of novel dielectric and optical materials"
+                    ),
+                    "doi": "10.1038/sdata.2016.134",
+                },
             ],
             "novelty_criteria": (
                 "A finding is novel if it establishes a descriptor-to-dielectric relationship "
-                "that survives leave-one-crystal-system-out holdout and is not already captured "
-                "by the Matbench reference algorithm's baseline performance on this task."
+                "that survives leave-one-crystal-system-out holdout AND beats the Matbench "
+                "matbench_dielectric reference baselines (Automatminer MAE ~0.31, SOTA MAE ~0.27 "
+                "on log-refractive-index) rather than merely reproducing a per-material value "
+                "already tabulated in the Materials Project dielectric-tensor dataset."
             ),
         }

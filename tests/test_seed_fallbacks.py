@@ -1,28 +1,51 @@
-"""Seed-generation fallbacks and relevance gate (fixes.md Phase 1)."""
+"""Generation honesty: no template / fallback-seed fabrication.
+
+The template / fallback-seed machinery (``_domain_fallback_options``,
+``_fallback_hypothesis_text``, ``_inject_discovery_fallbacks``) was DELETED in
+the generation overhaul: Propab must REASON, never expand templates. These tests
+pin the replacement behavior — when the LLM yields nothing usable, generation
+returns empty rather than fabricating a templated hypothesis.
+"""
+
+from __future__ import annotations
+
+import asyncio
 
 from services.orchestrator.hypotheses import (
-    _domain_fallback_options,
-    _fallback_hypothesis_text,
-    _inject_discovery_fallbacks,
     _is_ml_template_hypothesis,
+    generate_ranked_hypotheses,
 )
-from services.orchestrator.schemas import RankedHypothesis
+from services.orchestrator.intake import ParsedQuestion
+from services.orchestrator.schemas import Prior
 
 
-def test_egyptian_question_gets_domain_fallbacks() -> None:
-    q = "Which odd n admit five distinct unit fractions 1/a+1/b+1/c+1/d+1/e?"
-    opts = _domain_fallback_options(q)
-    assert any("mod" in o.lower() or "residue" in o.lower() or "enumeration" in o.lower() for o in opts)
-    assert not _is_ml_template_hypothesis(_fallback_hypothesis_text(q, 1))
-
-
-def test_concrete_scoped_claim_not_auto_rejected() -> None:
-    q = "Test contagion on scale-free networks."
-    text = (
-        "Epidemic peak time on scale-free networks is more sensitive to degree exponent "
-        f"than to average degree. (Question: {q})"
+def _empty_prior() -> Prior:
+    return Prior(
+        established_facts=[],
+        contested_claims=[],
+        open_gaps=[],
+        dead_ends=[],
+        key_papers=[],
     )
-    assert not _is_ml_template_hypothesis(text)
+
+
+class _EmptyLLM:
+    """LLM double that never returns any hypotheses."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def call(self, *, prompt: str, purpose: str, session_id: str, **kwargs) -> str:
+        self.calls.append(purpose)
+        return ""
+
+
+class _CollectingEmitter:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    async def emit(self, **kwargs) -> None:
+        self.events.append(kwargs)
 
 
 def test_ml_template_still_rejects_intervention_wording() -> None:
@@ -30,22 +53,29 @@ def test_ml_template_still_rejects_intervention_wording() -> None:
     assert _is_ml_template_hypothesis(hyp)
 
 
-def test_inject_discovery_fallbacks_adds_three() -> None:
-    q = "Compare cache policies on LRU-adversarial traces."
-    kept = [
-        RankedHypothesis(
-            id="null",
-            text=(
-                "Null hypothesis: No falsifiable pattern in the research question holds beyond "
-                "what random variation would produce. (Question: x)"
-            ),
-            test_methodology="bootstrap",
-            scores={},
-            rank=5,
-        )
-    ]
-    out = _inject_discovery_fallbacks(kept, question=q, max_hypotheses=5, min_discovery=3)
-    from propab.research_quality import infer_node_role
+def test_empty_llm_returns_no_fabricated_hypothesis() -> None:
+    """A mock LLM that returns nothing must yield an EMPTY result — never a
+    fabricated/templated hypothesis carrying the round forward."""
+    q = "Do coral reef bleaching events correlate with lunar tidal amplitude across Pacific atolls?"
+    parsed = ParsedQuestion(text=q, domain="general", sub_questions=[q])
+    llm = _EmptyLLM()
+    meta: dict = {}
 
-    discovery = [h for h in out if infer_node_role(h.text) != "CONTROL"]
-    assert len(discovery) >= 3
+    out = asyncio.run(
+        generate_ranked_hypotheses(
+            parsed=parsed,
+            prior=_empty_prior(),
+            max_hypotheses=5,
+            llm=llm,
+            session_id="s1",
+            emitter=_CollectingEmitter(),
+            use_llm_ranking=False,
+            meta=meta,
+        )
+    )
+
+    assert out == [], f"empty LLM must produce no fabricated hypotheses, got {[h.text[:60] for h in out]}"
+    assert meta.get("llm_empty") is True
+    # The honest retry path fires exactly once (novelty-nudged), then stops.
+    assert "hypothesis_generation" in llm.calls
+    assert "hypothesis_generation_retry" in llm.calls

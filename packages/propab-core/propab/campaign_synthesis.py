@@ -43,11 +43,204 @@ def _dedup_key(text: str) -> str:
     return _norm_text(line or text)
 
 
+_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?")
+_SCOPE_LINE_RE = re.compile(r"^\s*(population|distribution|claimed generalization)\s*:\s*(.+)$", re.I | re.M)
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _scope_signature(text: str) -> frozenset[str]:
+    """Content tokens of the scope lines (Population / Distribution / Claimed
+    generalization). Two candidates that narrow along a NON-numeric axis (e.g. a
+    biology sub-population: 'RT enzymes' → 'thermophilic RT enzymes') differ in
+    these lines even with no distinct numbers, so this is the general parameter
+    fingerprint that complements ``_numeric_signature`` for non-math domains."""
+    toks: set[str] = set()
+    for _label, content in _SCOPE_LINE_RE.findall(text or ""):
+        toks.update(_WORD_RE.findall(content.lower()))
+    return frozenset(toks)
+
+
+def _numeric_signature(text: str) -> frozenset[str]:
+    """The set of numbers a hypothesis mentions — its parameter fingerprint.
+
+    Convergence works by NARROWING: a child tests a stricter region/value than its
+    parent (e.g. n in [34000,36000] then [34500,35500]). Those texts are ~0.96
+    similar (only the numbers differ), so the pure-text duplicate filter rejected
+    the second — deleting exactly the sequence of narrowing tests convergence
+    needs, then starving the frontier (measured: max confirmed-lineage depth ~1,
+    search halts after ~2 waves; see investigation report §6b). Two textually-
+    similar candidates whose number sets DIFFER are distinct experiments, not
+    duplicates. Reject only true rephrasings (same claim AND same numbers)."""
+    return frozenset(_NUM_RE.findall(text or ""))
+
+
+# --------------------------------------------------------------------------
+# Anti-retest / anti-monoculture guard — CLAIM SKELETON matching.
+#
+# A "retest" is the same structural claim with different parameters (a new
+# size / dimension / lookahead / threshold / identifier). The campaign that
+# produced a 34-way monoculture kept proposing parametric variations of ONE
+# tested claim. To catch that in CODE (not just the prompt), we compare the
+# candidate's CLAIM SKELETON — the claim with all numbers, parameter values,
+# and free identifiers normalized away — against every already-TESTED node.
+# This is DOMAIN-GENERAL: it normalizes structurally (digits, decimals,
+# scientific/exponent notation, single-letter/param=value tokens, and the
+# scope-scaffold values), with NO domain-specific vocabulary.
+# --------------------------------------------------------------------------
+
+_SCOPE_SCAFFOLD_RE = re.compile(
+    r"^\s*(population|distribution|claimed generalization|expected failure modes?|"
+    r"ood test|claim|claimed)\s*:",
+    re.I,
+)
+
+_SKELETON_STOPWORDS = frozenset(
+    {
+        "the", "a", "an", "of", "in", "on", "for", "to", "and", "or", "is", "are",
+        "be", "as", "at", "by", "with", "that", "this", "these", "those", "than",
+        "then", "it", "its", "num", "param", "range", "vs", "versus", "between",
+    }
+)
+
+# Structural tokens stripped so only the claim's SHAPE remains. Order matters:
+# compound numeric forms (1e6, 3^n, 10,000, 0.60) before bare digits.
+_SKELETON_SUBS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # param=value / param<value / k=3 / n>=1000 / p < 0.05  → PARAM
+    (re.compile(r"\b[a-zA-Z]\w*\s*[=<>≤≥]+\s*[-+]?\d[\d.,^eE+\-]*"), " PARAM "),
+    # ranges / intervals like [1000, 5000] or (8, 10)         → RANGE
+    (re.compile(r"[\[(]\s*[-+]?\d[\d.,\s]*[-+]?\d*\s*[\])]"), " RANGE "),
+    # scientific / exponent notation: 1e6, 10^4, 3^n           → NUM
+    (re.compile(r"\b\d+(?:\.\d+)?\s*(?:[eE]\s*[-+]?\d+|\^\s*[a-zA-Z0-9]+)"), " NUM "),
+    # grouped / decimal / bare numbers: 10,000  0.60  42       → NUM
+    (re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?"), " NUM "),
+)
+
+
+def claim_skeleton(text: str) -> str:
+    """The structural skeleton of a claim: the claim text with all numbers,
+    parameter values, ranges, and incidental identifiers normalized to
+    placeholder tokens. Two claims that differ ONLY in their parameters (a
+    re-test / parametric sweep of the same structural claim) collapse to the
+    same skeleton; two conceptually distinct claims do not.
+
+    Domain-general: no field-specific terms — only structural normalization of
+    numeric/parameter surface forms and the scope scaffold. Used by the
+    anti-monoculture guard to reject a parametric retest of an already-tested
+    node by SHAPE rather than raw text."""
+    # Use only the CLAIM lines, dropping the scope scaffold (Population /
+    # Distribution / … / OOD test), whose parameter values would otherwise make
+    # two skeletons look distinct. The scope narrows; the skeleton is the claim.
+    claim_lines: list[str] = []
+    for ln in (text or "").splitlines():
+        stripped = ln.strip()
+        low = stripped.lower()
+        if _SCOPE_SCAFFOLD_RE.match(low):
+            continue
+        if low.startswith("(question:"):
+            continue
+        claim_lines.append(stripped)
+    core = " ".join(claim_lines) if claim_lines else (text or "")
+    core = core.lower()
+    for pattern, repl in _SKELETON_SUBS:
+        core = pattern.sub(repl, core)
+    core = re.sub(r"[^a-z ]+", " ", core)          # drop residual punctuation
+    core = re.sub(r"\s+", " ", core).strip()
+    return core
+
+
+def _skeleton_content_tokens(skeleton: str) -> frozenset[str]:
+    return frozenset(t for t in skeleton.split() if t not in _SKELETON_STOPWORDS and len(t) > 2)
+
+
+def skeletons_match(a: str, b: str, *, min_overlap: float = 0.72) -> bool:
+    """True when two claim skeletons describe the same structural claim.
+
+    Compares content-token overlap (Jaccard-like, on the larger side) of the two
+    skeletons after parameter normalization. Robust to reordering and to the
+    parameters differing — precisely the retest signature."""
+    sa = _skeleton_content_tokens(a)
+    sb = _skeleton_content_tokens(b)
+    if not sa or not sb:
+        return False
+    inter = len(sa & sb)
+    denom = max(len(sa), len(sb))
+    return (inter / denom) >= min_overlap
+
+
+def is_retest_of_tested_node(
+    text: str,
+    tree: HypothesisTree,
+    *,
+    exclude_parent_id: str | None = None,
+) -> tuple[bool, str]:
+    """True when ``text`` is a parametric RE-TEST — same claim skeleton — of a
+    node that has already been TESTED (verdict decided). This is the code-level
+    anti-monoculture guard: a campaign that already swept a claim's parameters
+    must not keep proposing more of the same skeleton.
+
+    The candidate's designated parent is excluded so a genuine deepening child
+    (which legitimately shares its parent's skeleton) is not rejected here — the
+    caller additionally exempts confirmed-lineage deepening entirely."""
+    cand = claim_skeleton(text)
+    if not cand:
+        return False, ""
+    for node in tree.nodes.values():
+        verdict = node.verdict if hasattr(node, "verdict") else node.get("verdict")
+        if verdict not in ("confirmed", "refuted", "inconclusive"):
+            continue
+        node_id = node.id if hasattr(node, "id") else str(node.get("id", "?"))
+        if exclude_parent_id and node_id == exclude_parent_id:
+            continue
+        node_text = node.text if hasattr(node, "text") else str(node.get("text", ""))
+        if skeletons_match(cand, claim_skeleton(node_text)):
+            return True, f"retest_skeleton:{node_id}"
+    return False, ""
+
+
 def text_similarity(a: str, b: str) -> float:
     """Normalized text similarity for frontier dedup (fixes.md P2)."""
     full = SequenceMatcher(None, _norm_text(a), _norm_text(b)).ratio()
     core = SequenceMatcher(None, _dedup_key(a), _dedup_key(b)).ratio()
     return max(full, core)
+
+
+def _text_similarity_ge(a_norm: str, a_key: str, b_text: str, floor: float) -> float:
+    """`text_similarity` with the same result whenever it is ≥ ``floor``, but it
+    skips the O(n²) ``ratio()`` when difflib's O(1) ``real_quick_ratio`` upper
+    bound already proves the pair is below ``floor``. The dedup compares every
+    candidate against every existing node (O(N²) per round), so at 130 nodes a
+    synthesis round took ~16s and grew quadratically — enough to make a long
+    campaign crawl (investigation report §6f). ``real_quick_ratio`` is a true
+    upper bound on ``ratio``, so pruning below ``floor`` is exact for the only
+    decisions that use this value (≥ threshold, and the ≥0.98 duplicate test).
+    Returns 0.0 when provably below ``floor`` (i.e. not similar)."""
+    b_norm = _norm_text(b_text)
+    sm = SequenceMatcher(None, a_norm, b_norm)
+    full = sm.ratio() if sm.real_quick_ratio() >= floor else 0.0
+    sk = SequenceMatcher(None, a_key, _dedup_key(b_text))
+    core = sk.ratio() if sk.real_quick_ratio() >= floor else 0.0
+    return max(full, core)
+
+
+def _distinct_parameters(
+    cand_nums: frozenset[str], existing_text: str, similarity: float, cand_scope: frozenset[str] = frozenset()
+) -> bool:
+    """True when a textually-similar candidate is actually a DISTINCT experiment
+    — a narrowing step, not a rephrasing — so it must NOT be dropped as a
+    duplicate. Distinctness is judged on the PARAMETER fingerprint, not the text:
+    different NUMBERS (math threshold sweeps) OR a meaningfully different SCOPE
+    (non-numeric narrowing, e.g. biology sub-populations). Judging on parameters
+    rather than text is load-bearing: a narrowing child often keeps the same
+    first-line claim title (so text similarity ≈ 1.0) and differs only in its
+    Population/Distribution lines — a text-only guard wrongly rejected exactly
+    that. Same parameters ⇒ same experiment (a rephrasing) ⇒ not distinct."""
+    _ = similarity
+    other_nums = _numeric_signature(existing_text)
+    if cand_nums and other_nums and cand_nums != other_nums:
+        return True
+    other_scope = _scope_signature(existing_text)
+    # a meaningful scope difference (not just one incidental token) = distinct
+    return bool(cand_scope) and bool(other_scope) and len(cand_scope ^ other_scope) >= 2
 
 
 def _is_duplicate_frontier_candidate(
@@ -59,16 +252,26 @@ def _is_duplicate_frontier_candidate(
     allowed_parent_id: str | None = None,
     threshold: float = FRONTIER_DEDUP_SIMILARITY,
 ) -> tuple[bool, str]:
+    cand_nums = _numeric_signature(text)
+    cand_scope = _scope_signature(text)
+    a_norm = _norm_text(text)
+    a_key = _dedup_key(text)
+    floor = min(threshold, 0.98)
     for existing in tree.nodes.values():
         existing_text = existing.text if hasattr(existing, "text") else str(existing.get("text", ""))
         existing_id = existing.id if hasattr(existing, "id") else str(existing.get("id", "?"))
-        similarity = text_similarity(text, existing_text)
+        similarity = _text_similarity_ge(a_norm, a_key, existing_text, floor)
         if allowed_parent_id and existing_id == allowed_parent_id and similarity < 0.98:
+            continue
+        if similarity >= threshold and _distinct_parameters(cand_nums, existing_text, similarity, cand_scope):
             continue
         if similarity >= threshold:
             return True, f"tree_node:{existing_id}"
     for sibling in same_round_texts:
-        if text_similarity(text, sibling) >= threshold:
+        sim = _text_similarity_ge(a_norm, a_key, sibling, floor)
+        if sim >= threshold and _distinct_parameters(cand_nums, sibling, sim, cand_scope):
+            continue
+        if sim >= threshold:
             return True, "same_round_sibling"
     for belief in belief_state.closed_beliefs:
         if text_similarity(text, belief.statement) >= threshold:
@@ -162,6 +365,23 @@ def _candidate_parent_ids(item: dict[str, Any]) -> list[str]:
             seen.add(node_id)
             out.append(node_id)
     return out
+
+
+_DEEPENING_EXPANSION_TYPES = frozenset({"boundary", "mechanistic", "generalization", "refinement"})
+
+
+def _is_deepening_confirmed(item: dict[str, Any], eligible_by_id: dict[str, HypothesisNode]) -> bool:
+    """True when a candidate refines (narrows) a CONFIRMED parent — the
+    convergence move. Such candidates must bypass the anti-monoculture type-
+    diversity force, which otherwise rejects the deepening of any single finding
+    (a confirmed lineage is inherently one problem type)."""
+    if str(item.get("expansion_type") or "").lower() not in _DEEPENING_EXPANSION_TYPES:
+        return False
+    for pid in _candidate_parent_ids(item):
+        parent = eligible_by_id.get(pid)
+        if parent is not None and getattr(parent, "verdict", None) == "confirmed":
+            return True
+    return False
 
 
 def _preferred_parent_verdicts(item: dict[str, Any]) -> tuple[str, ...]:
@@ -281,6 +501,7 @@ def apply_synthesis_to_frontier(
         "n_rejected_off_topic": 0,
         "n_rejected_unimplementable": 0,
         "n_rejected_diversity": 0,
+        "n_rejected_retest": 0,
         "beliefs_promoted_by_trend": 0,
         "binding_rejected_count": 0,
         "binding_accepted_count": 0,
@@ -364,6 +585,7 @@ def apply_synthesis_to_frontier(
     candidate_dicts: list[dict[str, Any]] = []
     same_round_texts: list[str] = []
     eligible_parents = _eligible_expansion_parents(tree)
+    _eligible_by_id = {p.id: p for p in eligible_parents}
     critical_raw: list[dict[str, Any]] = []
     other_raw: list[dict[str, Any]] = []
     for item in _candidate_dicts(parsed):
@@ -386,7 +608,17 @@ def apply_synthesis_to_frontier(
             continue
         bucket = classify_hypothesis_bucket(raw_text, methodology)
         problem_type = bucket.get("problem_type")
-        if forced_type and problem_type != forced_type:
+        # The forced-type (anti-monoculture) diversity filter governs BREADTH —
+        # it stops the tree becoming all-one-problem-type of ROOT hypotheses. It
+        # must NOT reject a candidate that DEEPENS a confirmed finding: narrowing
+        # a real result is inherently single-type ("monoculture" of that finding)
+        # and is exactly convergence. Without this exemption the diversity force
+        # rejected every narrowing child once a finding was being pursued
+        # (measured: n_rejected_diversity=8/8, search stalls at depth ~4 even with
+        # every experiment confirming; investigation report §6e). Deepening
+        # refinements of a confirmed parent bypass the type-diversity force;
+        # breadth/root candidates still face it.
+        if forced_type and problem_type != forced_type and not _is_deepening_confirmed(item, _eligible_by_id):
             metrics["n_rejected_diversity"] = int(metrics.get("n_rejected_diversity") or 0) + 1
             logger.debug(
                 "Rejected non-forced problem type %s (need %s): %s",
@@ -415,6 +647,29 @@ def apply_synthesis_to_frontier(
             metrics["n_rejected_duplicate"] = int(metrics.get("n_rejected_duplicate") or 0) + 1
             logger.debug("Rejected duplicate frontier candidate (%s): %s", dup_reason, raw_text[:80])
             continue
+        # Anti-monoculture guard (code, not just prompt): reject a candidate that
+        # is a parametric RE-TEST — same claim SKELETON — of an already-tested
+        # node, unless it genuinely DEEPENS a confirmed finding (the convergence
+        # move, which legitimately shares a lineage's skeleton). This runs AFTER
+        # the text-dedup check on purpose: text-dedup deliberately lets a
+        # parameter-varied candidate through (``_distinct_parameters``) so real
+        # convergence can narrow; the skeleton guard is what stops that from
+        # becoming an endless sweep of the SAME structural claim with new
+        # numbers/dims once the claim has already been tested.
+        if not _is_deepening_confirmed(item, _eligible_by_id):
+            # An INFERRED (not explicitly named) parent is not a deliberate
+            # refinement, so its inferred parent is not excluded and a
+            # diagnostic/retest re-run of an already-tested claim is caught. When a
+            # parent is EXPLICITLY named, exclude it so a legitimately-authored
+            # refinement of that specific node isn't flagged against itself.
+            exclude = parent.id if (parent and parent_mode == "explicit") else None
+            retest, retest_reason = is_retest_of_tested_node(
+                raw_text, tree, exclude_parent_id=exclude
+            )
+            if retest:
+                metrics["n_rejected_retest"] = int(metrics.get("n_rejected_retest") or 0) + 1
+                logger.debug("Rejected parametric retest (%s): %s", retest_reason, raw_text[:80])
+                continue
         entry = enrich_entry_with_scope(
             {
                 "id": str(item.get("id") or f"syn_{len(candidate_dicts)}"),
@@ -426,6 +681,7 @@ def apply_synthesis_to_frontier(
         scope = parse_scope_from_methodology(entry["text"], entry["test_methodology"])
         ok, _ = validate_scoped_claim(scope)
         if not ok:
+            metrics["n_rejected_invalid_scope"] = int(metrics.get("n_rejected_invalid_scope") or 0) + 1
             continue
         same_round_texts.append(raw_text)
         entry_dict: dict[str, Any] = {
@@ -449,62 +705,12 @@ def apply_synthesis_to_frontier(
             entry_dict["_parent_mode"] = parent_mode
         candidate_dicts.append(entry_dict)
 
-    if not candidate_dicts and forced_type:
-        from propab.synthesis_diversity import fallback_synthesis_seeds
-
-        fallback_items = fallback_synthesis_seeds(
-            forced_type,
-            generation=generation,
-            question=question,
-        )
-        metrics["diversity_fallback_injected"] = len(fallback_items)
-        for item in fallback_items:
-            raw_text = str(item.get("text") or "")
-            parent, parent_mode = _resolve_synthesis_parent(item, raw_text, tree, eligible_parents)
-            dup, dup_reason = _is_duplicate_frontier_candidate(
-                raw_text,
-                tree,
-                belief_state,
-                same_round_texts=same_round_texts,
-                allowed_parent_id=parent.id if parent else None,
-            )
-            if dup:
-                metrics["n_rejected_duplicate"] = int(metrics.get("n_rejected_duplicate") or 0) + 1
-                logger.debug("Rejected duplicate fallback candidate (%s): %s", dup_reason, raw_text[:80])
-                continue
-            entry = enrich_entry_with_scope(
-                {
-                    "id": str(item.get("id") or f"fallback_{forced_type}_{len(candidate_dicts)}"),
-                    "text": raw_text,
-                    "test_methodology": str(item.get("test_methodology") or "sub_agent"),
-                },
-                question,
-            )
-            scope = parse_scope_from_methodology(entry["text"], entry["test_methodology"])
-            ok, _ = validate_scoped_claim(scope)
-            if not ok:
-                continue
-            same_round_texts.append(raw_text)
-            entry_dict = {
-                "id": entry["id"],
-                "text": entry["text"],
-                "test_methodology": entry["test_methodology"],
-                "claim_scope": entry.get("claim_scope"),
-                "expansion_type": item.get("expansion_type") or "diagnostic",
-                "expansion_reason": item.get("expansion_reason") or f"diversity_fallback_{forced_type}",
-                "_raw_item": item,
-            }
-            if parent is not None:
-                entry_dict["parent_id"] = parent.id
-                entry_dict["_parent_mode"] = parent_mode
-            elif not eligible_parents:
-                entry_dict["_parent_mode"] = parent_mode
-            else:
-                metrics["n_rejected_missing_parent"] = int(metrics.get("n_rejected_missing_parent") or 0) + 1
-                continue
-            candidate_dicts.append(entry_dict)
-
     if not candidate_dicts:
+        # No usable LLM candidate survived the frontier filters. Propab must
+        # REASON, never expand a template: we do NOT inject deterministic seeds
+        # here. The caller sees an empty round and stops honestly
+        # (frontier-exhausted / campaign stop) rather than sweeping a templated
+        # monoculture forward.
         return [], metrics
 
     snippets = list(prior_snippets or [])
@@ -545,54 +751,55 @@ def apply_synthesis_to_frontier(
             strip_question_suffix = lambda t: t  # type: ignore[misc, assignment]
 
         core = strip_question_suffix(node.text)
-        node.question_relevance_score = _question_relevance(question, snippets, core)
-        if node.parent_id:
+        rel = _question_relevance(question, snippets, core)
+        # The lexical question-relevance gate is for ROOT bootstrap hypotheses.
+        # A synthesis CHILD is a refinement of an in-tree parent and has already
+        # passed the on-topic check + scope validation + dedup, so it is relevant
+        # by construction — yet its lexical relevance DROPS as it narrows (its
+        # specific region/values drift from the question's original wording).
+        # Measured: full region 0.43 passes, any narrowed sub-region 0.33 fails
+        # the 0.35 gate → the search could never narrow past level 1 (investigation
+        # report §6d). So children bypass the lexical threshold (topicality is
+        # already enforced), and inherit their parent's relevance floor for
+        # frontier RANKING so deep refinements aren't down-ranked into oblivion.
+        is_child = bool(node.parent_id)
+        if is_child:
             node.lineage_length = tree.lineage_length(node.parent_id) + 1
-        if (node.question_relevance_score or 0) >= relevance_threshold:
+            parent = tree.nodes.get(node.parent_id)
+            parent_rel = float(getattr(parent, "question_relevance_score", 0) or 0) if parent else 0.0
+            rel = max(rel, parent_rel)
+        node.question_relevance_score = rel
+        if is_child or rel >= relevance_threshold:
             filtered.append(node)
+        else:
+            # Count it — a candidate that passed dedup/scope but is dropped here
+            # for low question-relevance must not vanish silently (no silent
+            # failures: every proposed candidate's fate is accounted for).
+            metrics["n_rejected_low_relevance"] = int(metrics.get("n_rejected_low_relevance") or 0) + 1
 
     if filtered:
         tree.add_to_frontier(filtered)
     metrics["n_added"] = len(filtered)
     metrics["critical_experiment"] = parsed.get("critical_experiment")
+
+    # Lineage-derivation quality (§3.2): of the candidates that became children,
+    # how many named an explicit parent (the LLM genuinely derived the lineage)
+    # vs. fell back to similarity-inference. A low rate means the tree has
+    # structural depth but arbitrary parent→child edges — depth without real
+    # refinement. Surfaced so a campaign whose lineage is mostly inferred is
+    # visible, not silent.
+    child_modes = [e.get("_parent_mode") for e in child_dicts]
+    n_explicit = sum(1 for m in child_modes if m == "explicit")
+    n_inferred = sum(1 for m in child_modes if m == "inferred")
+    metrics["n_lineage_explicit"] = n_explicit
+    metrics["n_lineage_inferred"] = n_inferred
+    metrics["lineage_derivation_rate"] = (
+        round(n_explicit / (n_explicit + n_inferred), 3) if (n_explicit + n_inferred) else None
+    )
+    # Convergence health (§3.3): mean confirmed-ancestry depth after this round.
+    # Rises when the search deepens real findings; flat ⇒ shallow-breadth failure.
+    metrics["confirmed_lineage_depth"] = round(tree.confirmed_lineage_depth(), 3)
     return filtered, metrics
-
-
-def apply_diversity_fallback_seeds(
-    tree: HypothesisTree,
-    *,
-    forced_type: str,
-    generation: int,
-    question: str = "",
-    prior_snippets: list[str] | None = None,
-    relevance_threshold: float = 0.35,
-    belief_state: CampaignBeliefState | None = None,
-) -> list[HypothesisNode]:
-    """Inject deterministic seeds when LLM synthesis ignores diversity reset."""
-    from propab.synthesis_diversity import fallback_synthesis_seeds
-
-    seed_dicts = fallback_synthesis_seeds(
-        forced_type,
-        generation=generation,
-        question=question,
-    )
-    if not seed_dicts:
-        return []
-    added, _metrics = apply_synthesis_to_frontier(
-        tree,
-        belief_state or CampaignBeliefState(),
-        {"beliefs": [], "frontier_candidates": seed_dicts, "direction_exhausted": False},
-        question=question,
-        generation=generation,
-        # Deterministic fallback seeds are already the escape hatch after an empty
-        # synthesis pass; keep the historical behavior that they are not dropped
-        # by lexical relevance scoring.
-        relevance_threshold=0.0,
-        prior_snippets=prior_snippets,
-    )
-    for node in added:
-        node.question_relevance_score = 1.0
-    return added
 
 
 async def run_campaign_synthesis_pass(
@@ -702,11 +909,18 @@ async def run_campaign_synthesis_pass(
                 "n_candidates_raw": metrics.get("n_candidates_raw", 0),
                 "n_added_as_children": metrics.get("n_added_as_children", 0),
                 "n_added_as_roots": metrics.get("n_added_as_roots", 0),
+                "n_rejected_invalid_scope": metrics.get("n_rejected_invalid_scope", 0),
+                "n_rejected_low_relevance": metrics.get("n_rejected_low_relevance", 0),
+                "n_lineage_explicit": metrics.get("n_lineage_explicit", 0),
+                "n_lineage_inferred": metrics.get("n_lineage_inferred", 0),
+                "lineage_derivation_rate": metrics.get("lineage_derivation_rate"),
+                "confirmed_lineage_depth": metrics.get("confirmed_lineage_depth", 0.0),
                 "binding_rejected_count": metrics.get("binding_rejected_count", 0),
                 "binding_accepted_count": metrics.get("binding_accepted_count", 0),
                 "falsifiability_rejected_count": metrics.get("falsifiability_rejected_count", 0),
                 "belief_cap_rejected_count": metrics.get("belief_cap_rejected_count", 0),
                 "n_rejected_diversity": metrics.get("n_rejected_diversity", 0),
+                "n_rejected_retest": metrics.get("n_rejected_retest", 0),
                 "beliefs_promoted_by_trend": metrics.get("beliefs_promoted_by_trend", 0),
                 "active_beliefs": [b.to_dict() for b in belief_state.active_beliefs],
                 "branch_exhausted": belief_state.branch_exhausted,

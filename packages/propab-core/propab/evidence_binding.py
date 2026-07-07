@@ -52,6 +52,56 @@ _FAMILY_CAT_RE = re.compile(r"categorical property of the evolutionary family|fa
 
 _FEATURE_TOKEN_RE = re.compile(r"\b(t\d+_raw|triad_best_rmsd|sp_motif_found|g_factor_overall|D2_D3_dist)\b", re.I)
 
+# ── Domain-general term overlap ───────────────────────────────────────────────
+# Structured acceptance (below) works in ANY domain by comparing salient content
+# terms of the citing claim against the cited node's structured finding/scope,
+# rather than only the hardcoded biology tag regexes above.
+_TERM_RE = re.compile(r"[a-z0-9][a-z0-9_\-]{2,}", re.I)
+
+# Stopwords + generic scientific scaffolding that carry no subject-specificity.
+# A node overlapping the belief ONLY on these must NOT bind — that is how
+# fabricated/irrelevant citations are kept out.
+_STOPWORDS: frozenset[str] = frozenset({
+    "the", "and", "for", "are", "was", "were", "will", "with", "that", "this",
+    "have", "has", "had", "not", "but", "any", "all", "can", "cannot", "under",
+    "over", "into", "from", "than", "then", "when", "which", "while", "does",
+    "using", "used", "use", "achieve", "achieves", "population", "distribution",
+    "claimed", "generalization", "expected", "failure", "modes", "ood", "test",
+    "held", "hold", "out", "only", "across", "between", "within", "per",
+    "observed", "model", "models", "performance", "predictive", "signals",
+    "signal", "effect", "effects", "result", "results", "data", "dataset",
+    "value", "values", "positive", "negative", "score", "scenarios", "scenario",
+    "even", "still", "should", "would", "could", "may", "might", "must",
+    "improve", "improves", "increase", "decrease", "vary", "varies",
+})
+
+# Generic RELATIONSHIP / METHODOLOGY / MAGNITUDE terms. These survive stopword
+# filtering (they are "content" words) yet name a *relationship shape*, a generic
+# methodology, or a bare magnitude/time-window — NOT the subject/entity a claim is
+# about. Two claims about DIFFERENT subjects routinely share these ("X reduces Y",
+# "A scales with B", "crosses below", "within-family", "30-day"): binding on them
+# alone is exactly the cross-domain false-accept (BND1). They therefore do NOT
+# count toward the shared-salient-term threshold and do NOT count as a shared
+# subject when checking for a cross-subject mismatch. A genuine same-subject
+# supporter still shares the claim's real subject nouns/identifiers (e.g.
+# "mandrake", "sidon", "riblet", "teen wage", "saas cohort") and binds on those.
+_RELATIONSHIP_TERMS: frozenset[str] = frozenset({
+    # relationship / effect-direction verbs (the SHAPE of an effect, not its subject)
+    "reduce", "reduces", "reduced", "reduction", "increase", "increases",
+    "increasing", "increased", "scales", "scale", "scaling", "lift", "lifts",
+    "lifted", "add", "adds", "adding", "added", "crosses", "cross", "crossing",
+    "collapse", "collapses", "offset", "confound", "confounds", "confounded",
+    "raise", "raises", "lower", "lowers", "drop", "drops", "dropped",
+    # comparison / magnitude adverbs and bare quantity words
+    "below", "above", "near", "high", "low", "higher", "lower", "large",
+    "small", "moderate", "strong", "weak",
+    # generic methodology / scope scaffolding (shared across unrelated subjects)
+    "within-family", "within-group", "split", "holdout", "grid", "decade",
+    "identity", "variance", "family", "families", "group", "groups",
+    # generic quantifiers / time windows / bare dimensions
+    "one", "new", "30-day", "spacing",
+})
+
 
 @dataclass(frozen=True)
 class ClaimSubject:
@@ -61,6 +111,10 @@ class ClaimSubject:
     population_scope: str
     test_targets: frozenset[str]
     feature_variables: frozenset[str]
+    # Domain-general structured signals (empty for legacy callers).
+    scope_terms: frozenset[str] = frozenset()   # salient tokens from claim_scope
+    salient_terms: frozenset[str] = frozenset()  # salient tokens from statement/finding
+    mechanism_ids: frozenset[str] = frozenset()  # mechanism_id + feature_subset ids
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -68,7 +122,21 @@ class ClaimSubject:
             "population_scope": self.population_scope,
             "test_targets": sorted(self.test_targets),
             "feature_variables": sorted(self.feature_variables),
+            "scope_terms": sorted(self.scope_terms),
+            "salient_terms": sorted(self.salient_terms),
+            "mechanism_ids": sorted(self.mechanism_ids),
         }
+
+
+def _salient_terms(text: str) -> frozenset[str]:
+    """Content-bearing tokens: drops stopwords and generic scope scaffolding.
+
+    Domain-agnostic — it does not know biology from economics; it simply keeps
+    the specific nouns/identifiers of a claim so two claims about the SAME
+    subject overlap while two unrelated claims do not.
+    """
+    toks = {m.group(0).lower() for m in _TERM_RE.finditer(text or "")}
+    return frozenset(t for t in toks if t not in _STOPWORDS)
 
 
 @dataclass
@@ -154,6 +222,45 @@ def extract_feature_variables(text: str, feature_subset: list[str] | None = None
     return frozenset(feats)
 
 
+def _scope_terms_from_dict(scope_dict: dict[str, str] | None) -> frozenset[str]:
+    """Salient tokens drawn from a node's/belief's structured scope fields.
+
+    Uses population / distribution / claimed_generalization / ood_test — the
+    fields that describe WHAT the claim is about and WHERE it should transfer,
+    in any domain.
+    """
+    if not scope_dict:
+        return frozenset()
+    blob = " ".join(
+        str(scope_dict.get(k) or "")
+        for k in ("population", "distribution", "claimed_generalization",
+                  "expected_failure_modes", "ood_test")
+    )
+    return _salient_terms(blob)
+
+
+def _mechanism_ids(mechanism_id: Any, feature_subset: list[str] | None) -> frozenset[str]:
+    ids: set[str] = set()
+    if mechanism_id:
+        ids.add(str(mechanism_id).lower())
+    for f in (feature_subset or []):
+        if f:
+            ids.add(str(f).lower())
+    return frozenset(ids)
+
+
+def _finding_text(finding: Any) -> str:
+    """Pull the human-readable claim/metric text out of a node's structured finding."""
+    if not isinstance(finding, dict):
+        return ""
+    parts = [
+        str(finding.get("claim") or ""),
+        str(finding.get("metric_name") or ""),
+        str(finding.get("mechanism") or ""),
+    ]
+    return " ".join(p for p in parts if p)
+
+
 def extract_subject_from_node(node: dict[str, Any]) -> ClaimSubject:
     text = str(node.get("text") or "")
     scope = node.get("claim_scope")
@@ -163,22 +270,34 @@ def extract_subject_from_node(node: dict[str, Any]) -> ClaimSubject:
         parsed = parse_scope_from_text(text)
         scope_dict = parsed.to_dict() if parsed else None  # type: ignore[union-attr]
 
+    feature_subset = list(node.get("feature_subset") or [])
+    finding_text = _finding_text(node.get("finding"))
+    scope_delta = str(node.get("scope_delta") or "")
+    # Salient terms describe WHAT this node actually established, in any domain:
+    # its claim text, its structured finding, and its scope delta.
+    salient = _salient_terms(" ".join([text, finding_text, scope_delta]))
+
     return ClaimSubject(
         claim_type=node.get("claim_type"),
         population_scope=infer_population_scope(text, scope_dict),
         test_targets=infer_test_targets(text),
-        feature_variables=extract_feature_variables(
-            text, list(node.get("feature_subset") or []),
-        ),
+        feature_variables=extract_feature_variables(text, feature_subset),
+        scope_terms=_scope_terms_from_dict(scope_dict),
+        salient_terms=salient,
+        mechanism_ids=_mechanism_ids(node.get("mechanism_id"), feature_subset),
     )
 
 
 def extract_subject_from_statement(statement: str) -> ClaimSubject:
+    parsed = parse_scope_from_text(statement)
+    scope_dict = parsed.to_dict() if parsed else None  # type: ignore[union-attr]
     return ClaimSubject(
         claim_type=None,
-        population_scope=infer_population_scope(statement),
+        population_scope=infer_population_scope(statement, scope_dict),
         test_targets=infer_test_targets(statement),
         feature_variables=extract_feature_variables(statement),
+        scope_terms=_scope_terms_from_dict(scope_dict),
+        salient_terms=_salient_terms(statement),
     )
 
 
@@ -238,8 +357,108 @@ def _tags_incompatible(a: frozenset[str], b: frozenset[str]) -> str | None:
     return None
 
 
+# Minimum count of shared salient content terms for a term-overlap bind.
+# Two is deliberately conservative: a single shared word (which stopword
+# filtering already makes a real content word) is treated as incidental and
+# never binds on its own, so unrelated claims that happen to share one noun are
+# still rejected. Genuine supporters of the SAME claim share the claim's subject
+# nouns/identifiers and clear this bar.
+#
+# Crucially, only SUBJECT-DISCRIMINATING terms count toward this bar: generic
+# relationship/methodology/magnitude words (``_RELATIONSHIP_TERMS``) are excluded
+# first. A node about a DIFFERENT subject that overlaps the belief only on
+# relationship words ("reduce", "scales", "below", "within-family", "30-day", …)
+# therefore falls below the bar and is rejected (BND1), while a genuine
+# same-subject supporter still clears it on the claim's real subject nouns.
+_MIN_SHARED_SALIENT_TERMS = 2
+
+
+def _subject_terms(terms: frozenset[str]) -> frozenset[str]:
+    """Keep only subject/entity-like terms: drop generic relationship words.
+
+    ``_salient_terms`` already strips stopwords/scope scaffolding; this additionally
+    removes generic relationship/methodology/magnitude words so what remains names
+    WHAT a claim is about (its subject entities/identifiers), not the SHAPE of its
+    effect. Two claims about different subjects share relationship words but not
+    subject terms — that difference is what discriminates a genuine same-subject
+    supporter from a cross-domain "genuine-for-a-different-subject" node.
+    """
+    return frozenset(t for t in terms if t not in _RELATIONSHIP_TERMS)
+
+
+def _subject_mismatch(citing: ClaimSubject, cited: ClaimSubject) -> bool:
+    """True iff the two claims name clearly DIFFERENT subjects.
+
+    Fires only when we can positively establish disagreement: both sides carry
+    subject terms (after dropping relationship words), yet share NONE of them.
+    That is the cross-domain signature — genuine supporters (same subject) always
+    share at least the claim's subject nouns, so this never fires for them. When
+    either side has no subject terms to compare, we stay silent (return False) and
+    defer to the other, already-precise, acceptance/rejection paths.
+    """
+    citing_subj = _subject_terms(citing.salient_terms | citing.scope_terms)
+    cited_subj = _subject_terms(cited.salient_terms | cited.scope_terms)
+    if not citing_subj or not cited_subj:
+        return False
+    return not (citing_subj & cited_subj)
+
+
+def _structured_overlap(citing: ClaimSubject, cited: ClaimSubject) -> str | None:
+    """Domain-general acceptance: does the cited node genuinely bear on the claim?
+
+    Returns a human-readable reason when there is real structured overlap, else
+    None. Works in ANY domain because it compares the SUBJECT of the two claims
+    via their structured fields (scope terms, shared mechanism/feature ids, and
+    salient content terms of the claim/finding) — not the biology tag regexes.
+
+    Integrity: every branch requires overlap on subject-specific content. A node
+    with no shared mechanism/feature id, no shared scope subject term, and fewer
+    than ``_MIN_SHARED_SALIENT_TERMS`` shared content words returns None → the
+    caller rejects it. Generic scope scaffolding and stopwords are stripped
+    before comparison, so "held-out test / population / OOD" boilerplate cannot
+    manufacture a match.
+    """
+    # 1) Shared mechanism / feature identifiers — an unambiguous subject anchor.
+    shared_mech = citing.mechanism_ids & cited.mechanism_ids
+    if shared_mech:
+        return f"shared_mechanism_or_feature:{sorted(shared_mech)}"
+
+    # 2) The belief's salient terms appearing in the cited node's finding/claim
+    #    OR in the node's structured scope subject. This is the general analogue
+    #    of the biology tag path: same specific subject, any domain. Only
+    #    SUBJECT-DISCRIMINATING terms count toward the threshold — shared generic
+    #    relationship words alone ("reduce"+"scales", "below"+"density", …) do NOT
+    #    bind (BND1 cross-domain false-accept), while the claim's real subject
+    #    nouns still do.
+    cited_content = cited.salient_terms | cited.scope_terms
+    if citing.salient_terms and cited_content:
+        shared_salient = _subject_terms(citing.salient_terms & cited_content)
+        if len(shared_salient) >= _MIN_SHARED_SALIENT_TERMS:
+            return f"shared_claim_terms:{sorted(shared_salient)[:6]}"
+
+    # 3) Structured scope-to-scope subject overlap (population / distribution /
+    #    transfer target described the same thing), requiring ≥2 SUBJECT terms
+    #    (relationship words excluded, same reasoning as (2)).
+    if citing.scope_terms and cited.scope_terms:
+        shared_scope = _subject_terms(citing.scope_terms & cited.scope_terms)
+        if len(shared_scope) >= _MIN_SHARED_SALIENT_TERMS:
+            return f"shared_scope_subject:{sorted(shared_scope)[:6]}"
+
+    return None
+
+
 def binding_check(citing: ClaimSubject, cited: ClaimSubject) -> BindingResult:
     """Return match if cited evidence plausibly bears on citing claim's subject."""
+    # Cross-subject veto (BND1): if BOTH sides name subject entities yet share NONE
+    # of them, the node is a "genuine-for-a-different-subject" citation. Reject even
+    # when generic relationship tags/words overlap — e.g. a within-family/confound
+    # finding about perovskite CRYSTALS must not bind a claim about mandrake ENZYMES
+    # merely because both say "within-family". Silent (no veto) when either side
+    # lacks subject terms, so legacy/tag-only callers are unaffected and genuine
+    # same-subject supporters (which always share the claim's subject nouns) bind.
+    if _subject_mismatch(citing, cited):
+        return BindingResult(False, "cross_subject_mismatch")
+
     shared_tags = citing.test_targets & cited.test_targets
     if shared_tags:
         return BindingResult(True, f"shared_test_targets:{sorted(shared_tags)}")
@@ -261,6 +480,14 @@ def binding_check(citing: ClaimSubject, cited: ClaimSubject) -> BindingResult:
         shared_feats = citing.feature_variables & cited.feature_variables
         if shared_feats and (citing.test_targets & cited.test_targets or citing.population_scope == cited.population_scope):
             return BindingResult(True, f"shared_features:{sorted(shared_feats)}")
+
+    # Domain-general structured overlap — the new, non-exclusive acceptance signal.
+    # Runs AFTER the incompatible-tag guard (so biology contradictions stay
+    # rejected) and reaches nodes the biology regexes leave untyped, which is
+    # every non-biology domain. Only binds on genuine subject overlap.
+    structured = _structured_overlap(citing, cited)
+    if structured:
+        return BindingResult(True, structured)
 
     if not cited.test_targets and not citing.test_targets:
         return BindingResult(False, "both_subjects_untyped")

@@ -8,38 +8,38 @@ from propab.domain_modules.enzyme_kinetics.verifier import run_enzyme_experiment
 from propab.domain_modules.enzyme_kinetics.adapter import EnzymeExperimentSpec
 
 ROUTING_CORPUS: list[dict[str, Any]] = [
-    {"id": "ek01", "statement": "log_kcat is predictable from log_km and molecular weight across EC classes under LOFO", "test_methodology": "leave-one-EC-class-out ridge"},
+    {"id": "ek01", "statement": "log_kcat is predictable from molecular weight and sequence length across EC classes under LOFO", "test_methodology": "leave-one-EC-class-out ridge"},
     {"id": "ek02", "statement": "Oxidoreductases (EC1) show higher kcat than hydrolases under family holdout", "test_methodology": "EC-class LOFO"},
-    {"id": "ek03", "statement": "Temperature optimum predicts log_kcat across enzyme families", "test_methodology": "cross-EC LOFO"},
+    {"id": "ek03", "statement": "GRAVY hydropathy predicts log_kcat across enzyme families", "test_methodology": "cross-EC LOFO"},
     {"id": "ek04", "statement": "Sequence length alone predicts kcat across EC classes", "test_methodology": "leave-family-out verification"},
-    {"id": "ek05", "statement": "pH optimum and molecular weight jointly predict log_km under LOFO", "test_methodology": "EC LOFO ridge"},
+    {"id": "ek05", "statement": "Charged-residue fraction and molecular weight jointly predict kcat under LOFO", "test_methodology": "EC LOFO ridge"},
     {"id": "ek06", "statement": "Transferases show cross-EC generalization for kcat prediction", "test_methodology": "leave-one-EC-class-out"},
     {"id": "ek07", "statement": "Hydrolases fail cross-EC kcat generalization under LOFO", "test_methodology": "enzyme family holdout"},
-    {"id": "ek08", "statement": "log_km correlates with molecular weight across EC classes in LOFO holdout", "test_methodology": "BRENDA subset LOFO"},
+    {"id": "ek08", "statement": "Aromatic-residue fraction correlates with kcat across EC classes in LOFO holdout", "test_methodology": "BRENDA subset LOFO"},
     {"id": "ek09", "statement": "Catalytic turnover kcat exceeds label-shuffle null p95 across EC families", "test_methodology": "LOFO with EC shuffle null"},
-    {"id": "ek10", "statement": "EC3 ligases show positive LOFO R² for kcat from biophysical features", "test_methodology": "leave-EC-out ridge"},
+    {"id": "ek10", "statement": "EC3 hydrolases show positive LOFO R² for kcat from biophysical features", "test_methodology": "leave-EC-out ridge"},
     {"id": "ek11", "statement": "Molecular weight predicts kcat better than sequence length cross-EC", "test_methodology": "LOFO comparison"},
-    {"id": "ek12", "statement": "Thermal optimum features predict kcat under held-out EC class", "test_methodology": "cross-family LOFO"},
-    {"id": "ek13", "statement": "Lyases (EC4) kcat is predictable from pH and log_km under LOFO", "test_methodology": "enzyme LOFO verification"},
+    {"id": "ek12", "statement": "Hydropathy composition features predict kcat under held-out EC class", "test_methodology": "cross-family LOFO"},
+    {"id": "ek13", "statement": "Lyases (EC4) kcat is predictable from composition features under LOFO", "test_methodology": "enzyme LOFO verification"},
     {"id": "ek14", "statement": "Isomerases show no cross-EC kcat signal under family holdout", "test_methodology": "LOFO EC-class"},
-    {"id": "ek15", "statement": "Combined log_km and temperature_opt improve LOFO R² for kcat", "test_methodology": "leave-one-EC-out"},
+    {"id": "ek15", "statement": "Combined molecular weight and hydropathy improve LOFO R² for kcat", "test_methodology": "leave-one-EC-out"},
     {"id": "ek16", "statement": "BRENDA subset enzymes: kcat generalizes across EC1 and EC2 under LOFO", "test_methodology": "ridge LOFO"},
     {"id": "ek17", "statement": "Enzyme kcat prediction survives EC-label permutation at p<0.05", "test_methodology": "LOFO shuffle null"},
-    {"id": "ek18", "statement": "log_kcat band between 0.5 and 2.0 holds for oxidoreductases under LOFO", "test_methodology": "EC-class holdout"},
-    {"id": "ek19", "statement": "Cross-EC kcat prediction from ph_opt alone fails LOFO generalization", "test_methodology": "leave-family-out"},
+    {"id": "ek18", "statement": "log_kcat band holds for oxidoreductases under LOFO", "test_methodology": "EC-class holdout"},
+    {"id": "ek19", "statement": "Cross-EC kcat prediction from aromatic fraction alone fails LOFO generalization", "test_methodology": "leave-family-out"},
     {"id": "ek20", "statement": "UniProt-scale kcat trends replicate under leave-one-EC-class-out ridge", "test_methodology": "LOFO cross-EC"},
 ]
 
 
 def _infer_features(hypothesis: dict[str, Any]) -> list[str]:
     text = str(hypothesis.get("statement") or hypothesis.get("text") or "").lower()
-    if "km" in text and "kcat" not in text:
-        return ["log_km", "molecular_weight", "ph_opt"]
-    if "temperature" in text or "thermal" in text:
-        return ["temperature_opt", "ph_opt", "molecular_weight"]
-    if "sequence" in text:
-        return ["sequence_length", "molecular_weight", "log_km"]
-    return ["log_km", "molecular_weight", "sequence_length"]
+    if "aromatic" in text or "hydrophob" in text or "composition" in text:
+        return ["frac_aromatic", "frac_hydrophobic", "frac_charged", "molecular_weight"]
+    if "hydropath" in text or "gravy" in text or "thermal" in text or "temperature" in text:
+        return ["gravy_hydropathy", "frac_charged", "molecular_weight"]
+    if "sequence" in text or "length" in text:
+        return ["sequence_length", "molecular_weight", "frac_charged"]
+    return ["molecular_weight", "sequence_length", "frac_charged", "frac_aromatic"]
 
 
 def inspect_routing(hypothesis: dict[str, Any], *, dry_run_experiment: bool = False) -> dict[str, Any]:

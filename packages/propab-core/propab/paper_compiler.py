@@ -165,26 +165,53 @@ def parse_evidence(evidence_summary: str | None) -> dict[str, Any]:
         "verified_true_steps": None,
         "verified_false_steps": None,
         "claim_type": None,
+        "data_provenance": None,
+        # DISC2: carry the discovery/rediscovery flags so a known-value lookup
+        # confirmation is never counted as a novel discovery in the paper.
+        "trivial_rediscovery": None,
+        "discovery_worthy": None,
     }
+
+    def _absorb(ev: dict[str, Any]) -> None:
+        for k in ("p_value", "effect_size", "n_metric_steps", "metric_value"):
+            if isinstance(ev.get(k), (int, float)):
+                out[k] = ev[k]
+        for k in ("verified_true_steps", "verified_false_steps"):
+            if isinstance(ev.get(k), int):
+                out[k] = ev[k]
+        if ev.get("claim_type"):
+            out["claim_type"] = str(ev["claim_type"])
+        # DOM2: carry synthetic-data provenance so the paper can label the finding.
+        if ev.get("data_provenance"):
+            out["data_provenance"] = str(ev["data_provenance"])
+        # DISC2: carry the discovery/rediscovery flags (a lookup is not a discovery).
+        for k in ("trivial_rediscovery", "discovery_worthy"):
+            if isinstance(ev.get(k), bool):
+                out[k] = ev[k]
+        ci = ev.get("confidence_interval")
+        if isinstance(ci, list) and len(ci) >= 2 and all(isinstance(x, (int, float)) for x in ci[:2]):
+            out["confidence_interval"] = [float(ci[0]), float(ci[1])]
+
     raw = (evidence_summary or "").strip()
     if not raw:
         return out
     m = re.search(r"evidence=(\{[\s\S]*?\})\s*;", raw)
     if m:
         try:
-            ev = json.loads(m.group(1))
-            for k in ("p_value", "effect_size", "n_metric_steps", "metric_value"):
-                if isinstance(ev.get(k), (int, float)):
-                    out[k] = ev[k]
-            for k in ("verified_true_steps", "verified_false_steps"):
-                if isinstance(ev.get(k), int):
-                    out[k] = ev[k]
-            if ev.get("claim_type"):
-                out["claim_type"] = str(ev["claim_type"])
-            ci = ev.get("confidence_interval")
-            if isinstance(ci, list) and len(ci) >= 2 and all(isinstance(x, (int, float)) for x in ci[:2]):
-                out["confidence_interval"] = [float(ci[0]), float(ci[1])]
+            _absorb(json.loads(m.group(1)))
             return out
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    # The plugin verification path (genomics / graph_invariants / enzyme_kinetics)
+    # stores ``evidence_summary`` as a bare ``json.dumps(output)`` with no ``evidence=``
+    # prefix. Parse that top-level object too so its fields (including
+    # ``data_provenance``) reach the paper.
+    if raw.startswith("{"):
+        try:
+            obj = json.loads(raw)
+            if isinstance(obj, dict):
+                _absorb(obj)
+                return out
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
     m2 = re.search(r"n_metric_steps\s*=\s*(\d+)", raw)
@@ -302,6 +329,12 @@ def _enrich_finding_row(row: dict[str, Any], ev: dict[str, Any], verdict: str) -
         "primary_theme": primary,
         "secondary_themes": secondary,
         "node_role": "DISCOVERY",
+        # DOM2: "synthetic" when the finding is backed by a seed-generated dataset.
+        "data_provenance": ev.get("data_provenance"),
+        # DISC2: a confirmation against a best-known table is a rediscovery of a
+        # known value, not a novel discovery; carry the flags so the paper labels it.
+        "trivial_rediscovery": ev.get("trivial_rediscovery"),
+        "discovery_worthy": ev.get("discovery_worthy"),
         "top_artifact": ev.get("top_artifact"),
         "top_artifact_survived": ev.get("top_artifact_survived"),
         "second_artifact_check": ev.get("second_artifact_check"),
@@ -342,7 +375,99 @@ async def compile_session_findings(session_factory: async_sessionmaker, session_
         "unexecuted": unexecuted,
     }
     counts["tested"] = counts["confirmed"] + counts["refuted"] + counts["inconclusive"]
+    # DISC2: MOVE known-value rediscoveries (e.g. best-known-table lookups) OUT of
+    # the headline confirmed bucket into the same ``rediscovery`` bucket DISC1's
+    # novelty demotion uses, so the headline discovery count excludes BOTH signals.
+    # A rediscovery is honest to report as "verified (known)" but is never a discovery.
+    genuine = [f for f in buckets["confirmed"] if not _finding_is_rediscovery(f)]
+    rediscovery = [f for f in buckets["confirmed"] if _finding_is_rediscovery(f)]
+    for f in rediscovery:
+        f["is_rediscovery"] = True
+        f.setdefault("node_role", "REDISCOVERY")
+    buckets["confirmed"] = genuine
+    buckets["rediscovery"] = rediscovery
+    counts["confirmed"] = len(genuine)          # headline discovery total (tested unchanged above)
+    counts["rediscovery"] = len(rediscovery)
+    counts["rediscoveries"] = len(rediscovery)  # alias
+    counts["discoveries"] = len(genuine)        # alias
     return {"counts": counts, **buckets}
+
+
+def _finding_is_rediscovery(f: dict[str, Any]) -> bool:
+    """Domain-general: a confirmed finding that merely reproduced a known value.
+
+    Keys only on the evidence flags (``trivial_rediscovery`` /
+    ``discovery_worthy``) so it applies to any domain, not just combinatorics.
+    """
+    stats = f.get("stats") or {}
+    for src in (stats, f):
+        if src.get("trivial_rediscovery") is True:
+            return True
+        if src.get("discovery_worthy") is False:
+            return True
+    return False
+
+
+def _finding_novelty_claim(f: dict[str, Any]) -> str:
+    """The best short claim string to send to the novelty service for a finding."""
+    return str(f.get("key_finding") or f.get("text") or "").strip()
+
+
+def apply_novelty_demotion(
+    findings: dict[str, Any],
+    novelty_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Demote confirmed findings the literature already KNOWS to rediscoveries.
+
+    DISC1: a campaign that re-derives an established result should not count that as
+    a discovery. Given ``novelty_by_id`` (finding-id → parsed ``NoveltyResponse``),
+    any CONFIRMED finding whose novelty verdict is ``"known"`` is:
+      - flagged in place (``novelty="known"``, ``is_rediscovery=True``, plus the
+        confidence / explanation / matching_sources for the paper to cite), and
+      - moved OUT of the headline ``confirmed`` bucket into a new ``rediscovery``
+        bucket, so ``counts["confirmed"]`` (the headline discovery total that feeds
+        the abstract, results, figures, and narrative) excludes it.
+
+    ``novel`` / ``uncertain`` (and the ``novelty_unavailable`` safe default) keep
+    their confirmed status untouched — an outage or an honestly-uncertain check must
+    never demote a finding. This is a post-verdict label only; refute/inconclusive
+    buckets and the verdict pipeline are not touched.
+
+    Mutates and returns ``findings`` (same dict the rest of the paper reads).
+    """
+    confirmed = findings.get("confirmed") or []
+    kept: list[dict[str, Any]] = []
+    rediscoveries: list[dict[str, Any]] = []
+    for f in confirmed:
+        nov = novelty_by_id.get(str(f.get("id"))) or {}
+        verdict = str(nov.get("verdict") or "").strip().lower()
+        # Carry the novelty label on every checked finding for transparency, even
+        # when it stays a discovery (novel / uncertain).
+        if verdict in ("known", "novel", "uncertain"):
+            f["novelty"] = verdict
+            f["novelty_confidence"] = nov.get("confidence")
+            f["novelty_explanation"] = nov.get("explanation")
+            f["novelty_matching_sources"] = nov.get("matching_sources") or []
+        if verdict == "known":
+            f["is_rediscovery"] = True
+            f["node_role"] = "REDISCOVERY"
+            rediscoveries.append(f)
+        else:
+            kept.append(f)
+
+    findings["confirmed"] = kept
+    # EXTEND (not clobber) the rediscovery bucket DISC2 already populated with
+    # best-known-table lookups, so both demotion signals accumulate.
+    findings["rediscovery"] = (findings.get("rediscovery") or []) + rediscoveries
+
+    counts = dict(findings.get("counts") or {})
+    counts["confirmed"] = len(kept)
+    counts["rediscovery"] = len(findings["rediscovery"])
+    counts["discoveries"] = len(kept)  # keep the DISC2 alias consistent
+    # ``tested`` still counts every executed hypothesis (a rediscovery WAS tested and
+    # confirmed against the data) — only the headline discovery total drops.
+    findings["counts"] = counts
+    return findings
 
 
 async def _aggregate_tool_usage(session_factory: async_sessionmaker, session_id: str) -> dict[str, Any]:
@@ -468,12 +593,44 @@ async def compile_session_methods_latex(session_factory: async_sessionmaker, ses
             "excluding the null) in the predicted direction; otherwise it was recorded as refuted or inconclusive."
         )
 
+    verification_protocol = (
+        "\\paragraph{Verification protocol.} Every hypothesis passed through a uniform evidence bar before it could "
+        "be reported as a finding. A hypothesis was admitted as \\emph{confirmed} only if a metric-bearing "
+        "experiment produced significant support in the predicted direction; a claim that lacked a recorded "
+        "metric, that merely restated a control (null) hypothesis, or that duplicated evidence already credited to "
+        "an earlier finding was demoted to \\emph{inconclusive} rather than reported. Hypotheses that were "
+        "generated but never executed are excluded from all counts. Where an experiment produced a candidate effect, "
+        "an artifact gate re-ran the strongest competing artifact to check that the effect was not an implementation "
+        "or measurement artifact, and the finding was retained only if it survived that check. The same "
+        "classification is applied uniformly to the abstract, results, figures, tables, and narrative, so no section "
+        "can report an outcome the evidence bar did not grant."
+    )
+
     reproducibility = (
         "All hypotheses, parameters, intermediate outputs, and statistical computations are persisted in a structured "
         "trace and are available for independent inspection and replication."
     )
 
-    body = "\n\n".join([protocol, instruments, stats_method, reproducibility])
+    sections = [protocol, instruments, stats_method, verification_protocol]
+
+    # DOM2: if any reported finding rests on a synthetic (seed-generated) dataset,
+    # the Methods section must disclose it as a limitation. This is the honest
+    # counterpart to labelling the finding in the results table and narrative.
+    from propab.paper_narrative import _any_synthetic
+
+    if _any_synthetic(findings):
+        sections.append(
+            "\\paragraph{Data provenance and limitations.} One or more reported findings were computed on a "
+            "\\emph{synthetic dataset (illustrative)}: a locally seed-generated frame produced by the domain "
+            "adapter, not the real public dataset whose name it borrows. Such findings demonstrate the pipeline "
+            "end-to-end but are illustrative only -- any relationship they exhibit may be a property of the data "
+            "generator rather than of the underlying science, and they must not be interpreted as real-world "
+            "results. Each such finding is marked \\emph{synthetic dataset (illustrative)} in the results table "
+            "and narrative."
+        )
+
+    sections.append(reproducibility)
+    body = "\n\n".join(sections)
     combined = f"\\section{{Methods}}\n{body}\n"
     return {"combined_latex": combined, "per_hypothesis": {}}
 
@@ -503,6 +660,16 @@ def _finding_sentence(f: dict[str, Any]) -> str:
     stats = f.get("stats_text") or ""
     sent = _latex_escape(claim[:400])
     meta: list[str] = []
+    # DOM2: a finding backed by a seed-generated dataset is labelled synthetic here,
+    # so the Results prose never presents it as a real-world result.
+    if str((f.get("stats") or {}).get("data_provenance") or f.get("data_provenance") or "").lower() == "synthetic":
+        meta.append("synthetic dataset (illustrative)")
+    # DISC2: a confirmation that merely reproduced a known value (table lookup) is a
+    # rediscovery, not a novel result — label it so the prose never oversells it.
+    _st = f.get("stats") or {}
+    if _st.get("trivial_rediscovery") is True or _st.get("discovery_worthy") is False \
+            or f.get("trivial_rediscovery") is True or f.get("discovery_worthy") is False:
+        meta.append("rediscovery (known value)")
     if f.get("claim_type"):
         meta.append(f"claim type: {f['claim_type']}")
     if f.get("replication_level"):
@@ -529,42 +696,27 @@ def _finding_sentence(f: dict[str, Any]) -> str:
     return sent + "."
 
 
-def _findings_table(findings: list[dict[str, Any]]) -> str:
-    """A clean summary table of confirmed findings (no trace IDs, no raw JSON)."""
-    if not findings:
-        return ""
-    lines = [
-        "\\begin{table}[ht]",
-        "\\centering",
-        "\\caption{Summary of supported findings and their statistical evidence.}",
-        "\\begin{tabular}{p{0.46\\linewidth} c p{0.30\\linewidth}}",
-        "\\hline",
-        "\\textbf{Finding} & \\textbf{Claim / replication} & \\textbf{Statistical evidence} \\\\",
-        "\\hline",
-    ]
-    for f in findings[:20]:
-        claim = (f.get("key_finding") or f.get("text") or "").strip().rstrip(".")
-        cell = _latex_escape(claim[:180])
-        conf = f.get("confidence")
-        conf_s = f"{float(conf):.2f}" if isinstance(conf, (int, float)) else "--"
-        ctype = f.get("claim_type") or "--"
-        repl = f.get("replication_level") or "--"
-        mid = _latex_escape(f"{ctype}, {repl}, conf={conf_s}")
-        stats = f.get("stats_text") or "--"
-        lines.append(f"{cell} & {mid} & {stats} \\\\")
-    lines.extend(["\\hline", "\\end{tabular}", "\\end{table}"])
-    return "\n".join(lines)
-
-
-async def compile_session_results_latex(session_factory: async_sessionmaker, session_id: str) -> str:
+async def compile_session_results_latex(
+    session_factory: async_sessionmaker,
+    session_id: str,
+    *,
+    baseline: float | None = None,
+    findings: dict[str, Any] | None = None,
+) -> str:
     """
-    Deterministic Results section as readable prose plus a findings table.
+    Deterministic Results section as readable prose plus tables.
 
     Outcomes are organised by what was learned (supported / refuted / inconclusive),
     not as a chronological per-hypothesis verdict log. Counts here are produced by the
-    same classifier (:func:`compile_session_findings`) that feeds the abstract.
+    same classifier (:func:`compile_session_findings`) that feeds the abstract, figures,
+    and narrative. A caller may pass a pre-computed ``findings`` (the identical gated
+    dict) to guarantee every section reads from one gate evaluation.
     """
-    findings = await compile_session_findings(session_factory, session_id)
+    from propab.paper_narrative import findings_table as _rich_findings_table
+    from propab.paper_narrative import summary_counts_table
+
+    if findings is None:
+        findings = await compile_session_findings(session_factory, session_id)
     counts = findings["counts"]
     if counts["tested"] == 0:
         return "\\section{Results}\nNo hypotheses were executed for this session.\n"
@@ -573,20 +725,30 @@ async def compile_session_results_latex(session_factory: async_sessionmaker, ses
 
     lead = (
         f"We evaluated {counts['tested']} hypotheses. "
-        f"{counts['confirmed']} were supported by statistically significant evidence, "
-        f"{counts['refuted']} were refuted, and {counts['inconclusive']} remained inconclusive."
+        f"{counts['confirmed']} were supported by statistically significant evidence and are reported as "
+        f"discoveries, {counts['refuted']} were refuted, and {counts['inconclusive']} remained inconclusive."
     )
+    n_rediscovery = int(counts.get("rediscovery") or 0)
+    if n_rediscovery:
+        lead += (
+            f" A further {n_rediscovery} hypothesis(es) were confirmed against the data but a literature "
+            "novelty check found the result already established; these are reported as rediscoveries and are "
+            "excluded from the discovery count above."
+        )
     if counts["unexecuted"]:
         lead += (
             f" A further {counts['unexecuted']} generated hypotheses were not executed and are excluded from "
             "the analysis."
         )
     parts.append(lead)
+    parts.append(summary_counts_table(counts))
 
     confirmed = findings["confirmed"]
+    rich_table = _rich_findings_table(findings, baseline=baseline)
+    if rich_table:
+        parts.append(rich_table)
     if confirmed:
         parts.append("\\subsection{Supported findings}")
-        parts.append(_findings_table(confirmed))
         for f in confirmed[:10]:
             parts.append(_finding_sentence(f))
     else:
@@ -611,6 +773,33 @@ async def compile_session_results_latex(session_factory: async_sessionmaker, ses
             + _latex_escape("; ".join((f.get("text") or "")[:120] for f in inconclusive[:3]))
             + "."
         )
+
+    # DISC1: results confirmed against the data but already established in the
+    # literature. Reported honestly so the run is not padded with rediscoveries, but
+    # kept out of the "Supported findings" section and the headline discovery count.
+    rediscovery = findings.get("rediscovery") or []
+    if rediscovery:
+        parts.append("\\subsection{Rediscoveries (already established)}")
+        parts.append(
+            f"{len(rediscovery)} confirmed result(s) were checked against the published literature and found to "
+            "restate an already-established fact. They are reported here as rediscoveries -- they validate the "
+            "pipeline but are not novel contributions -- and are excluded from the discovery count."
+        )
+        bullets_list: list[str] = []
+        for f in rediscovery[:10]:
+            sent = _finding_sentence(f)
+            src = (f.get("novelty_matching_sources") or [{}])
+            src0 = src[0] if isinstance(src, list) and src else {}
+            src_label = ""
+            if isinstance(src0, dict):
+                label = str(src0.get("source_title") or src0.get("source_doi") or src0.get("title") or "").strip()
+                if label:
+                    src_label = f" [rediscovery (already established); source: {_latex_escape(label[:160])}]"
+            if not src_label:
+                src_label = " [rediscovery (already established)]"
+            bullets_list.append(f"\\item {sent.rstrip('.')}{src_label}.")
+        if bullets_list:
+            parts.append("\\begin{itemize}\n" + "\n".join(bullets_list) + "\n\\end{itemize}")
     return "\n\n".join(p for p in parts if p)
 
 

@@ -33,6 +33,10 @@ from services.worker.sandbox_code_rewrite import (
     looks_like_heavy_training_code,
     rewrite_sandbox_code_after_timeout,
 )
+from services.worker.permutation_null import (
+    compute_label_permutation_null,
+    extract_two_group_arrays,
+)
 from services.worker.significance import (
     any_significance_tool_ran,
     check_significance,
@@ -371,6 +375,128 @@ def _first_key(payload: dict[str, Any], keys: tuple[str, ...]) -> float | None:
     return None
 
 
+# ─── Significance-input provenance ────────────────────────────────────────────
+#
+# A significance tool (statistical_significance / bootstrap_confidence /
+# literature_baseline_compare) computes REAL scipy statistics — but on whatever
+# arrays the LLM agent hands it. If those arrays were TYPED by the agent rather
+# than lifted from a prior real tool/sandbox output, the resulting p-value is
+# real-looking but rests on fabricated data. These helpers record, at call time,
+# whether a significance tool's numeric inputs TRACE to a prior computed output
+# in the same run. The signal is surfaced on the evidence object so audits can
+# see when a "confirmed" rests on agent-typed numbers.
+
+# The numeric-array params each significance tool consumes.
+_SIG_INPUT_ARRAY_KEYS: tuple[str, ...] = (
+    "results_a",
+    "results_b",
+    "values",
+    "our_results",
+    "baseline_results",
+)
+
+
+def _collect_numeric_arrays(payload: Any, *, out: list[list[float]] | None = None) -> list[list[float]]:
+    """Recursively collect every homogeneous numeric list (len>=2) inside payload."""
+    if out is None:
+        out = []
+    if isinstance(payload, dict):
+        for v in payload.values():
+            _collect_numeric_arrays(v, out=out)
+    elif isinstance(payload, list):
+        nums = [x for x in payload if isinstance(x, (int, float)) and not isinstance(x, bool)]
+        if len(nums) == len(payload) and len(nums) >= 2:
+            out.append([float(x) for x in nums])
+        else:
+            for v in payload:
+                _collect_numeric_arrays(v, out=out)
+    return out
+
+
+def _array_traces_to_prior(arr: list[float], prior_arrays: list[list[float]]) -> bool:
+    """
+    True when `arr` matches a prior computed array exactly, or is a contiguous /
+    subset slice of one (agents commonly pass val_losses[:20], or a reordering).
+    Matching is by value with a small float tolerance.
+    """
+    if len(arr) < 2:
+        return False
+
+    def _val_close(x: float, y: float) -> bool:
+        return abs(x - y) <= 1e-9 + 1e-6 * abs(y)
+
+    def _seq_close(a: list[float], b: list[float]) -> bool:
+        return len(a) == len(b) and all(_val_close(x, y) for x, y in zip(a, b))
+
+    def _is_multiset_subset(small: list[float], big: list[float]) -> bool:
+        """Every value in `small` is matched by a distinct value in `big` (order-free)."""
+        remaining = list(big)
+        for x in small:
+            for i, y in enumerate(remaining):
+                if _val_close(x, y):
+                    remaining.pop(i)
+                    break
+            else:
+                return False
+        return True
+
+    for prior in prior_arrays:
+        if len(prior) < len(arr):
+            continue
+        if _seq_close(arr, prior):
+            return True
+        # Reordered / sliced subset of a prior computed array (e.g. val_losses[:k]).
+        if _is_multiset_subset(arr, prior):
+            return True
+    return False
+
+
+def _classify_stat_input_provenance(
+    params: dict[str, Any],
+    prior_outputs: list[dict[str, Any]],
+) -> str:
+    """
+    Classify a significance tool's numeric-array inputs against arrays produced by
+    prior real tool/sandbox outputs in the same run.
+
+    Returns:
+      "computed"      — at least one input array traces to a prior real output
+                        AND no input array is unaccounted-for (all trace back).
+      "agent_literal" — at least one numeric-array input exists but NONE of them
+                        trace to any prior real output (agent-typed numbers).
+      "unknown"       — no numeric-array inputs present, or no prior outputs to
+                        compare against (cannot decide either way).
+    """
+    input_arrays: list[list[float]] = []
+    for k in _SIG_INPUT_ARRAY_KEYS:
+        v = params.get(k)
+        if isinstance(v, list):
+            nums = [x for x in v if isinstance(x, (int, float)) and not isinstance(x, bool)]
+            if len(nums) == len(v) and len(nums) >= 2:
+                input_arrays.append([float(x) for x in nums])
+
+    if not input_arrays:
+        return "unknown"
+
+    prior_arrays: list[list[float]] = []
+    for out in prior_outputs:
+        _collect_numeric_arrays(out, out=prior_arrays)
+    if not prior_arrays:
+        # No real computed arrays exist yet → cannot corroborate. This is itself a
+        # red flag, but we do not have positive evidence of fabrication, so report
+        # "agent_literal" only if there is genuinely nothing upstream to trace to.
+        return "agent_literal"
+
+    traced = [_array_traces_to_prior(a, prior_arrays) for a in input_arrays]
+    if all(traced):
+        return "computed"
+    if any(traced):
+        # Mixed: some inputs are real, some are not. Treat as agent_literal so a
+        # partially-fabricated comparison is never labeled fully "computed".
+        return "agent_literal"
+    return "agent_literal"
+
+
 def _build_evidence(
     *,
     successful_outputs: list[dict[str, Any]],
@@ -416,6 +542,71 @@ def _build_evidence(
         verified_true_steps=n_verified_true,
         verified_false_steps=n_verified_false,
     )
+
+
+def attach_permutation_null_to_evidence(
+    evidence_obj: dict[str, Any],
+    sig_call_arrays: list[tuple[list[float], list[float]]],
+) -> dict[str, Any]:
+    """Compute a real label-permutation null from captured two-group arrays and
+    attach ``permutation_p`` + ``n_samples`` to ``evidence_obj`` (D2). Mutates and
+    returns ``evidence_obj``.
+
+    ``sig_call_arrays`` holds only pairs where BOTH real outcome arrays were
+    present at a successful significance-tool call (see ``extract_two_group_arrays``).
+    This is the ONLY place a generic (non-LOFO) statistical result acquires the
+    adversarial null that ``artifact_verification._survives_permutation`` requires.
+
+    Integrity invariants:
+      * Fail-closed — if ``sig_call_arrays`` is empty, or the arrays can't ground a
+        null (``compute_label_permutation_null`` returns ``None``), NOTHING is
+        attached: ``permutation_p`` stays absent and the verdict pipeline correctly
+        keeps the result inconclusive. No synthesized/self-reported null is ever
+        emitted.
+      * The p-value is a deterministic function of the SAME real arrays the observed
+        effect was measured on, under a fixed seed.
+      * The caller's ``stat_input_provenance`` field (if any) is left untouched —
+        an ``agent_literal`` tag on untrusted inputs survives so a later gate can
+        reject the verdict. Attaching a real null never launders that tag.
+      * Group-mean metric fields are filled ONLY when no real metric was found, and
+        never overwrite an existing measured ``metric_value``.
+    """
+    if not sig_call_arrays:
+        return evidence_obj
+
+    # Largest captured comparison (most observations -> most trustworthy null);
+    # ties keep the earliest call.
+    ra, rb = max(sig_call_arrays, key=lambda pair: len(pair[0]) + len(pair[1]))
+    perm = compute_label_permutation_null(ra, rb)
+    if perm is None:
+        return evidence_obj
+
+    fields = perm.to_evidence_fields()
+    if evidence_obj.get("n_samples") is None:
+        evidence_obj["n_samples"] = fields["n_samples"]
+    evidence_obj["permutation_p"] = fields["permutation_p"]
+    evidence_obj["permutation_null_n_permutations"] = fields["permutation_null_n_permutations"]
+    evidence_obj["permutation_null_observed_stat"] = fields["permutation_null_observed_stat"]
+    evidence_obj["permutation_null_group_sizes"] = fields["permutation_null_group_sizes"]
+
+    # A pure two-group outcome experiment may carry a significance p_value but no
+    # accuracy-style metric_value, so _build_evidence leaves metric fields unset
+    # and the evidence classifies as "unknown" (never reaching the artifact gate).
+    # The honest metric here is the group means of the SAME real arrays the null
+    # was computed from. Fill ONLY when no real metric was found; never overwrite
+    # a measured metric, never invent direction beyond the observed means.
+    if evidence_obj.get("metric_value") is None:
+        mean_a = sum(ra) / len(ra)
+        mean_b = sum(rb) / len(rb)
+        evidence_obj["metric_value"] = float(mean_a)
+        evidence_obj["baseline_value"] = float(mean_b)
+        evidence_obj["delta"] = float(mean_a - mean_b)
+        if mean_b != 0.0:
+            evidence_obj["delta_pct"] = float((mean_a - mean_b) / mean_b * 100.0)
+        evidence_obj["n_metric_steps"] = max(1, int(evidence_obj.get("n_metric_steps") or 0))
+        evidence_obj["metric_from_permutation_groups"] = True
+
+    return evidence_obj
 
 
 def _build_mandrake_evidence(
@@ -959,16 +1150,73 @@ async def _plugin_verification_path(
     import asyncio
     import json
 
-    from propab.verdict_pipeline import run_verdict_pipeline
+    from propab.verdict_pipeline import artifact_gate_stage, run_verdict_pipeline
 
     domain_id = domain_plugin.domain_id
+    hypothesis_text = str(hypothesis.get("text") or "")
+    test_methodology = str(hypothesis.get("test_methodology") or "")
     hyp_dict = {
-        "text": str(hypothesis.get("text") or ""),
-        "statement": str(hypothesis.get("text") or ""),
-        "test_methodology": str(hypothesis.get("test_methodology") or ""),
+        "text": hypothesis_text,
+        "statement": hypothesis_text,
+        "test_methodology": test_methodology,
         "feature_subset": list(hypothesis.get("feature_subset") or []),
     }
     features = list(hypothesis.get("feature_subset") or [])
+
+    # DOM4 honesty gate: before running the domain's fixed-default verification,
+    # confirm the hypothesis is actually ON-TOPIC for this domain. Without this,
+    # an off-topic / misrouted hypothesis is verified against the domain's default
+    # feature pair (e.g. graph_invariants' spectral_gap->clustering) and can yield
+    # a "confirmed" verdict decoupled from the real claim. ``hypothesis_on_topic``
+    # is defined on the DomainPlugin base (default: accept all), so every plugin
+    # has it; we still guard with getattr + a fail-OPEN except so a plugin that
+    # lacks or breaks the method is verified exactly as before (never a false
+    # refusal).
+    on_topic_check = getattr(domain_plugin, "hypothesis_on_topic", None)
+    if callable(on_topic_check):
+        try:
+            on_topic = bool(on_topic_check(hypothesis_text, methodology=test_methodology))
+        except Exception:  # noqa: BLE001 — a broken on-topic check must not block verification
+            on_topic = True
+        if not on_topic:
+            reason = "hypothesis_off_topic_for_domain"
+            off_topic_evidence = json.dumps({"reason": reason, "domain": domain_id})
+            await emitter.emit(
+                session_id=session_id,
+                event_type=EventType.AGENT_COMPLETED,
+                step=f"experiment.{hypothesis_id}.complete",
+                payload={
+                    "verdict": "inconclusive",
+                    "confidence": 0.0,
+                    "domain": domain_id,
+                    "off_topic": True,
+                    "reason": reason,
+                },
+                hypothesis_id=hypothesis_id,
+            )
+            await _update_hypothesis(
+                session_factory,
+                hypothesis_id,
+                status="completed",
+                verdict="inconclusive",
+                confidence=0.0,
+                evidence_summary=off_topic_evidence,
+                key_finding=None,
+                tool_trace_id=trace_pointer,
+            )
+            return {
+                "hypothesis_id": hypothesis_id,
+                "campaign_node_id": campaign_node_id,
+                "verdict": "inconclusive",
+                "confidence": 0.0,
+                "evidence_summary": off_topic_evidence,
+                "key_finding": None,
+                "tool_trace_id": trace_pointer,
+                "figures": [],
+                "duration_sec": round(time.perf_counter() - started, 3),
+                "failure_reason": reason,
+                "learned": reason,
+            }
 
     await emitter.emit(
         session_id=session_id,
@@ -1011,6 +1259,18 @@ async def _plugin_verification_path(
     if not isinstance(output, dict):
         output = {"raw": output}
 
+    # DOM2 honesty: stamp synthetic-data provenance onto the evidence so the
+    # verdict/paper pipeline can label a finding backed by a seed-generated
+    # (illustrative) dataset — never presenting it as a real-world result. The
+    # adapters record ``synthetic: True`` in their cache meta; the plugin surfaces
+    # that via ``uses_synthetic_data()``. Real-data domains report False and this
+    # field is omitted.
+    try:
+        if domain_plugin.uses_synthetic_data():
+            output["data_provenance"] = "synthetic"
+    except Exception:  # noqa: BLE001 — provenance labelling must never break a run
+        pass
+
     await emitter.emit(
         session_id=session_id,
         event_type=EventType.TOOL_RESULT,
@@ -1031,6 +1291,44 @@ async def _plugin_verification_path(
             hypothesis=hypothesis,
             campaign_context={"min_metric_steps": min_steps},
         )
+
+    # F1 honesty gate: a DomainPlugin's own classify_verdict is not adversarially
+    # gated on its own. Historically only the materials/mandrake worker paths ran
+    # the artifact gate, so every plugin-path domain (math, graph, genomics,
+    # enzyme, ...) could emit a "confirmed" verdict that never faced a
+    # permutation / label-shuffle null. Route a plugin "confirmed" through the same
+    # shape-aware artifact gate the except-branch (run_verdict_pipeline) already
+    # applies. This stage is DOMAIN-GENERAL: it keys on evidence SHAPE via
+    # classify_evidence_type, never on domain id — a deterministic proof passes
+    # through untouched, a lofo/statistical confirm must survive a real adversarial
+    # null (label-shuffle / permutation), and shapeless "unknown" evidence cannot
+    # confirm. Downgrade-only; no-ops unless verdict == "confirmed". We deliberately
+    # do NOT chain the OOD/scope stages here: OOD is defined for distributional
+    # (lofo/statistical) evidence and wrongly collapses a deterministic proof to
+    # inconclusive, and scope integrity is a no-op on this path (no scope_gate_result
+    # is attached). Wrapped so a gate failure can never break a run.
+    if verdict == "confirmed":
+        try:
+            _gv, _gc, _gr = artifact_gate_stage(
+                output, verdict, confidence, reason,
+                campaign_context={"min_metric_steps": min_steps},
+            )
+            if _gv != verdict:
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.TOOL_RESULT,
+                    step=f"experiment.{hypothesis_id}.artifact_gate",
+                    payload={
+                        "domain": domain_id,
+                        "gated_from": verdict,
+                        "gated_to": _gv,
+                        "reason": str(_gr)[:300],
+                    },
+                    hypothesis_id=hypothesis_id,
+                )
+            verdict, confidence, reason = _gv, _gc, _gr
+        except Exception:  # noqa: BLE001 — a gate failure must never break a run
+            pass
 
     evidence = json.dumps(output, default=str)
     key_finding = str(output.get("notes") or reason or "")[:500] if verdict == "confirmed" else None
@@ -1606,6 +1904,17 @@ async def run_sub_agent_async(payload: dict) -> dict:
         step_counter = 0
         tool_calls_done = 0
         err_box: list[Any] = [None]
+        # Provenance verdicts for each significance-tool call, in call order. Each
+        # entry is "computed" | "agent_literal" | "unknown" (see
+        # _classify_stat_input_provenance). Recorded from the arrays available
+        # BEFORE the significance tool's own output is appended.
+        sig_input_provenance: list[str] = []
+        # Two-group outcome arrays captured from successful significance-tool calls
+        # (results_a/results_b or treatment/baseline), in call order. Used AFTER
+        # the loop to compute a genuine label-permutation null from the SAME data
+        # the observed effect was measured on (D2). Only pairs where BOTH real
+        # arrays were present are recorded — see extract_two_group_arrays.
+        sig_call_arrays: list[tuple[list[float], list[float]]] = []
 
         # ── Shared tool execution helper (inline, no external function needed) ─
 
@@ -1661,6 +1970,20 @@ async def run_sub_agent_async(payload: dict) -> dict:
                 except (TypeError, ValueError):
                     pass
 
+            # Record significance-input provenance BEFORE the call, while
+            # successful_tool_outputs holds only PRIOR real outputs (this tool's
+            # own output has not been appended yet).
+            if tool_name in _SIGNIFICANCE_TOOL_NAMES:
+                prov = _classify_stat_input_provenance(call_params, successful_tool_outputs)
+                sig_input_provenance.append(prov)
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.TOOL_CALLED,
+                    step=f"experiment.{hypothesis_id}.step_{step_index}.provenance",
+                    payload={"tool": tool_name, "stat_input_provenance": prov},
+                    hypothesis_id=hypothesis_id,
+                )
+
             await emitter.emit(
                 session_id=session_id,
                 event_type=EventType.TOOL_CALLED,
@@ -1682,6 +2005,15 @@ async def run_sub_agent_async(payload: dict) -> dict:
                 successful_tool_names.append(tool_name)
                 if isinstance(result.output, dict):
                     successful_tool_outputs.append(result.output)
+                # Capture the two real outcome arrays this significance test ran on,
+                # so a genuine label-permutation null can be computed post-loop from
+                # the SAME data as the observed effect (D2). The significance tool
+                # output does NOT echo its inputs back, so we must read them from the
+                # call params here. Fail-closed: only recorded when BOTH arrays exist.
+                if tool_name in _SIGNIFICANCE_TOOL_NAMES:
+                    _two_arrays = extract_two_group_arrays(call_params)
+                    if _two_arrays is not None:
+                        sig_call_arrays.append(_two_arrays)
                 await emitter.emit(
                     session_id=session_id,
                     event_type=EventType.TOOL_RESULT,
@@ -2211,6 +2543,65 @@ async def run_sub_agent_async(payload: dict) -> dict:
             n_tool_steps=n_tool_steps,
             baseline_value=baseline_value,
         )
+
+        # ── Significance-input provenance (audit signal) ──────────────────────
+        # Aggregate per-call verdicts into a single evidence-level signal. This
+        # is only meaningful for the think-act / heuristic worker path (where
+        # sig_input_provenance was populated by run_tool_step); the dedicated
+        # domain-verification paths (mandrake/materials/plugin) return earlier
+        # and never reach here.
+        #
+        # Aggregation rule (conservative): if ANY significance call rested on
+        # agent-typed literals, the evidence is flagged agent_literal — one
+        # fabricated comparison taints the verdict. "computed" requires that at
+        # least one significance call ran AND every such call traced to prior
+        # real outputs. "unknown" when we could not decide (no numeric-array
+        # inputs / no significance call).
+        if sig_input_provenance:
+            if any(p == "agent_literal" for p in sig_input_provenance):
+                agg_provenance = "agent_literal"
+            elif any(p == "computed" for p in sig_input_provenance):
+                agg_provenance = "computed"
+            else:
+                agg_provenance = "unknown"
+        else:
+            agg_provenance = "unknown"
+        evidence_obj["stat_input_provenance"] = agg_provenance
+        evidence_obj["stat_input_provenance_calls"] = list(sig_input_provenance)
+        evidence_obj["inputs_from_sandbox"] = agg_provenance == "computed"
+
+        # ── Real label-permutation null (D2) ──────────────────────────────────
+        # If the agent ran a two-group significance comparison on real outcome
+        # arrays, compute a genuine label-permutation null from that SAME data and
+        # attach `permutation_p` + `n_samples` so artifact_verification.
+        # _survives_permutation (read-only, core) can evaluate a real adversarial
+        # null. Without this, a generic statistical result carries no null and the
+        # verdict pipeline correctly keeps it inconclusive.
+        #
+        # Fail-closed integrity:
+        #   * `sig_call_arrays` only holds pairs where BOTH real arrays were present
+        #     (extract_two_group_arrays); a lone p-value or single array never lands
+        #     here, so `permutation_p` stays absent and the result stays inconclusive.
+        #   * The p-value is a deterministic function of the actual arrays under a
+        #     fixed seed — nothing is self-reported. We never write `permutation_p`
+        #     unless compute_label_permutation_null returned a real result.
+        #   * We do NOT strip or alter `stat_input_provenance`: if the significance
+        #     inputs were agent-typed (`agent_literal`), the null is still computed
+        #     on those (untrusted) numbers but the provenance tag remains on the
+        #     evidence for a later gate to reject. Attaching a real null never
+        #     launders untrusted inputs.
+        _had_perm_before = evidence_obj.get("permutation_p")
+        attach_permutation_null_to_evidence(evidence_obj, sig_call_arrays)
+        if evidence_obj.get("permutation_p") is not None and _had_perm_before is None:
+            logger.info(
+                "label-permutation null computed for %s: permutation_p=%.4f "
+                "n_samples=%s (n_perm=%s, provenance=%s)",
+                hypothesis_id,
+                float(evidence_obj["permutation_p"]),
+                evidence_obj.get("n_samples"),
+                evidence_obj.get("permutation_null_n_permutations"),
+                agg_provenance,
+            )
 
         bm_cfg = payload.get("baseline_measurement")
         if isinstance(bm_cfg, dict) and evidence_obj.get("metric_value") is None:

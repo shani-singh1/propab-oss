@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 _DUPLICATE_RATE_WARN = 0.20            # generator recycling above this
 _BINDING_REJECTION_WARN = 0.15         # synthesis attaching irrelevant citations
 _BINDING_ZERO_MIN_CALLS = 50           # 0% rejection over this many calls is suspicious
+_BINDING_STRICT_MIN_CALLS = 50         # near-100% rejection over this many calls is suspicious
+_BINDING_STRICT_RATE_WARN = 0.90       # cumulative rejection at/above this is over-strict
 _EXPERIMENT_SUCCESS_WARN = 0.50        # experiments failing before producing evidence
 _UTILIZATION_WARN = 0.60               # workers idle / synthesis too slow
 
@@ -157,10 +159,23 @@ async def log_synthesis_health(
                 {"cid": campaign_id},
             )).one()
             tot_rej, tot_acc = int(totals[0]), int(totals[1])
-            if (tot_rej + tot_acc) >= _BINDING_ZERO_MIN_CALLS and tot_rej == 0:
+            tot_calls = tot_rej + tot_acc
+            if tot_calls >= _BINDING_ZERO_MIN_CALLS and tot_rej == 0:
                 logger.warning(
                     "[campaign %s] Evidence Binding called %d times with 0 rejections — "
-                    "binding check may not be running.", campaign_id, tot_rej + tot_acc,
+                    "binding check may not be running.", campaign_id, tot_calls,
+                )
+            # Symmetric over-strict check: binding rejecting almost everything over
+            # many calls may mean genuine supporting evidence is being starved, so
+            # beliefs never accrue support and stay unclear (ownership-contracts rule).
+            elif (
+                tot_calls >= _BINDING_STRICT_MIN_CALLS
+                and (tot_rej / tot_calls) >= _BINDING_STRICT_RATE_WARN
+            ):
+                logger.warning(
+                    "[campaign %s] Evidence Binding rejected %d of %d citations (%.0f%%) — "
+                    "binding may be over-strict and starving belief formation.",
+                    campaign_id, tot_rej, tot_calls, (tot_rej / tot_calls) * 100,
                 )
     except Exception:  # noqa: BLE001 — metric logging must never break a campaign
         logger.exception("[campaign %s] log_synthesis_health failed", campaign_id)

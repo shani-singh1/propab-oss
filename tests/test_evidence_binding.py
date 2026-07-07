@@ -196,6 +196,67 @@ def test_synthesis_pass_rejects_fabricated_citation_before_persist() -> None:
     assert int(metrics.get("binding_rejected_count") or 0) >= 1
 
 
+# --- Audit A2: binding is conservative-by-design (CLEARED), pinned on examples ---
+#
+# The binding is surface-lexical: it accepts a citation only when it can find
+# shared deterministic subject tags / population scope. The audit asked whether a
+# genuinely-supporting node with few surface words in common is WRONGLY rejected.
+# The answer is that such a node is indeed rejected — but so is a fabricated node,
+# and the two are INDISTINGUISHABLE from surface text alone. Loosening the
+# "untyped cited node" rule to admit the plain-language supporter would necessarily
+# admit fabricated citations too, breaking the integrity contract ("empty honest
+# fields beat populated false ones"). So the behavior is left unchanged; these
+# tests pin the correct accept/reject outcomes.
+
+REDUNDANCY_TAGGED_BELIEF = (
+    "Sequence redundancy inflates apparent within-family predictive performance."
+)
+
+# A node that genuinely supports the belief AND happens to contain the subject
+# vocabulary (redundancy / clustered split) → shares a real tag → accepted.
+REAL_SUPPORT_TAGGED_NODE = {
+    "id": "n-real-support-tagged",
+    "text": (
+        "Ridge regression on a single evolutionary family collapses to near-zero R2 once "
+        "nearest-neighbor sequence identity is capped below 50 percent under clustered split."
+    ),
+    "verdict": "confirmed",
+}
+
+# A node that genuinely supports the belief but is written in PLAIN language with
+# none of the trigger vocabulary → no tags → rejected as untyped-for-claim. This
+# is the conservative default: from surface text alone it cannot be told apart
+# from a fabricated node, so binding must not admit it.
+REAL_SUPPORT_PLAIN_NODE = {
+    "id": "n-real-support-plain",
+    "text": "We grouped homologous proteins, held one group out entirely, and the model did no better than chance.",
+    "verdict": "confirmed",
+}
+
+
+def test_cleared_tagged_supporter_is_accepted() -> None:
+    result = binding_check_statement_to_node(REDUNDANCY_TAGGED_BELIEF, REAL_SUPPORT_TAGGED_NODE)
+    assert result.match
+    assert "sequence_redundancy" in result.reason
+
+
+def test_cleared_plain_supporter_rejected_same_as_fabricated() -> None:
+    """A plain-language supporter and a fabricated node are rejected identically.
+
+    This is the crux of the CLEARED verdict: both are 'untyped for the claim', so
+    admitting the honest one would admit the fabricated one. Behavior is correct.
+    """
+    plain = binding_check_statement_to_node(REDUNDANCY_TAGGED_BELIEF, REAL_SUPPORT_PLAIN_NODE)
+    fabricated = binding_check_statement_to_node(REDUNDANCY_TAGGED_BELIEF, FABRICATED_UNRELATED_NODE)
+    assert not plain.match
+    assert not fabricated.match
+    # Both are rejected identically (the crux of the CLEARED verdict): from surface
+    # text alone the honest plain node and the fabricated node are indistinguishable.
+    # Neither shares a subject term with the redundancy/sequence belief, so both now
+    # trip the BND1 cross-subject veto with the SAME, more-specific reason.
+    assert plain.reason == fabricated.reason == "cross_subject_mismatch"
+
+
 def test_ungrounded_belief_goes_to_proposed_list() -> None:
     """Beliefs with zero supporting nodes cannot enter active_beliefs."""
     state = CampaignBeliefState()
@@ -208,3 +269,247 @@ def test_ungrounded_belief_goes_to_proposed_list() -> None:
     assert len(state.active_beliefs) == 0
     assert len(state.proposed_ungrounded_beliefs) == 1
     assert metrics.ungrounded_belief_count == 1
+
+
+# --- A4: domain-general binding — genuine cross-domain supporters bind, ----------
+# --- fabricated/irrelevant ones are still rejected, using NONE of the ------------
+# --- hardcoded biology tag vocab (LOFO / within-family / feature tokens). --------
+
+ECON_BELIEF = (
+    "Binding minimum wage floors reduce teenage employment in low-income urban labor "
+    "markets; the disemployment effect strengthens as the wage floor becomes binding."
+)
+
+# Genuine economics supporter. Its structured claim_scope + finding are about the
+# SAME subject as the belief, yet it matches none of the biology tag regexes, so
+# under the old surface-tag-only logic it produced empty test_targets and was
+# rejected as ``cited_node_untyped_for_citing_claim`` / ``both_subjects_untyped``.
+ECON_SUPPORT_NODE = {
+    "id": "econ-support-1",
+    "text": (
+        "Does a binding minimum wage floor reduce teenage employment in urban labor markets? "
+        "Population: 240 metropolitan labor markets. OOD test: hold out one census region."
+    ),
+    "verdict": "confirmed",
+    "claim_scope": {
+        "population": "240 metropolitan low-income labor markets",
+        "distribution": "urban teenage employment records",
+        "claimed_generalization": "binding minimum wage floors reduce teenage employment",
+        "ood_test": "hold out one census region",
+    },
+    "finding": {
+        "claim": "Binding minimum wage floors reduced teenage employment by 3.1% in low-income urban markets.",
+        "metric_name": "employment_elasticity",
+    },
+    "mechanism_id": "minimum_wage_disemployment",
+}
+
+# Fabricated / unrelated node cited for the SAME econ belief — an unrelated physics
+# claim. It shares NO subject-specific term with the belief, only generic scope
+# scaffolding ("hold out one ...", "Population:"), which is stripped before
+# comparison, so it must stay rejected.
+FABRICATED_PHYSICS_NODE = {
+    "id": "phys-fab-1",
+    "text": (
+        "Does increasing lattice temperature raise superconductor critical current? "
+        "Population: 40 niobium samples. OOD test: hold out one fabrication batch."
+    ),
+    "verdict": "confirmed",
+    "claim_scope": {
+        "population": "40 niobium thin-film samples",
+        "distribution": "cryogenic transport measurements",
+        "claimed_generalization": "lattice temperature raises critical current",
+        "ood_test": "hold out one fabrication batch",
+    },
+    "finding": {
+        "claim": "Critical current fell 12% per kelvin of lattice temperature increase.",
+        "metric_name": "critical_current",
+    },
+    "mechanism_id": "cooper_pair_breaking",
+}
+
+
+def test_cross_domain_supporter_binds_via_structured_overlap() -> None:
+    """(a) A genuine economics supporter binds through structured overlap,
+    despite using none of the biology tag vocab (both sides have empty tags)."""
+    citing = extract_subject_from_statement(ECON_BELIEF)
+    assert not citing.test_targets, "econ belief must have no biology tags"
+    result = binding_check_statement_to_node(ECON_BELIEF, ECON_SUPPORT_NODE)
+    assert result.match, result.reason
+    # Bound on shared claim/scope subject terms, not on any biology tag path.
+    assert result.reason.startswith(("shared_claim_terms", "shared_scope_subject",
+                                     "shared_mechanism_or_feature"))
+
+
+def test_cross_domain_fabricated_node_still_rejected() -> None:
+    """(b) A fabricated physics node cited for the econ belief shares no
+    subject-specific term and must be rejected — integrity line held."""
+    result = binding_check_statement_to_node(ECON_BELIEF, FABRICATED_PHYSICS_NODE)
+    assert not result.match
+    # Sharing no subject-specific term is exactly the BND1 cross-subject signature,
+    # so rejection may surface as the specific veto or the generic no-overlap reason.
+    assert result.reason in (
+        "cross_subject_mismatch", "no_subject_overlap", "both_subjects_untyped",
+    )
+
+
+def test_cross_domain_filter_keeps_supporter_strips_fabrication() -> None:
+    """(a)+(b) together on the real filter path: the genuine supporter survives,
+    the fabricated node is stripped, no biology vocab involved."""
+    nodes = {
+        ECON_SUPPORT_NODE["id"]: ECON_SUPPORT_NODE,
+        FABRICATED_PHYSICS_NODE["id"]: FABRICATED_PHYSICS_NODE,
+    }
+    metrics = BindingMetrics()
+    accepted = filter_node_citations(
+        ECON_BELIEF,
+        [ECON_SUPPORT_NODE["id"], FABRICATED_PHYSICS_NODE["id"]],
+        nodes,
+        metrics=metrics,
+    )
+    assert ECON_SUPPORT_NODE["id"] in accepted
+    assert FABRICATED_PHYSICS_NODE["id"] not in accepted
+    assert metrics.binding_accepted_count >= 1
+    assert metrics.binding_rejected_count >= 1
+
+
+def test_single_shared_word_is_incidental_not_a_bind() -> None:
+    """A node sharing only ONE content word with the belief (and no scope /
+    mechanism / feature overlap) is incidental and must NOT bind — this is what
+    keeps loosely-related citations out."""
+    belief = "Rising interest rates cool housing demand in coastal metros."
+    # Shares only the single content word 'housing' — nothing else in common.
+    incidental_node = {
+        "id": "incidental-1",
+        "text": (
+            "Does solar panel efficiency degrade with rooftop housing age? "
+            "Population: 500 rooftop installations. OOD test: hold out one manufacturer."
+        ),
+        "verdict": "confirmed",
+        "claim_scope": {
+            "population": "500 rooftop solar installations",
+            "claimed_generalization": "panel efficiency degrades with age",
+            "ood_test": "hold out one manufacturer",
+        },
+        "finding": {"claim": "Rooftop housing panels lost 0.5% efficiency per year."},
+    }
+    result = binding_check_statement_to_node(belief, incidental_node)
+    assert not result.match, result.reason
+
+
+def test_shared_mechanism_id_binds_across_domain() -> None:
+    """A node sharing an explicit mechanism_id with a belief that names that
+    mechanism binds — an unambiguous, domain-general subject anchor."""
+    belief = "The credit-channel mechanism amplifies monetary tightening on small firms."
+    node = {
+        "id": "mech-1",
+        "text": "Bank lending contracts sharply after rate hikes for small firms.",
+        "verdict": "confirmed",
+        "claim_scope": {
+            "population": "small firms",
+            "claimed_generalization": "credit channel amplifies tightening",
+            "ood_test": "hold out one lending region",
+        },
+        "mechanism_id": "credit-channel",
+        "feature_subset": ["credit-channel"],
+    }
+    result = binding_check_statement_to_node(belief, node)
+    assert result.match, result.reason
+    # 'credit-channel' appears in both statement salient terms and node ids, so it
+    # binds either on shared_mechanism_or_feature or shared_claim_terms.
+    assert "credit" in result.reason or result.reason.startswith("shared")
+
+
+def test_biology_tagged_supporter_still_binds() -> None:
+    """(c) Existing biology behavior preserved: the within-family redundancy
+    belief still binds to the within-family node via the tag path."""
+    result = binding_check_statement_to_node(REDUNDANCY_BELIEF, WITHIN_FAMILY_NODE)
+    assert result.match
+
+
+def test_biology_insufficiency_vs_lofo_still_rejected() -> None:
+    """(c) Existing biology behavior preserved: the unfalsifiable feature-
+    insufficiency belief still rejects the cross-family LOFO node (the structured
+    path must not override the incompatible-tag guard)."""
+    result = binding_check_statement_to_node(INSUFFICIENCY_BELIEF, LOFO_NODE)
+    assert not result.match
+    assert "lofo" in result.reason.lower() or "insufficient" in result.reason.lower() or "overlap" in result.reason.lower()
+
+
+# --- BND1: cross-domain "genuine-for-a-different-subject" nodes that overlap the ---
+# --- belief only on GENERIC RELATIONSHIP words must NOT bind, while a genuine -------
+# --- same-subject supporter still binds (precision up, recall held at 1.0). ---------
+
+# Belief: an econometrics claim ("minimum wage reduces teen employment elasticity").
+_BND1_ECON_BELIEF = (
+    "Minimum wage increases reduce teen employment elasticity in low-density labor markets.\n"
+    "Population: teen workers in low-density counties\nDistribution: 2010-2019 county panel\n"
+    "Claimed generalization: elasticity negative across low-density counties\n"
+    "Expected failure modes: monopsony offset\nOOD test: hold out one state"
+)
+
+# Cross-domain node: a GENUINE demand-elasticity finding, but about CIGARETTE TAXES /
+# smoking, not teen wages. It overlaps the belief only on the generic relationship
+# words "reduce" and "elasticity" — no shared subject entity (no teen/wage/county).
+# Under the old ``_MIN_SHARED_SALIENT_TERMS = 2`` rule it bound on those two words;
+# the subject-discriminating rule must now reject it.
+_BND1_CROSS_DOMAIN_NODE = {
+    "id": "bnd1-cross-domain",
+    "text": (
+        "Cigarette excise taxes reduce adult smoking prevalence with a demand elasticity "
+        "of -0.4 in high-income states."
+    ),
+    "finding": {
+        "claim": "cigarette tax reduces smoking prevalence",
+        "metric_name": "elasticity",
+    },
+}
+
+# Genuine same-subject supporter: the SAME teen-wage-elasticity subject. It shares
+# the belief's real subject nouns (teen / employment / counties / low-density), so it
+# must still BIND — recall must not regress.
+_BND1_GENUINE_NODE = {
+    "id": "bnd1-genuine",
+    "text": (
+        "County panel regression finds minimum wage elasticity of teen employment is -0.12 "
+        "in low-density counties.\n"
+        "Population: teen workers in low-density counties\nDistribution: 2012-2018 county panel\n"
+        "Claimed generalization: negative elasticity across counties\n"
+        "Expected failure modes: monopsony offset\nOOD test: hold out one state"
+    ),
+    "finding": {
+        "claim": "teen employment elasticity negative under minimum wage",
+        "metric_name": "elasticity",
+    },
+}
+
+
+def test_bnd1_cross_domain_relationship_only_overlap_is_rejected() -> None:
+    """A node sharing ONLY generic relationship words ("reduce", "elasticity") with
+    the belief — but naming a different subject (cigarettes vs. teen wages) — must be
+    rejected. This is the BND1 cross-domain false-accept the fix closes."""
+    result = binding_check_statement_to_node(_BND1_ECON_BELIEF, _BND1_CROSS_DOMAIN_NODE)
+    assert not result.match, result.reason
+
+
+def test_bnd1_genuine_same_subject_supporter_still_binds() -> None:
+    """A genuine supporter of the SAME subject (teen wage elasticity) still binds on
+    the claim's real subject nouns — recall must stay 1.0."""
+    result = binding_check_statement_to_node(_BND1_ECON_BELIEF, _BND1_GENUINE_NODE)
+    assert result.match, result.reason
+
+
+def test_bnd1_filter_strips_cross_domain_keeps_genuine() -> None:
+    """On the real filter path: the genuine same-subject supporter survives, the
+    cross-domain relationship-only node is stripped — precision up, recall held."""
+    nodes = {
+        _BND1_GENUINE_NODE["id"]: _BND1_GENUINE_NODE,
+        _BND1_CROSS_DOMAIN_NODE["id"]: _BND1_CROSS_DOMAIN_NODE,
+    }
+    accepted = filter_node_citations(
+        _BND1_ECON_BELIEF,
+        [_BND1_GENUINE_NODE["id"], _BND1_CROSS_DOMAIN_NODE["id"]],
+        nodes,
+    )
+    assert _BND1_GENUINE_NODE["id"] in accepted
+    assert _BND1_CROSS_DOMAIN_NODE["id"] not in accepted

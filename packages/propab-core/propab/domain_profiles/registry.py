@@ -11,6 +11,7 @@ from propab.domain_profiles.enzyme_kinetics import ENZYME_KINETICS_PROFILE
 from propab.domain_profiles.graph_invariants import GRAPH_INVARIANTS_PROFILE
 from propab.domain_profiles.materials import MATERIALS_PROFILE
 from propab.domain_profiles.math_combinatorics import MATH_COMBINATORICS_PROFILE
+from propab.domain_profiles.network_diffusion import NETWORK_DIFFUSION_PROFILE
 
 _PROFILES: tuple[DomainProfile, ...] = (
     ECONOMETRICS_PROFILE,
@@ -18,6 +19,7 @@ _PROFILES: tuple[DomainProfile, ...] = (
     MATERIALS_PROFILE,
     GRAPH_INVARIANTS_PROFILE,
     MATH_COMBINATORICS_PROFILE,
+    NETWORK_DIFFUSION_PROFILE,
 )
 
 _BY_ID: dict[str, DomainProfile] = {p.profile_id: p for p in _PROFILES}
