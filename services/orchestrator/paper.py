@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import subprocess
@@ -14,12 +15,16 @@ from propab.claim_grounding import ground_session_claims
 from propab.events import EventEmitter
 from propab.llm import LLMClient
 from propab.paper_compiler import (
+    _finding_novelty_claim,
+    apply_novelty_demotion,
     collect_figure_object_ids,
     compile_references_latex,
     compile_session_findings,
     compile_session_methods_latex,
     compile_session_results_latex,
 )
+
+logger = logging.getLogger(__name__)
 from propab.paper_narrative import build_figure_specs, research_narrative_section
 from propab.paper_sections import generate_prose_sections, render_paper_tex
 from propab.storage import get_object_bytes, put_bytes
@@ -253,6 +258,64 @@ def _build_derived_figures(
     return ("".join(blocks), written)
 
 
+async def _demote_known_findings(
+    findings: dict[str, Any],
+    *,
+    session_id: str,
+    emitter: EventEmitter,
+    question: str | None,
+    synthesis: dict[str, Any] | None,
+) -> None:
+    """DISC1: novelty-check each confirmed finding and demote the KNOWN ones.
+
+    Resolves the campaign's domain plugin (so its ``literature_profile()`` reaches
+    the novelty service), asks ``/novelty`` per confirmed finding, and applies
+    :func:`apply_novelty_demotion` so rediscoveries drop out of the headline count.
+
+    Fully non-blocking: when ``literature_service_url`` is empty, when the service is
+    unreachable/erroring, or when anything here fails, findings are left exactly as
+    the verdict pipeline produced them — a novelty outage never changes a count in a
+    way that inflates OR deflates results beyond the honest default.
+    """
+    from propab.config import settings
+
+    confirmed = findings.get("confirmed") or []
+    if not confirmed:
+        return
+    # Backward compatible: no service configured → skip the whole check (no crash).
+    if not (getattr(settings, "literature_service_url", "") or "").strip():
+        return
+
+    try:
+        from propab.domain_modules.registry import resolve_domain_plugin
+        from services.orchestrator.literature_client import check_finding_novelty
+
+        domain_plugin = resolve_domain_plugin(
+            question=question or "",
+            payload={"domain_profile": (synthesis or {}).get("domain_id")},
+        )
+
+        novelty_by_id: dict[str, dict[str, Any]] = {}
+        for f in confirmed:
+            claim = _finding_novelty_claim(f)
+            if not claim:
+                continue
+            nov = await check_finding_novelty(
+                claim,
+                (f.get("stats") or {}),
+                domain_plugin=domain_plugin,
+                session_id=session_id,
+                emitter=emitter,
+            )
+            novelty_by_id[str(f.get("id"))] = nov
+
+        apply_novelty_demotion(findings, novelty_by_id)
+    except Exception:  # noqa: BLE001 — novelty labelling must never break paper generation
+        logger.exception(
+            "[session %s] novelty demotion failed; leaving findings unchanged", session_id
+        )
+
+
 async def write_paper_minimal(
     *,
     session_id: str,
@@ -307,8 +370,21 @@ async def write_paper_minimal(
     metric_name = str(synthesis.get("metric_name") or "metric").replace("_", " ")
     if not literature_only:
         findings = await compile_session_findings(session_factory, session_id)
+        # DISC1: before publishing confirmed findings as discoveries, ask the
+        # literature service whether each is already KNOWN. A "known" finding is
+        # demoted to a rediscovery and dropped from the headline discovery count —
+        # this is the ONE gated findings dict every section reads, so the abstract,
+        # results, figures, and narrative all agree on what counts as a discovery.
+        await _demote_known_findings(
+            findings,
+            session_id=session_id,
+            emitter=emitter,
+            question=question,
+            synthesis=synthesis,
+        )
         synthesis["counts"] = findings["counts"]
         synthesis["confirmed_findings"] = findings["confirmed"]
+        synthesis["rediscoveries"] = findings.get("rediscovery", [])
 
     await emitter.emit(
         session_id=session_id,
