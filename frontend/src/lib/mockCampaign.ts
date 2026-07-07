@@ -1,0 +1,169 @@
+// Offline fixtures for `/campaign/demo` — a synthetic but realistic multi-round
+// campaign event log + snapshot. Used to develop and sanity-check the live UI
+// (grouped narrative, workers, background tasks) without a running backend. Only
+// reached when the route id is the literal "demo"; real campaigns are untouched.
+
+import type { CampaignState, PropabEvent } from "../types";
+
+let seq = 0;
+const T0 = Date.now() - 1000 * 60 * 22; // started 22 min ago
+function ev(
+  offsetSec: number,
+  source: string,
+  event_type: string,
+  step: string,
+  payload: Record<string, any>,
+  hypothesis_id: string | null = null,
+): PropabEvent {
+  return {
+    event_id: `demo-${seq++}`,
+    session_id: "demo",
+    timestamp: new Date(T0 + offsetSec * 1000).toISOString(),
+    source,
+    event_type,
+    step,
+    payload,
+    parent_event_id: null,
+    hypothesis_id,
+  };
+}
+
+const HYPS: Record<string, { text: string; verdict: string; conf: number }> = {
+  h1a: { text: "Feature scaling on income improves LOFO R² by >5%", verdict: "confirmed", conf: 0.91 },
+  h1b: { text: "Dropping collinear age/tenure pair reduces variance", verdict: "refuted", conf: 0.88 },
+  h1c: { text: "Target encoding on region beats one-hot", verdict: "inconclusive", conf: 0.41 },
+  h2a: { text: "Interaction term income×region captures nonlinearity", verdict: "confirmed", conf: 0.86 },
+  h2b: { text: "Log-transform of balance stabilizes residuals", verdict: "inconclusive", conf: 0.5 },
+  h3a: { text: "Gradient-boosted depth-4 dominates linear baseline", verdict: "running", conf: 0 },
+  h3b: { text: "Monotonic constraint on tenure aids generalization", verdict: "running", conf: 0 },
+};
+
+function workerEvents(id: string, startSec: number, done: boolean): PropabEvent[] {
+  const h = HYPS[id];
+  const out: PropabEvent[] = [];
+  out.push(ev(startSec, "worker", "agent.started", `experiment.${id}`, { hypothesis_id: id, text: h.text }, id));
+  out.push(ev(startSec + 3, "worker", "agent.step_started", `experiment.${id}.step_0`, { tool: "load_dataset", source: "heuristic_seed" }, id));
+  out.push(ev(startSec + 4, "worker", "tool.called", `experiment.${id}.step_0`, { tool: "load_dataset" }, id));
+  out.push(ev(startSec + 6, "worker", "tool.result", `experiment.${id}.step_0`, { tool: "load_dataset" }, id));
+  out.push(ev(startSec + 8, "worker", "llm.prompt", `llm.decide_next`, { purpose: "decide_next", model: "claude-opus" }, id));
+  out.push(ev(startSec + 11, "worker", "llm.response", `llm.decide_next`, { purpose: "decide_next", model: "claude-opus" }, id));
+  out.push(ev(startSec + 12, "worker", "agent.step_started", `experiment.${id}.step_1`, { action: "code", reasoning: "Fit model and measure LOFO R² against the baseline split." }, id));
+  out.push(
+    ev(startSec + 13, "worker", "code.generated", `experiment.${id}.step_1`, {
+      code: `import pandas as pd\nfrom sklearn.linear_model import Ridge\n\ndf = load()\nX, y = features(df), target(df)\nmodel = Ridge(alpha=1.0).fit(X_train, y_train)\nr2 = lofo_r2(model, X, y)\nprint({"sandbox": "ok", "lofo_r2": r2})`,
+      rewrite_after_timeout: false,
+    }, id),
+  );
+  if (done) {
+    out.push(ev(startSec + 16, "worker", "code.result", `experiment.${id}.step_1`, { stdout_json: { sandbox: "ok", lofo_r2: 0.7 + h.conf * 0.1 }, attempt: 1 }, id));
+    out.push(ev(startSec + 18, "worker", "agent.step_started", `experiment.${id}.step_2`, { action: "stop", reasoning: "Significance gate satisfied." }, id));
+    out.push(
+      ev(startSec + 20, "worker", "agent.completed", `experiment.${id}.complete`, {
+        verdict: h.verdict,
+        confidence: h.conf,
+        sig_gate_passed: h.verdict !== "inconclusive",
+        mean_r2: 0.7 + h.conf * 0.1,
+      }, id),
+    );
+  } else {
+    // leave it mid-flight: code submitted but no result yet (an in-flight task)
+    out.push(ev(startSec + 14, "worker", "code.submitted", `experiment.${id}.step_1`, { timeout_sec: 20, execution: "inline_stub", attempt: 1 }, id));
+    out.push(ev(startSec + 15, "worker", "llm.prompt", `llm.decide_next`, { purpose: "decide_next", model: "claude-opus" }, id));
+  }
+  return out;
+}
+
+export function buildDemoEvents(): PropabEvent[] {
+  seq = 0;
+  const e: PropabEvent[] = [];
+  e.push(ev(0, "orchestrator", "campaign.started", "campaign.start", { question: DEMO_QUESTION }));
+  e.push(ev(2, "orchestrator", "campaign.progress", "campaign.phase", { phase: "prior_build", detail: "Building literature prior (LLM + retrieval) over 41 papers." }));
+  e.push(ev(4, "orchestrator", "llm.prompt", "llm.prior", { purpose: "prior_synthesis", model: "claude-opus" }));
+  e.push(ev(30, "orchestrator", "llm.response", "llm.prior", { purpose: "prior_synthesis", model: "claude-opus" }));
+  e.push(ev(60, "orchestrator", "campaign.baseline_measured", "campaign.baseline_measured", { baseline_metric: 0.612 }));
+
+  // Round 1
+  e.push(ev(70, "orchestrator", "round.started", "round.1.start", { round: 1, round_id: "r1" }));
+  e.push(ev(72, "orchestrator", "hypothesis.generated", "hypothesis.generate", { hypotheses: [{}, {}, {}] }));
+  for (const [i, id] of ["h1a", "h1b", "h1c"].entries()) e.push(...workerEvents(id, 80 + i * 40, true));
+  e.push(ev(230, "orchestrator", "synthesis.ledger_updated", "synthesis.ledger", { round: 1 }));
+  e.push(ev(232, "orchestrator", "synthesis.breakthrough", "synthesis.breakthrough", { round: 1, finding: "Income scaling lifts R² to 0.68" }, "h1a"));
+  e.push(ev(236, "orchestrator", "round.completed", "round.1.complete", { round: 1, confirmed: 1, refuted: 1, inconclusive: 1, marginal_return: 0.42 }));
+
+  // Round 2
+  e.push(ev(240, "orchestrator", "round.started", "round.2.start", { round: 2, round_id: "r2" }));
+  e.push(ev(242, "orchestrator", "hypothesis.generated", "hypothesis.generate", { hypotheses: [{}, {}] }));
+  for (const [i, id] of ["h2a", "h2b"].entries()) e.push(...workerEvents(id, 250 + i * 40, true));
+  e.push(ev(360, "orchestrator", "synthesis.ledger_updated", "synthesis.ledger", { round: 2 }));
+  e.push(ev(362, "orchestrator", "round.completed", "round.2.complete", { round: 2, confirmed: 1, refuted: 0, inconclusive: 1, marginal_return: 0.19 }));
+
+  // Round 3 — in flight
+  e.push(ev(370, "orchestrator", "round.started", "round.3.start", { round: 3, round_id: "r3" }));
+  e.push(ev(372, "orchestrator", "campaign.progress", "campaign.phase", { phase: "pipelined_sub_agents", detail: "Dispatching 2 sub-agents for round 3 verification." }));
+  e.push(ev(374, "orchestrator", "hypothesis.generated", "hypothesis.generate", { hypotheses: [{}, {}] }));
+  e.push(...workerEvents("h3a", 380, false));
+  e.push(...workerEvents("h3b", 395, false));
+  // an orchestrator LLM call in flight
+  e.push(ev(410, "orchestrator", "llm.prompt", "llm.rank", { purpose: "rank_hypotheses", model: "claude-opus" }));
+
+  return e.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
+}
+
+const DEMO_QUESTION =
+  "Which feature-engineering strategies most improve leave-one-feature-out R² on the churn dataset?";
+
+export function buildDemoSnapshot(): CampaignState {
+  const nodes: CampaignState["campaign"]["hypothesis_tree"]["nodes"] = {};
+  Object.entries(HYPS).forEach(([id, h], i) => {
+    nodes[id] = {
+      id,
+      text: h.text,
+      parent_id: null,
+      depth: 1,
+      generation: i < 3 ? 1 : i < 5 ? 2 : 3,
+      verdict: (h.verdict === "running" ? "pending" : h.verdict) as any,
+      confidence: h.conf,
+      children: [],
+    };
+  });
+  return {
+    campaign_id: "demo",
+    campaign: {
+      id: "demo",
+      question: DEMO_QUESTION,
+      status: "active",
+      hypothesis_tree: { nodes, frontier: ["h3a", "h3b"], confirmed: ["h1a", "h2a"], exhausted: ["h1b"] },
+      baseline_metric: 0.612,
+      best_metric: 0.681,
+      improvement_pct: 11.3,
+      best_finding: { statement: "Income feature scaling lifts LOFO R² from 0.61 to 0.68." },
+      breakthrough_criteria: {},
+      compute_budget_seconds: 3600 * 3,
+      compute_seconds_used: 60 * 22,
+      started_at: new Date(T0).toISOString(),
+      belief_state: {
+        active_beliefs: [
+          { statement: "Feature scaling on skewed monetary columns materially improves generalization.", confidence: "strong", supporting_nodes: ["h1a", "h2a"], contradicting_nodes: [], status: "strengthened", exhaustion_rounds: 0 },
+          { statement: "Dropping collinear features helps.", confidence: "weak", supporting_nodes: [], contradicting_nodes: ["h1b"], status: "weakened", exhaustion_rounds: 1 },
+          { statement: "Target encoding beats one-hot for high-cardinality region.", confidence: "unclear", supporting_nodes: ["h1c"], contradicting_nodes: [], status: "active", exhaustion_rounds: 0 },
+        ],
+      },
+    },
+    summary: {
+      id: "demo",
+      question: DEMO_QUESTION,
+      status: "active",
+      total_hypotheses: 7,
+      total_confirmed: 2,
+      baseline_metric: 0.612,
+      best_metric: 0.681,
+      improvement_pct: 11.3,
+      elapsed_sec: 60 * 22,
+      remaining_sec: 3600 * 3 - 60 * 22,
+      breakthrough_threshold_pct: 15,
+      tree: { total_nodes: 7, frontier_size: 2, confirmed_count: 2, exhausted_count: 1, max_depth: 3, verdict_counts: { confirmed: 2, refuted: 1, inconclusive: 2, pending: 2 } },
+    },
+    research_session: { id: "demo", question: DEMO_QUESTION, status: "running", stage: "experimentation" },
+    event_counts_by_type: { "llm.prompt": 38, "tool.called": 22, "code.result": 9 },
+  };
+}

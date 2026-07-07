@@ -50,6 +50,19 @@ export function budgetPct(used: number, total: number): number {
   return Math.min(100, Math.round((used / total) * 100));
 }
 
+// Compact elapsed duration between two ISO timestamps (or from `from` to now),
+// e.g. "1h 4m", "3m 12s", "8s". Used for live worker/task timers.
+export function fmtElapsed(
+  from: string | null | undefined,
+  to?: string | null | number,
+): string {
+  if (!from) return "—";
+  const a = new Date(from).getTime();
+  const b = typeof to === "number" ? to : to ? new Date(to).getTime() : Date.now();
+  if (isNaN(a) || isNaN(b)) return "—";
+  return fmtDuration((b - a) / 1000);
+}
+
 // Elapsed offset of an event from the campaign start, as m:ss or h:mm.
 export function fmtOffset(startIso: string | null | undefined, iso: string | null | undefined): string {
   if (!startIso || !iso) return "";

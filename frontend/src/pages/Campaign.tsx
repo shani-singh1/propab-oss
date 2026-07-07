@@ -1,13 +1,33 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { useCampaignLive } from "../hooks/useCampaignLive";
+import { useNow } from "../hooks/useNow";
 import { useLiveStore } from "../store";
-import { agentsInFlight, statusView, toneColor } from "../lib/status";
+import { statusView, toneColor } from "../lib/status";
+import { buildCampaignModel } from "../lib/model";
 import { truncate } from "../lib/format";
 import { Dot } from "../components/primitives";
-import Timeline from "../components/campaign/Timeline";
+import NarrativeStream from "../components/campaign/NarrativeStream";
 import Composer from "../components/campaign/Composer";
 import RightPanel from "../components/campaign/RightPanel";
+import type { PropabEvent } from "../types";
+
+// A short, human "what is it doing right now" line for the live indicator.
+function liveLabel(events: PropabEvent[], workersRunning: number): string | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    const p = e.payload || {};
+    if (e.event_type === "campaign.phase" || e.step === "campaign.phase") {
+      if (typeof p.detail === "string") return p.detail;
+      if (typeof p.phase === "string") return `Phase: ${String(p.phase).replace(/_/g, " ")}`;
+    }
+    if (e.event_type === "hypothesis.generated") return "Generating hypotheses";
+    if (e.event_type === "round.started") return `Opening round ${p.round ?? ""}`.trim();
+    if (i < events.length - 40) break; // only scan the recent tail
+  }
+  if (workersRunning > 0) return `Running ${workersRunning} experiment${workersRunning > 1 ? "s" : ""}`;
+  return undefined;
+}
 
 export default function Campaign() {
   const { id } = useParams();
@@ -17,15 +37,7 @@ export default function Campaign() {
   const connected = useLiveStore((s) => s.connected);
   const error = useLiveStore((s) => s.error);
 
-  const [filter, setFilter] = useState<"all" | "milestones">("all");
   const [rightOpen, setRightOpen] = useState(true);
-
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const atBottomRef = useRef(true);
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
-  }, [events.length, filter]);
 
   const c = campaign?.campaign;
   const status = campaign?.summary?.status ?? c?.status ?? "active";
@@ -33,9 +45,13 @@ export default function Campaign() {
   const question = c?.question ?? "";
   const beliefs = c?.belief_state?.active_beliefs ?? [];
   const confirmed = campaign?.summary?.total_confirmed ?? 0;
-  const agents = agentsInFlight(campaign);
+
+  const model = useMemo(() => buildCampaignModel(events), [events]);
+  const active = sv.active && connected;
+  const now = useNow(active);
+
   const paperReady = useMemo(() => events.some((e) => e.event_type === "paper.ready"), [events]);
-  const lastSource = events.length ? events[events.length - 1].source : undefined;
+  const label = active ? liveLabel(events, model.counts.workersRunning) : undefined;
 
   if (!campaign && error) {
     return (
@@ -62,55 +78,36 @@ export default function Campaign() {
               {truncate(question, 34) || (id ? id.slice(0, 8) : "campaign")}
             </span>
             <span className="text-[11.5px] font-medium leading-none text-ink-2">{sv.label}</span>
-            <div className="ml-auto flex items-center gap-1 rounded-lg bg-chip p-[3px]">
-              {(["all", "milestones"] as const).map((f) => (
-                <button
-                  key={f}
-                  onClick={() => setFilter(f)}
-                  className="rounded-md px-[11px] py-[5px] text-[11.5px] font-semibold leading-none"
-                  style={
-                    filter === f
-                      ? { background: "var(--rightBg)", color: "var(--text)", boxShadow: "0 1px 2px rgba(0,0,0,.12)" }
-                      : { background: "transparent", color: "var(--text3)" }
-                  }
-                >
-                  {f === "all" ? "Activity" : "Milestones"}
-                </button>
-              ))}
+            <div className="ml-auto flex items-center gap-[14px] font-mono text-[11px] font-medium leading-none text-ink-3">
+              {active && model.counts.workersRunning > 0 && (
+                <span className="text-ink-2">{model.counts.workersRunning} running</span>
+              )}
+              <span>{confirmed} confirmed</span>
+              <span className="hidden sm:inline">{model.counts.llm} LLM</span>
+              {model.counts.errors > 0 && (
+                <span style={{ color: "var(--red)" }}>{model.counts.errors} errors</span>
+              )}
+              {paperReady && (
+                <Link to={`/campaign/${id}/paper`} className="underline hover:text-ink">
+                  paper
+                </Link>
+              )}
             </div>
           </div>
-          <div className="mt-[9px] flex items-center gap-[10px] pl-[19px]">
-            <span className="line-clamp-2 min-w-0 flex-1 text-[12.5px] leading-[1.45] text-ink-2">
+          <div className="mt-[9px] pl-[19px]">
+            <span className="line-clamp-2 block text-[12.5px] leading-[1.45] text-ink-2">
               {question}
-            </span>
-            <span className="shrink-0 self-start whitespace-nowrap font-mono text-[11px] font-medium leading-none text-ink-3">
-              {agents} agents · {confirmed} confirmed
-              {paperReady && (
-                <>
-                  {" · "}
-                  <Link to={`/campaign/${id}/paper`} className="underline hover:text-ink">
-                    paper
-                  </Link>
-                </>
-              )}
             </span>
           </div>
         </div>
 
-        {/* timeline */}
-        <div
-          ref={scrollRef}
-          onScroll={(e) => {
-            const el = e.currentTarget;
-            atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-          }}
-          className="pp-scroll min-h-0 flex-1 overflow-y-auto px-[26px] pb-2 pt-5"
-        >
-          <Timeline
-            events={events}
+        {/* narrative */}
+        <div className="pp-scroll min-h-0 flex-1 overflow-y-auto px-[26px] pb-2 pt-5">
+          <NarrativeStream
+            narrative={model.narrative}
             start={c?.started_at ?? null}
-            filter={filter}
-            live={{ active: sv.active && connected, source: lastSource }}
+            now={now}
+            live={{ active, label }}
           />
         </div>
 
@@ -121,10 +118,13 @@ export default function Campaign() {
       </main>
 
       <RightPanel
+        model={model}
         tree={c?.hypothesis_tree}
         question={question}
         beliefs={beliefs}
         events={events}
+        now={now}
+        active={active}
         open={rightOpen}
         onToggle={() => setRightOpen((o) => !o)}
       />

@@ -1,0 +1,549 @@
+// Derives structured, legible state from the flat Propab event stream.
+//
+// A real campaign emits hundreds of events over hours (orchestrator phases,
+// hypothesis generation, ~400 LLM calls, worker experiments, verification,
+// synthesis, paper compilation). Showing them raw is a firehose. This module
+// coalesces them into three views the UI can render calmly:
+//
+//   • rounds     — the campaign segmented into research rounds, each summarized
+//                  (hypotheses generated, verdict tallies) and expandable.
+//   • workers    — sub-agents grouped by hypothesis, with lifecycle + activity.
+//   • inFlight   — the units of work running *right now* (worker experiments,
+//                  sandbox code, LLM calls, tool calls) for the tasks panel.
+//   • narrative  — the ordered center-panel story: setup + round groups +
+//                  standalone lifecycle milestones.
+//
+// Everything is a pure function of the event list so it can be memoized and
+// recomputed cheaply on each streamed event (single O(n) pass).
+
+import type { PropabEvent, Verdict } from "../types";
+
+export type WorkerStatus = "running" | "confirmed" | "refuted" | "inconclusive" | "failed";
+
+export interface WorkerStep {
+  index: number;
+  event: PropabEvent;
+  kind: "tool" | "code" | "think" | "stop" | "other";
+  label: string;
+  detail?: string;
+}
+
+export interface Worker {
+  hypothesisId: string;
+  shortId: string;
+  text: string;
+  status: WorkerStatus;
+  verdict: Verdict | null;
+  confidence: number | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  /** monotonic ms since start, or since last activity while running */
+  lastActivityAt: string | null;
+  steps: WorkerStep[];
+  /** latest generated code, if any */
+  currentCode: string | null;
+  llmCalls: number;
+  toolCalls: number;
+  codeRuns: number;
+  errors: number;
+  events: PropabEvent[];
+  round: number | null;
+}
+
+export type InFlightKind = "experiment" | "code" | "llm" | "tool";
+
+export interface InFlightTask {
+  id: string;
+  kind: InFlightKind;
+  title: string;
+  detail: string | null;
+  hypothesisId: string | null;
+  shortId: string | null;
+  source: string;
+  startedAt: string;
+  /** the event that opened this task (for the detail view) */
+  event: PropabEvent;
+}
+
+export interface RoundView {
+  key: string;
+  /** 0 is the pre-round "Setup" bucket; real rounds are 1-based. */
+  number: number;
+  isSetup: boolean;
+  status: "running" | "done";
+  startedAt: string | null;
+  endedAt: string | null;
+  hypothesesGenerated: number;
+  confirmed: number;
+  refuted: number;
+  inconclusive: number;
+  marginalReturn: number | null;
+  /** workers (hypotheses) attributed to this round */
+  workers: Worker[];
+  events: PropabEvent[];
+  llmCalls: number;
+  toolCalls: number;
+  codeRuns: number;
+  errors: number;
+}
+
+export type NarrativeItem =
+  | { kind: "round"; round: RoundView }
+  | { kind: "milestone"; event: PropabEvent };
+
+export interface CampaignModel {
+  rounds: RoundView[];
+  workers: Worker[];
+  inFlight: InFlightTask[];
+  narrative: NarrativeItem[];
+  counts: {
+    llm: number;
+    tool: number;
+    code: number;
+    errors: number;
+    workersRunning: number;
+    workersDone: number;
+  };
+}
+
+// Lifecycle events prominent enough to break out of a round group and show as
+// their own row in the center narrative.
+const MILESTONE_STANDALONE = new Set<string>([
+  "campaign.started",
+  "campaign.breakthrough",
+  "campaign.budget_exhausted",
+  "campaign.completed",
+  "session.completed",
+  "session.failed",
+  "paper.ready",
+]);
+
+function shortId(id: string | null | undefined): string {
+  if (!id) return "";
+  return id.length > 8 ? id.slice(0, 8) : id;
+}
+
+function isErr(t: string): boolean {
+  return t.endsWith(".error") || t.endsWith(".timeout") || t.endsWith(".failed");
+}
+
+// ── Workers ──────────────────────────────────────────────────────────────────
+// A worker is a sub-agent running one hypothesis. We group every hypothesis-
+// scoped event by hypothesis_id and fold it into a lifecycle record.
+
+function buildWorkers(events: PropabEvent[]): Map<string, Worker> {
+  const byHyp = new Map<string, Worker>();
+
+  const ensure = (hid: string): Worker => {
+    let w = byHyp.get(hid);
+    if (!w) {
+      w = {
+        hypothesisId: hid,
+        shortId: shortId(hid),
+        text: "",
+        status: "running",
+        verdict: null,
+        confidence: null,
+        startedAt: null,
+        endedAt: null,
+        lastActivityAt: null,
+        steps: [],
+        currentCode: null,
+        llmCalls: 0,
+        toolCalls: 0,
+        codeRuns: 0,
+        errors: 0,
+        events: [],
+        round: null,
+      };
+      byHyp.set(hid, w);
+    }
+    return w;
+  };
+
+  for (const e of events) {
+    const hid = e.hypothesis_id;
+    if (!hid) continue;
+    const w = ensure(hid);
+    w.events.push(e);
+    w.lastActivityAt = e.timestamp;
+    const p = e.payload || {};
+    const t = e.event_type;
+
+    if (typeof p.text === "string" && p.text && !w.text) w.text = p.text;
+    if (isErr(t)) w.errors += 1;
+
+    switch (t) {
+      case "agent.started":
+        w.startedAt = e.timestamp;
+        w.status = "running";
+        break;
+      case "agent.completed": {
+        w.endedAt = e.timestamp;
+        const v = (p.verdict as Verdict | undefined) ?? null;
+        w.verdict = v;
+        w.confidence = p.confidence != null ? Number(p.confidence) : w.confidence;
+        w.status =
+          v === "confirmed" ? "confirmed" : v === "refuted" ? "refuted" : "inconclusive";
+        break;
+      }
+      case "agent.failed":
+      case "agent.time_budget_exceeded":
+        w.endedAt = e.timestamp;
+        w.status = "failed";
+        break;
+      case "agent.step_started": {
+        const kind =
+          p.action === "stop"
+            ? "stop"
+            : p.tool || p.action === "tool"
+              ? "tool"
+              : p.action === "code"
+                ? "code"
+                : "think";
+        w.steps.push({
+          index: w.steps.length,
+          event: e,
+          kind,
+          label: stepLabel(e),
+          detail: typeof p.reasoning === "string" ? p.reasoning : undefined,
+        });
+        break;
+      }
+      case "tool.called":
+        w.toolCalls += 1;
+        break;
+      case "code.generated":
+        if (typeof p.code === "string") w.currentCode = p.code;
+        break;
+      case "code.result":
+        w.codeRuns += 1;
+        break;
+      case "llm.prompt":
+        w.llmCalls += 1;
+        break;
+    }
+  }
+
+  return byHyp;
+}
+
+function stepLabel(e: PropabEvent): string {
+  const p = e.payload || {};
+  if (p.action === "stop") return "Decided to stop";
+  if (p.tool) return `Tool · ${p.tool}`;
+  if (p.action === "tool") return "Tool call";
+  if (p.action === "code") return "Write & run code";
+  if (typeof p.expected_outcome === "string") return p.expected_outcome;
+  return "Reasoning step";
+}
+
+// ── In-flight tasks ──────────────────────────────────────────────────────────
+// The "what's running now" set. We pair each open event with its completion and
+// keep the leftovers. Precise keys (step / hypothesis) avoid mismatches; closing
+// an unknown key is a harmless no-op (handles trimmed history).
+
+function buildInFlight(events: PropabEvent[], workers: Map<string, Worker>): InFlightTask[] {
+  const openCode = new Map<string, PropabEvent>();
+  const openTool = new Map<string, PropabEvent>();
+  // llm prompts pair FIFO per (source|hypothesis) context
+  const openLlm = new Map<string, PropabEvent[]>();
+  const runningWorkers = new Set<string>();
+
+  const llmKey = (e: PropabEvent) => `${e.source}|${e.hypothesis_id ?? "root"}`;
+
+  for (const e of events) {
+    const t = e.event_type;
+    const hid = e.hypothesis_id;
+    switch (t) {
+      case "agent.started":
+        if (hid) runningWorkers.add(hid);
+        break;
+      case "agent.completed":
+      case "agent.failed":
+      case "agent.time_budget_exceeded":
+        if (hid) runningWorkers.delete(hid);
+        break;
+      case "code.generated":
+      case "code.submitted":
+        openCode.set(e.step, e);
+        break;
+      case "code.result":
+      case "code.error":
+      case "code.timeout":
+        openCode.delete(e.step);
+        break;
+      case "tool.called":
+        openTool.set(e.step + "|" + (e.payload?.tool ?? ""), e);
+        break;
+      case "tool.result":
+      case "tool.error":
+        openTool.delete(e.step + "|" + (e.payload?.tool ?? ""));
+        break;
+      case "llm.prompt": {
+        const k = llmKey(e);
+        (openLlm.get(k) ?? openLlm.set(k, []).get(k)!).push(e);
+        break;
+      }
+      case "llm.response":
+      case "llm.parse_error": {
+        const k = llmKey(e);
+        openLlm.get(k)?.shift();
+        break;
+      }
+    }
+  }
+
+  const tasks: InFlightTask[] = [];
+
+  for (const hid of runningWorkers) {
+    const w = workers.get(hid);
+    const startEvt = w?.events.find((x) => x.event_type === "agent.started") ?? w?.events[0];
+    if (!startEvt) continue;
+    tasks.push({
+      id: `exp:${hid}`,
+      kind: "experiment",
+      title: w?.text ? truncate(w.text, 60) : `Experiment ${shortId(hid)}`,
+      detail: w ? `${w.steps.length} steps · ${w.toolCalls} tools · ${w.codeRuns} runs` : null,
+      hypothesisId: hid,
+      shortId: shortId(hid),
+      source: "worker",
+      startedAt: w?.startedAt ?? w?.lastActivityAt ?? startEvt.timestamp,
+      event: startEvt,
+    });
+  }
+
+  for (const e of openCode.values()) {
+    tasks.push({
+      id: `code:${e.event_id}`,
+      kind: "code",
+      title: "Running code in sandbox",
+      detail: firstCodeLine(e.payload?.code),
+      hypothesisId: e.hypothesis_id,
+      shortId: e.hypothesis_id ? shortId(e.hypothesis_id) : null,
+      source: e.source,
+      startedAt: e.timestamp,
+      event: e,
+    });
+  }
+
+  for (const e of openTool.values()) {
+    tasks.push({
+      id: `tool:${e.event_id}`,
+      kind: "tool",
+      title: `Tool · ${e.payload?.tool ?? "call"}`,
+      detail: e.hypothesis_id ? `hypothesis ${shortId(e.hypothesis_id)}` : null,
+      hypothesisId: e.hypothesis_id,
+      shortId: e.hypothesis_id ? shortId(e.hypothesis_id) : null,
+      source: e.source,
+      startedAt: e.timestamp,
+      event: e,
+    });
+  }
+
+  for (const arr of openLlm.values()) {
+    for (const e of arr) {
+      const purpose = e.payload?.purpose ?? "call";
+      tasks.push({
+        id: `llm:${e.event_id}`,
+        kind: "llm",
+        title: `LLM · ${String(purpose).replace(/_/g, " ")}`,
+        detail: e.payload?.model ? String(e.payload.model) : null,
+        hypothesisId: e.hypothesis_id,
+        shortId: e.hypothesis_id ? shortId(e.hypothesis_id) : null,
+        source: e.source,
+        startedAt: e.timestamp,
+        event: e,
+      });
+    }
+  }
+
+  // Most recently started first.
+  tasks.sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || ""));
+  return tasks;
+}
+
+function firstCodeLine(code: unknown): string | null {
+  if (typeof code !== "string") return null;
+  const line = code.split("\n").find((l) => l.trim() && !l.trim().startsWith("#"));
+  return line ? truncate(line.trim(), 56) : null;
+}
+
+// ── Rounds + narrative ───────────────────────────────────────────────────────
+// Segment the ordered stream into a Setup bucket and per-round buckets by the
+// round.started / round.completed boundaries (positional — so worker/LLM events
+// that occur during a round are captured even though they don't carry a round
+// number). Lifecycle milestones break out as standalone narrative rows.
+
+function buildRounds(events: PropabEvent[], workers: Map<string, Worker>): {
+  rounds: RoundView[];
+  narrative: NarrativeItem[];
+} {
+  const narrative: NarrativeItem[] = [];
+  const rounds: RoundView[] = [];
+
+  let current: RoundView = newRound(0, true);
+  let hasSetupContent = false;
+
+  const pushCurrent = () => {
+    if (current.isSetup && !hasSetupContent) return;
+    rounds.push(current);
+    narrative.push({ kind: "round", round: current });
+  };
+
+  for (const e of events) {
+    const t = e.event_type;
+
+    if (t === "round.started") {
+      pushCurrent();
+      const num = Number(e.payload?.round ?? rounds.length) || rounds.length + 1;
+      current = newRound(num, false);
+      current.startedAt = e.timestamp;
+      current.events.push(e);
+      continue;
+    }
+
+    if (MILESTONE_STANDALONE.has(t)) {
+      narrative.push({ kind: "milestone", event: e });
+      // campaign.started still counts as setup context but is shown standalone.
+      continue;
+    }
+
+    current.events.push(e);
+    if (current.isSetup) hasSetupContent = true;
+    tallyRound(current, e);
+
+    if (t === "round.completed") {
+      current.status = "done";
+      current.endedAt = e.timestamp;
+      const p = e.payload || {};
+      current.confirmed = Number(p.confirmed ?? current.confirmed) || 0;
+      current.refuted = Number(p.refuted ?? current.refuted) || 0;
+      current.inconclusive = Number(p.inconclusive ?? current.inconclusive) || 0;
+      current.marginalReturn = p.marginal_return != null ? Number(p.marginal_return) : null;
+      pushCurrent();
+      current = newRound(current.number, false);
+      current.status = "done"; // interlude bucket, only surfaces if it gets content
+      hasSetupContent = false;
+      // reset interlude as a fresh setup-like bucket that won't show unless filled
+      current.isSetup = true;
+      continue;
+    }
+  }
+  pushCurrent();
+
+  // Attribute workers to rounds by membership of their events.
+  const roundOfEvent = new Map<string, number>();
+  rounds.forEach((r, i) => r.events.forEach((e) => roundOfEvent.set(e.event_id, i)));
+  for (const w of workers.values()) {
+    const idx = w.events.map((e) => roundOfEvent.get(e.event_id)).find((x) => x != null);
+    if (idx != null) {
+      w.round = rounds[idx].isSetup ? null : rounds[idx].number;
+      rounds[idx].workers.push(w);
+    }
+  }
+
+  // If a round never emitted an explicit tally, derive it from its workers.
+  for (const r of rounds) {
+    if (r.confirmed + r.refuted + r.inconclusive === 0 && r.workers.length) {
+      for (const w of r.workers) {
+        if (w.status === "confirmed") r.confirmed += 1;
+        else if (w.status === "refuted") r.refuted += 1;
+        else if (w.status === "inconclusive") r.inconclusive += 1;
+      }
+    }
+    if (!r.hypothesesGenerated && r.workers.length) r.hypothesesGenerated = r.workers.length;
+  }
+
+  return { rounds, narrative };
+}
+
+function newRound(number: number, isSetup: boolean): RoundView {
+  return {
+    // Stable across rebuilds so React preserves each card's collapsed state.
+    key: isSetup ? `setup-${number}` : `round-${number}`,
+    number,
+    isSetup,
+    status: "running",
+    startedAt: null,
+    endedAt: null,
+    hypothesesGenerated: 0,
+    confirmed: 0,
+    refuted: 0,
+    inconclusive: 0,
+    marginalReturn: null,
+    workers: [],
+    events: [],
+    llmCalls: 0,
+    toolCalls: 0,
+    codeRuns: 0,
+    errors: 0,
+  };
+}
+
+function tallyRound(r: RoundView, e: PropabEvent) {
+  const t = e.event_type;
+  const p = e.payload || {};
+  if (t === "llm.prompt") r.llmCalls += 1;
+  else if (t === "tool.called") r.toolCalls += 1;
+  else if (t === "code.result") r.codeRuns += 1;
+  if (isErr(t)) r.errors += 1;
+  if (t === "hypothesis.generated") {
+    const n = Array.isArray(p.hypotheses) ? p.hypotheses.length : Number(p.count ?? 0);
+    if (n) r.hypothesesGenerated += n;
+  }
+  if (t === "hypothesis.ranked" && Array.isArray(p.hypotheses)) {
+    r.hypothesesGenerated = Math.max(r.hypothesesGenerated, p.hypotheses.length);
+  }
+}
+
+function truncate(s: string, n: number): string {
+  if (!s) return "";
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+}
+
+// ── Public entry point ───────────────────────────────────────────────────────
+
+export function buildCampaignModel(events: PropabEvent[]): CampaignModel {
+  const workerMap = buildWorkers(events);
+  const inFlight = buildInFlight(events, workerMap);
+  const { rounds, narrative } = buildRounds(events, workerMap);
+
+  const workers = Array.from(workerMap.values());
+  // Running first, then most-recent activity.
+  workers.sort((a, b) => {
+    const ar = a.status === "running" ? 0 : 1;
+    const br = b.status === "running" ? 0 : 1;
+    if (ar !== br) return ar - br;
+    return (b.lastActivityAt || "").localeCompare(a.lastActivityAt || "");
+  });
+
+  let llm = 0,
+    tool = 0,
+    code = 0,
+    errors = 0;
+  for (const e of events) {
+    const t = e.event_type;
+    if (t === "llm.prompt") llm += 1;
+    else if (t === "tool.called") tool += 1;
+    else if (t === "code.result") code += 1;
+    if (isErr(t)) errors += 1;
+  }
+
+  const workersRunning = workers.filter((w) => w.status === "running").length;
+
+  return {
+    rounds,
+    workers,
+    inFlight,
+    narrative,
+    counts: {
+      llm,
+      tool,
+      code,
+      errors,
+      workersRunning,
+      workersDone: workers.length - workersRunning,
+    },
+  };
+}
