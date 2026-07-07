@@ -234,6 +234,35 @@ class DomainPlugin(ABC):
             "null_test": "",
         }
 
+    # --- Campaign objective -------------------------------------------------
+    def objective_spec(self) -> dict[str, Any] | None:
+        """Domain-native optimization objective used to score a campaign.
+
+        Core reads this at campaign creation to choose the metric/direction and
+        the baseline *frame* — instead of the generic ML default (``val_accuracy``
+        with a trained baseline). Return ``None`` for a domain with no numeric
+        extremal objective (the campaign then falls back to the request criteria).
+
+        Keys (all optional except ``metric_name``):
+          - ``metric_name``: domain metric label. MUST NOT contain an ML token
+            (``accuracy``/``loss``/``f1``/…) or core will mis-classify the run as
+            an ML training campaign and measure a meaningless trained baseline.
+          - ``direction``: ``"higher_is_better"`` | ``"lower_is_better"``.
+          - ``is_ml``: ``False`` for computational/verification domains (math,
+            combinatorics, graph invariants). When ``False``, core skips ML
+            baseline measurement and judges hypotheses by deterministic
+            verification (the ``baseline_value≈0`` confirmation frame), which is
+            what these domains actually use.
+          - ``baseline_kind``: how a baseline is established, e.g.
+            ``"best_known"`` (beat the best-known value for the object) or
+            ``"measured"``. Advisory; the numeric per-object best-known lives in
+            the domain verifier, not in this campaign-level scalar.
+
+        Domain-independence: the *shape* lives in core; every concrete value is
+        supplied by the plugin.
+        """
+        return None
+
     # --- Domain preflight ---------------------------------------------------
     def has_verification_capability(self) -> bool:
         """

@@ -309,6 +309,25 @@ class MathCombinatoricsPlugin(DomainPlugin):
             "verification_type": "deterministic",
         }
 
+    def objective_spec(self) -> dict[str, Any]:
+        """Combinatorics is judged by deterministic verification against the
+        best-known value for each object — never by a trained ML metric.
+
+        ``is_ml=False`` is the load-bearing flag: it stops core from measuring a
+        meaningless MLP baseline (the v1 math campaign 1ae74abd was mis-scored
+        against ``val_accuracy=0.875`` and could not, structurally, register a
+        record). The metric label deliberately contains no ML token so the
+        campaign runs in the deterministic ``baseline_value≈0`` confirmation
+        frame, where a hypothesis confirms by surviving exhaustive counterexample
+        search rather than beating a scalar accuracy.
+        """
+        return {
+            "metric_name": "extremal_witness_ratio",
+            "direction": "higher_is_better",
+            "is_ml": False,
+            "baseline_kind": "best_known",
+        }
+
     def preflight(self) -> PreflightResult:
         try:
             def is_sidon(s: set[int]) -> bool:

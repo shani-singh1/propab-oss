@@ -32,6 +32,7 @@ from propab.campaign_db import (
     db_save_campaign,
 )
 from propab.config import settings
+from propab.domain_modules.registry import resolve_domain_plugin
 from propab.events import EventEmitter
 from propab.types import EventType
 from services.api.app.deps import get_emitter, get_session_factory
@@ -317,17 +318,36 @@ async def create_campaign(
     """
     campaign_id = str(uuid4())
     bc = request.breakthrough_criteria
+    metric_name = bc.metric_name
+    direction = bc.direction
+    # When the campaign routes to a domain that declares its own objective (math /
+    # graph verification domains), adopt the DOMAIN metric + direction instead of the
+    # generic ML default (val_accuracy). Without this a computational campaign is
+    # scored against a trained MLP baseline it can never beat: campaign 1ae74abd ran
+    # math_combinatorics with metric_name=val_accuracy, so _is_ml_campaign() saw
+    # "accuracy", measured baseline_metric=0.875, and best_metric stayed 0.0 the whole
+    # run — no cap-set/Sidon construction could register a record. See the deep
+    # post-mortem. Only override when the caller left the default in place.
+    if bc.metric_name == "val_accuracy":
+        try:
+            _plugin = resolve_domain_plugin(question=request.question)
+            _obj = _plugin.objective_spec() if _plugin is not None else None
+        except Exception:  # noqa: BLE001 — routing/objective errors must not block launch
+            _obj = None
+        if _obj and _obj.get("metric_name"):
+            metric_name = str(_obj["metric_name"])
+            direction = str(_obj.get("direction") or direction)
     plausibility_max = bc.plausibility_max
     if (
         plausibility_max is None
-        and bc.direction == "higher_is_better"
-        and "accuracy" in (bc.metric_name or "").lower()
+        and direction == "higher_is_better"
+        and "accuracy" in (metric_name or "").lower()
     ):
         plausibility_max = ACC_METRIC_PLAUSIBILITY_MAX
     criteria = BreakthroughCriteria(
-        metric_name=bc.metric_name,
+        metric_name=metric_name,
         improvement_threshold=bc.improvement_threshold,
-        direction=bc.direction,
+        direction=direction,
         min_confidence=bc.min_confidence,
         min_replications=bc.min_replications,
         plausibility_max=plausibility_max,
