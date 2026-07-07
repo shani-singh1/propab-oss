@@ -146,6 +146,14 @@ class LiteraturePipeline:
         self, *, research_question: str, domain_id: str, profile: dict[str, Any], depth: str = "standard"
     ) -> PriorResponse:
         timeout = self.settings.depth_timeout_sec.get(depth, 60)
+        # The budget is passed INTO the pipeline as a soft deadline: when it is
+        # hit, the pipeline synthesizes a prior from whatever docs/claims it has
+        # gathered so far instead of throwing everything away. A slightly-slow
+        # build now yields partial real results, not an empty response.
+        # ``asyncio.wait_for`` remains as an outer hard safety net (with a small
+        # grace margin over the soft deadline, so the soft path — which returns
+        # partial results — normally fires first); on the rare hard timeout we
+        # still degrade to an empty prior so the caller can fall back.
         try:
             return await asyncio.wait_for(
                 run_query_pipeline(
@@ -154,13 +162,14 @@ class LiteraturePipeline:
                     domain_id=domain_id,
                     profile=profile,
                     depth=depth,
+                    deadline_sec=timeout,
                 ),
-                timeout=timeout,
+                timeout=timeout + 5,
             )
         except asyncio.TimeoutError:
-            # A slow source must never fail the whole request — return
-            # whatever partial structure is safe (empty), the caller falls
-            # back to the domain plugin's built-in prior.
+            # Hard net tripped (synthesis itself stalled past the grace margin):
+            # never fail the whole request — return an empty-but-valid prior and
+            # let the caller fall back to the domain plugin's built-in prior.
             from services.literature.app.models import NoveltyBar
 
             return PriorResponse(
