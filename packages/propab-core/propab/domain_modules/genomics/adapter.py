@@ -89,6 +89,19 @@ def dataset_is_synthetic() -> bool:
         return True
 
 
+def real_data_cached() -> bool:
+    """True only when a REAL (non-synthetic) GTEx cache is already on disk.
+
+    Unlike ``dataset_is_synthetic()`` this NEVER triggers a network fetch: it
+    reads the existing cache meta and returns False when the cache is absent or
+    was produced by the synthetic fallback. Real-data tests use this to
+    ``pytest.skip`` cleanly (green-with-skips) instead of downloading GTEx in CI
+    or vacuously passing on the synthetic frame. Run
+    ``scripts/build_real_domain_datasets.py`` to populate the real cache.
+    """
+    return cache_path().is_file() and not dataset_is_synthetic()
+
+
 def compute_gene_features(df: pd.DataFrame) -> pd.DataFrame:
     """Gene-level features from a (gene_id, tissue, expression) long frame."""
     pivot = df.pivot_table(index="gene_id", columns="tissue", values="expression", aggfunc="mean")

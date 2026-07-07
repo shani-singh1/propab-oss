@@ -46,6 +46,11 @@ artifacts/*
 # Codebase investigation report (living map of architecture + failure analysis)
 !artifacts/codebase_investigation.md
 
+# Biology domains v1 — live end-to-end validation transcript + reproducible runner
+!artifacts/biology_live_validation.md
+!artifacts/biology_live_validation.json
+!artifacts/run_biology_live_validation.py
+
 # Bench-harness baselines (regression-catchable engineering metrics)
 !artifacts/bench/
 !artifacts/bench/*.json
