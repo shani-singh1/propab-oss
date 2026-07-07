@@ -31,9 +31,10 @@ lookup or a story.
    from a table with no witness is always demoted. Do not oversell a match as a discovery.
 
 4. **Respect the exhaustive-enumeration limit.** Distance is certified only for
-   k ≤ 20 (2^k enumeration must be complete to be honest). Above that the engine refuses
-   to certify — so target the open gap at small-to-moderate k where a full enumeration is
-   feasible, not a large k where no honest witness exists.
+   k ≤ 16 (the 2^k enumeration must be complete to be honest, and is capped for
+   production wall-clock safety). Above that the engine refuses to certify — so target
+   the open gap at small-to-moderate k where a full enumeration is feasible, not a
+   large k where no honest witness exists.
 
 5. **State the failure regime and the null.** Name the ceiling (Singleton/Hamming/
    Plotkin) the code must not cross — if the computed d claims to exceed it, the witness
