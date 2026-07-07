@@ -86,6 +86,29 @@ class GenomicsPlugin(DomainPlugin):
             "verification_type": "statistical",
         }
 
+    def objective_spec(self) -> dict[str, Any]:
+        """Genomics is scored by a held-out *statistic*, not a trained ML metric.
+
+        The verifier measures a leave-one-tissue-out R² (``lofo_r2`` in
+        ``genomics/verifier.py``): how well a cross-tissue expression relationship
+        survives holding out an entire tissue, gated by a tissue-label-shuffle
+        null. That is statistical holdout evidence, not MLP training.
+
+        ``is_ml=False`` is load-bearing: without it core would see the default
+        ``val_accuracy`` breakthrough metric (or a "regression"-shaped question)
+        and measure a meaningless trained baseline, exactly the 1ae74abd
+        mis-scoring. The metric label carries no ML token, and there is no external
+        best-known table for these subset LOFO R²'s, so ``baseline_kind`` is
+        ``"measured"`` (established from the domain's own holdout), not
+        ``"best_known"``.
+        """
+        return {
+            "metric_name": "lofo_r2",
+            "direction": "higher_is_better",
+            "is_ml": False,
+            "baseline_kind": "measured",
+        }
+
     def run_verification(
         self,
         hypothesis: dict[str, Any],

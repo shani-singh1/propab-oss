@@ -94,6 +94,28 @@ class MandrakePlugin(DomainPlugin):
 
         return list(_KNOWN_FEATURES)
 
+    def objective_spec(self) -> dict[str, Any]:
+        """Mandrake (RT-family) is scored by a held-out R², not a trained ML metric.
+
+        The adapter reports ``metric="lofo_r2"`` with ``metric_value`` = the
+        leave-one-family-out R² (``mandrake_adapter.py``): whether a biophysical
+        signal for RT activity survives holding out an entire evolutionary family,
+        gated by a family-label-shuffle permutation null and a low-identity
+        clustered split. Statistical holdout evidence, not MLP training.
+
+        ``is_ml=False`` keeps a mandrake campaign out of the ML baseline path (the
+        1ae74abd mis-scoring), which matters because its contrarian rival beliefs
+        are decided by whether the held-out R² clears the null, not by beating a
+        trained-accuracy scalar. No external best-known table exists for this
+        56-sequence LOFO R², so the baseline is ``"measured"``.
+        """
+        return {
+            "metric_name": "lofo_r2",
+            "direction": "higher_is_better",
+            "is_ml": False,
+            "baseline_kind": "measured",
+        }
+
     def run_verification(
         self,
         hypothesis: dict[str, Any],

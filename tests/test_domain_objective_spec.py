@@ -16,8 +16,10 @@ from propab.domain_modules.registry import get_domain_plugin, resolve_domain_plu
 
 def test_base_default_objective_spec_is_none():
     # A domain with no numeric extremal objective returns None (falls back to request
-    # criteria). enzyme_kinetics/network_diffusion don't override -> None.
-    plugin = get_domain_plugin("network_diffusion")
+    # criteria). graph_invariants does not override -> base default None.
+    # (Biology domains — genomics/enzyme_kinetics/network_diffusion/mandrake — now
+    # DO override with is_ml=False; see tests/test_biology_objective_spec.py.)
+    plugin = get_domain_plugin("graph_invariants")
     assert plugin is not None
     assert plugin.objective_spec() is None
 
