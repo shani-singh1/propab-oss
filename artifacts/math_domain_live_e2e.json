@@ -1,0 +1,703 @@
+{
+  "generated_at": "2026-07-07T12:33:54Z",
+  "llm": {
+    "provider": "gemini",
+    "model": "gemini-3-flash-preview",
+    "live": true
+  },
+  "note": "LIVE end-to-end: real Gemini generation using the actual domain skill files as the generation context (skills-driven path), then the REAL-compute verifiers (exhaustive GF(2) min-distance / cap-set construction with independent witness re-check) and the plugin's honest classify_verdict.",
+  "cases": [
+    {
+      "domain": "coding_theory",
+      "question": "Open question: for small binary linear codes over GF(2) with k <= 12, can an explicit generator matrix beat the best-known minimum distance tabulated by Brouwer/Grassl? Propose concrete, computable [n,k] targets and a falsifiable distance claim for each.",
+      "skills_used": [
+        "coding_theory/linear-code-construction-families.skill.md",
+        "coding_theory/witnessed-code-vs-best-known.skill.md"
+      ],
+      "llm_generation_seconds": 38.07,
+      "raw_llm_response": "[\n  {\n    \"statement\": \"A [50, 12] cyclic code construction admits a minimum distance d >= 19, exceeding the current Brouwer/Grassl lower bound of 18.\",\n    \"test_methodology\": \"exhaustive enumeration\",\n    \"target_nk\": \"[50,12]\",\n    \"claimed_d\": 19,\n    \"novelty_rationale\": \"The best-known lower bound for a [50, 12] binary linear code is 18, while the upper bound is 20. Finding a code with d=19 would strictly exceed the tabulated lower bound and narrow the gap toward the theoretical limit.\"\n  },\n  {\n    \"statement\": \"A [70, 12] cyclic code construction admits a minimum distance d >= 27, exceeding the current Brouwer/Grassl lower bound of 26.\",\n    \"test_methodology\": \"exhaustive enumeration\",\n    \"target_nk\": \"[70,12]\",\n    \"claimed_d\": 27,\n    \"novelty_rationale\": \"The current best-known lower bound for [70, 12] is 26, with an upper bound of 28. Proposing d=27 targets the open gap in the small-k regime where exhaustive enumeration of the 4095 nonzero codewords is computationally trivial but the distance bound remains unclosed.\"\n  },\n  {\n    \"statement\": \"A [90, 12] cyclic code construction admits a minimum distance d >= 35, exceeding the current Brouwer/Grassl lower bound of 34.\",\n    \"test_methodology\": \"exhaustive enumeration\",\n    \"target_nk\": \"[90,12]\",\n    \"claimed_d\": 35,\n    \"novelty_rationale\": \"For [90, 12], the Brouwer/Grassl table reports a lower bound of 34 and an upper bound of 38. A verified witness for d=35 would constitute a discovery by improving the lower bound in a regime where cyclic codes often provide optimal or near-optimal distance.\"\n  }\n]",
+      "hypotheses": [
+        {
+          "statement": "A [50, 12] cyclic code construction admits a minimum distance d >= 19, exceeding the current Brouwer/Grassl lower bound of 18.",
+          "test_methodology": "exhaustive enumeration",
+          "claimed_d": 19,
+          "novelty_rationale": "The best-known lower bound for a [50, 12] binary linear code is 18, while the upper bound is 20. Finding a code with d=19 would strictly exceed the tabulated lower bound and narrow the gap toward the theoretical limit.",
+          "on_topic": true,
+          "computed": {
+            "n": 50,
+            "k": 12,
+            "computed_min_distance": 12,
+            "best_known_distance": null,
+            "witness_codeword": [
+              0,
+              0,
+              1,
+              0,
+              1,
+              0,
+              1,
+              1,
+              1,
+              0,
+              0,
+              0,
+              1,
+              1,
+              0,
+              0,
+              1,
+              0,
+              0,
+              0,
+              0,
+              1,
+              1,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              1,
+              0,
+              0,
+              0,
+              1,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "witness_recheck_ok": true,
+            "codewords_enumerated": 4095,
+            "enumeration_complete": true
+          },
+          "honesty": {
+            "discovery_worthy": false,
+            "trivial_rediscovery": false,
+            "verified_true_steps": 0,
+            "verified_false_steps": 1
+          },
+          "verdict": "refuted",
+          "verdict_confidence": 0.95,
+          "verdict_reason": "systematic random [50,12] generator (seed=0). Built real [50,12] code; computed d=12 REFUTES claim d>=19 (witness weight 12)."
+        },
+        {
+          "statement": "A [70, 12] cyclic code construction admits a minimum distance d >= 27, exceeding the current Brouwer/Grassl lower bound of 26.",
+          "test_methodology": "exhaustive enumeration",
+          "claimed_d": 27,
+          "novelty_rationale": "The current best-known lower bound for [70, 12] is 26, with an upper bound of 28. Proposing d=27 targets the open gap in the small-k regime where exhaustive enumeration of the 4095 nonzero codewords is computationally trivial but the distance bound remains unclosed.",
+          "on_topic": true,
+          "computed": {
+            "n": 70,
+            "k": 12,
+            "computed_min_distance": 19,
+            "best_known_distance": null,
+            "witness_codeword": [
+              0,
+              0,
+              0,
+              0,
+              1,
+              0,
+              0,
+              0,
+              1,
+              0,
+              0,
+              0,
+              0,
+              1,
+              1,
+              0,
+              1,
+              0,
+              1,
+              1,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              1,
+              0,
+              1,
+              1,
+              0,
+              0,
+              1,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              1,
+              0,
+              0,
+              0,
+              1,
+              1,
+              1,
+              1,
+              0,
+              0,
+              1,
+              0,
+              0,
+              0,
+              1,
+              0,
+              0,
+              0,
+              0,
+              1,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "witness_recheck_ok": true,
+            "codewords_enumerated": 4095,
+            "enumeration_complete": true
+          },
+          "honesty": {
+            "discovery_worthy": false,
+            "trivial_rediscovery": false,
+            "verified_true_steps": 0,
+            "verified_false_steps": 1
+          },
+          "verdict": "refuted",
+          "verdict_confidence": 0.95,
+          "verdict_reason": "systematic random [70,12] generator (seed=0). Built real [70,12] code; computed d=19 REFUTES claim d>=27 (witness weight 19)."
+        },
+        {
+          "statement": "A [90, 12] cyclic code construction admits a minimum distance d >= 35, exceeding the current Brouwer/Grassl lower bound of 34.",
+          "test_methodology": "exhaustive enumeration",
+          "claimed_d": 35,
+          "novelty_rationale": "For [90, 12], the Brouwer/Grassl table reports a lower bound of 34 and an upper bound of 38. A verified witness for d=35 would constitute a discovery by improving the lower bound in a regime where cyclic codes often provide optimal or near-optimal distance.",
+          "on_topic": true,
+          "computed": {
+            "n": 90,
+            "k": 12,
+            "computed_min_distance": 27,
+            "best_known_distance": null,
+            "witness_codeword": [
+              1,
+              0,
+              1,
+              1,
+              0,
+              0,
+              1,
+              1,
+              0,
+              0,
+              0,
+              0,
+              1,
+              0,
+              0,
+              0,
+              1,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              1,
+              0,
+              1,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              1,
+              0,
+              0,
+              0,
+              0,
+              1,
+              0,
+              1,
+              0,
+              1,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              1,
+              0,
+              0,
+              1,
+              1,
+              1,
+              0,
+              1,
+              1,
+              0,
+              0,
+              1,
+              0,
+              1,
+              1,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              1,
+              1,
+              0,
+              0,
+              1,
+              0,
+              1,
+              1
+            ],
+            "witness_recheck_ok": true,
+            "codewords_enumerated": 4095,
+            "enumeration_complete": true
+          },
+          "honesty": {
+            "discovery_worthy": false,
+            "trivial_rediscovery": false,
+            "verified_true_steps": 0,
+            "verified_false_steps": 1
+          },
+          "verdict": "refuted",
+          "verdict_confidence": 0.95,
+          "verdict_reason": "systematic random [90,12] generator (seed=0). Built real [90,12] code; computed d=27 REFUTES claim d>=35 (witness weight 27)."
+        }
+      ]
+    },
+    {
+      "domain": "math_combinatorics",
+      "question": "Open question: in F_3^n, how large a cap set can an explicit, computable construction produce, and how does it compare to the best-known (OEIS A090245) sizes? Target the open regime (n >= 7) with a construction that yields a checkable witness.",
+      "skills_used": [
+        "math_combinatorics/cap-set-and-extremal-constructions.skill.md"
+      ],
+      "llm_generation_seconds": 61.57,
+      "raw_llm_response": "[\n  {\n    \"statement\": \"A computed cap set in F_3^7, formed by a local repair and greedy expansion of the product of an n=6 cap (size 112) and an n=1 cap (size 2), achieves a size of at least 225.\",\n    \"test_methodology\": \"product construction\",\n    \"target_n\": 7,\n    \"novelty_rationale\": \"The current best-known value for n=7 is often cited as 222 (Edel, 2004); however, the proven size for n=6 is 112, which implies a direct product size of 224. This hypothesis tests if local repair can exceed this trivial doubling in the open regime.\"\n  },\n  {\n    \"statement\": \"A cap set in F_3^8 invariant under the action of a cyclic shift of coordinates achieves a size of at least 500.\",\n    \"test_methodology\": \"symmetry-restricted search\",\n    \"target_n\": 8,\n    \"novelty_rationale\": \"The current record for n=8 is 496; restricting the search space to subsets invariant under the cyclic group C_8 allows for a more exhaustive search of structured configurations that may exceed the bounds found by general-purpose greedy or randomized heuristics.\"\n  },\n  {\n    \"statement\": \"An explicit construction in F_3^9 using a greedy selection rule weighted by the minimization of the maximum Fourier coefficient of the indicator function produces a cap set of size at least 1080.\",\n    \"test_methodology\": \"Fourier-analytic / pseudorandomness criteria\",\n    \"target_n\": 9,\n    \"novelty_rationale\": \"The current record for n=9 is 1064; using Fourier-analytic criteria to maintain 'spread' and delay the density collapse characteristic of greedy algorithms is a sophisticated technique to improve lower bounds on the growth exponent.\"\n  }\n]",
+      "hypotheses": [
+        {
+          "statement": "A computed cap set in F_3^7, formed by a local repair and greedy expansion of the product of an n=6 cap (size 112) and an n=1 cap (size 2), achieves a size of at least 225.",
+          "test_methodology": "product construction",
+          "novelty_rationale": "The current best-known value for n=7 is often cited as 222 (Edel, 2004); however, the proven size for n=6 is 112, which implies a direct product size of 224. This hypothesis tests if local repair can exceed this trivial doubling in the open regime.",
+          "on_topic": true,
+          "computed": {
+            "n": 7,
+            "cap_set_size": 180,
+            "best_known_size": 236,
+            "cap_valid": true,
+            "vs_best_known": "below_best_known",
+            "construction_source": "computed",
+            "construction_method": "product_construction(4, 3)",
+            "witness_kind": "full_point_set",
+            "example_cap": [
+              [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                0
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                1
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                1,
+                0,
+                0
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                1,
+                0,
+                1
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                1,
+                1,
+                2
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                1,
+                2,
+                2
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                2,
+                1,
+                2
+              ],
+              [
+                0,
+                0,
+                0,
+                1,
+                0,
+                0,
+                0
+              ]
+            ]
+          },
+          "honesty": {
+            "discovery_worthy": true,
+            "trivial_rediscovery": false
+          },
+          "verdict": "refuted",
+          "verdict_confidence": 0.95,
+          "verdict_reason": "Computed a real, independently-validated cap in F_3^7 of size 180 via product_construction(4, 3); below best-known 236 (honest gap 56). Witness: full_point_set. REFUTED: claim >= 225 but computed 180"
+        },
+        {
+          "statement": "A cap set in F_3^8 invariant under the action of a cyclic shift of coordinates achieves a size of at least 500.",
+          "test_methodology": "symmetry-restricted search",
+          "novelty_rationale": "The current record for n=8 is 496; restricting the search space to subsets invariant under the cyclic group C_8 allows for a more exhaustive search of structured configurations that may exceed the bounds found by general-purpose greedy or randomized heuristics.",
+          "on_topic": true,
+          "computed": {
+            "n": 8,
+            "cap_set_size": 400,
+            "best_known_size": 496,
+            "cap_valid": true,
+            "vs_best_known": "below_best_known",
+            "construction_source": "computed",
+            "construction_method": "product_construction(4, 4)",
+            "witness_kind": "full_point_set",
+            "example_cap": [
+              [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                0
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                1
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                0,
+                0
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                0,
+                1
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                1,
+                0
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                1,
+                1
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                1,
+                0,
+                0,
+                0
+              ],
+              [
+                0,
+                0,
+                0,
+                0,
+                1,
+                0,
+                0,
+                1
+              ]
+            ]
+          },
+          "honesty": {
+            "discovery_worthy": true,
+            "trivial_rediscovery": false
+          },
+          "verdict": "refuted",
+          "verdict_confidence": 0.95,
+          "verdict_reason": "Computed a real, independently-validated cap in F_3^8 of size 400 via product_construction(4, 4); below best-known 496 (honest gap 96). Witness: full_point_set. REFUTED: claim >= 500 but computed 400"
+        },
+        {
+          "statement": "An explicit construction in F_3^9 using a greedy selection rule weighted by the minimization of the maximum Fourier coefficient of the indicator function produces a cap set of size at least 1080.",
+          "test_methodology": "Fourier-analytic / pseudorandomness criteria",
+          "novelty_rationale": "The current record for n=9 is 1064; using Fourier-analytic criteria to maintain 'spread' and delay the density collapse characteristic of greedy algorithms is a sophisticated technique to improve lower bounds on the growth exponent.",
+          "on_topic": false,
+          "computed": {
+            "n": 4,
+            "cap_set_size": 20,
+            "best_known_size": 20,
+            "cap_valid": true,
+            "vs_best_known": "matches_best_known",
+            "construction_source": "computed",
+            "construction_method": "exhaustive_branch_and_bound",
+            "witness_kind": "full_point_set",
+            "example_cap": [
+              [
+                0,
+                0,
+                0,
+                0
+              ],
+              [
+                0,
+                0,
+                0,
+                1
+              ],
+              [
+                0,
+                0,
+                1,
+                0
+              ],
+              [
+                0,
+                0,
+                1,
+                1
+              ],
+              [
+                0,
+                1,
+                0,
+                0
+              ],
+              [
+                0,
+                1,
+                0,
+                1
+              ],
+              [
+                0,
+                1,
+                1,
+                0
+              ],
+              [
+                0,
+                1,
+                1,
+                1
+              ],
+              [
+                1,
+                0,
+                0,
+                0
+              ],
+              [
+                1,
+                0,
+                0,
+                1
+              ]
+            ]
+          },
+          "honesty": {
+            "discovery_worthy": true,
+            "trivial_rediscovery": false
+          },
+          "verdict": "refuted",
+          "verdict_confidence": 0.95,
+          "verdict_reason": "Computed a real, independently-validated cap in F_3^4 of size 20 via exhaustive_branch_and_bound; matches best-known 20. Witness: full_point_set. REFUTED: hypothesis requires spectral/structural statistics not implemented in verifier"
+        }
+      ]
+    }
+  ],
+  "honesty_controls": [
+    {
+      "label": "coding_rediscovery_hamming_7_4_3",
+      "expected": "rediscovery-demoted (meets best-known, witnessed, not a discovery)",
+      "computed_d": 3,
+      "best_known": 3,
+      "witness_recheck_ok": true,
+      "discovery_worthy": false,
+      "trivial_rediscovery": true,
+      "verdict": "inconclusive",
+      "confidence": 0.4
+    },
+    {
+      "label": "coding_honest_gap_11_4",
+      "expected": "honest below-best-known (not oversold as a discovery)",
+      "computed_d": 2,
+      "best_known": 5,
+      "witness_recheck_ok": true,
+      "discovery_worthy": false,
+      "trivial_rediscovery": true,
+      "verdict": "inconclusive",
+      "confidence": 0.4
+    },
+    {
+      "label": "coding_refuted_hamming_claim_d4",
+      "expected": "refuted by real computation (true d=3)",
+      "computed_d": 3,
+      "verified_false_steps": 1,
+      "verdict": "refuted",
+      "confidence": 0.95
+    },
+    {
+      "label": "capset_rediscovery_table_lookup_F3_6",
+      "expected": "rediscovery-demoted (table lookup, not a computation)",
+      "cap_set_size": 112,
+      "construction_source": "best_known_table",
+      "trivial_rediscovery": true,
+      "verdict": "inconclusive",
+      "confidence": 0.4
+    },
+    {
+      "label": "capset_honest_computed_gap_F3_7",
+      "expected": "real validated cap, below best-known 236 (honest, witnessed)",
+      "cap_set_size": 180,
+      "best_known_size": 236,
+      "cap_valid": true,
+      "vs_best_known": "below_best_known",
+      "construction_source": "computed",
+      "trivial_rediscovery": false,
+      "verdict": "inconclusive",
+      "confidence": 0.5
+    }
+  ]
+}

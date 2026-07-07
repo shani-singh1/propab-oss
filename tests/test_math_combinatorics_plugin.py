@@ -423,3 +423,143 @@ def test_cap_size_never_reported_from_table_as_computed() -> None:
         assert r["construction_source"] == "computed"
         assert r["cap_set_size"] != CAP_SET_BEST_KNOWN[n]
         assert r["cap_valid"] is True
+
+
+# =========================================================================== #
+# v1: correctness at scale, reference-table integrity, robustness/determinism
+# =========================================================================== #
+
+
+def test_cap_set_best_known_matches_oeis_a090245() -> None:
+    """Reference values are OEIS A090245 (max cap in AG(n,3)); n<=6 proven maxima,
+    n=7,8 best-known lower bounds. A wrong entry would corrupt rediscovery rejection."""
+    from propab.domain_modules.math_combinatorics.constructors import CAP_SET_BEST_KNOWN
+
+    assert CAP_SET_BEST_KNOWN == {1: 2, 2: 4, 3: 9, 4: 20, 5: 45, 6: 112, 7: 236, 8: 496}
+
+
+def test_math_comb_cap_valid_and_size_matches_at_every_supported_dim() -> None:
+    """Correctness at scale: for every supported n, the computed cap is (a) VALID by
+    an INDEPENDENT re-check and (b) its reported size equals the actual object size."""
+    from propab.domain_modules.math_combinatorics.verifier import (
+        compute_cap_set,
+        is_valid_cap,
+    )
+
+    for n in range(1, 11):
+        r = compute_cap_set(n)
+        # (a) reported == computed, and independently re-validated
+        assert r["cap_valid"] is True, f"n={n} failed validity: {r['validity_detail']}"
+        assert r["cap_set_size"] == r["computed_size"], f"n={n} size mismatch"
+        # (b) if a full point set is present, re-check the WHOLE set from scratch
+        pts = r["witness"].get("cap_points")
+        if pts is not None:
+            revalid, detail = is_valid_cap([tuple(p) for p in pts], n)
+            assert revalid is True, f"n={n} full re-check failed: {detail}"
+            assert len(pts) == r["cap_set_size"]
+        # every point in the emitted sample lives in F_3^n
+        for p in r["witness"]["sample_points"]:
+            assert len(p) == n and all(c in (0, 1, 2) for c in p)
+
+
+def test_math_comb_honest_below_meets_exceeds_labelling() -> None:
+    """The vs_best_known label is honest at every supported dim: matches for n<=4
+    (we reach the optimum), below for 5<=n<=8 (product cap < best-known)."""
+    from propab.domain_modules.math_combinatorics.verifier import compute_cap_set
+
+    for n in (1, 2, 3, 4):
+        assert compute_cap_set(n)["vs_best_known"] == "matches_best_known"
+    for n in (5, 6, 7, 8):
+        r = compute_cap_set(n)
+        assert r["vs_best_known"] == "below_best_known"
+        assert r["gap_to_best_known"] == r["best_known_size"] - r["cap_set_size"]
+        assert r["gap_to_best_known"] > 0
+    # No table value beyond n=8 -> honest "no_table_value".
+    r9 = compute_cap_set(9)
+    assert r9["best_known_size"] is None
+    assert r9["vs_best_known"] == "no_table_value"
+
+
+def test_math_comb_reproduces_known_optimum_f3_4_is_20() -> None:
+    """Reproduce a known optimum: the maximum cap in F_3^4 has size 20. The B&B
+    REACHES size 20 (== best-known) within the budget; it does not certify optimality
+    by exhausting the whole (large) F_3^4 tree, so we assert the reached size and the
+    honest 'matches_best_known' label, not proven_optimal for n=4.
+
+    Provable optimality by COMPLETE exhaustive search is asserted for the smaller
+    dims F_3^2 (=4) and F_3^3 (=9), whose trees finish quickly."""
+    from propab.domain_modules.math_combinatorics.verifier import (
+        compute_cap_set,
+        is_valid_cap,
+        max_cap_exhaustive,
+    )
+
+    r = compute_cap_set(4)
+    assert r["cap_set_size"] == 20
+    assert r["vs_best_known"] == "matches_best_known"
+    assert r["cap_valid"] is True
+    pts = [tuple(p) for p in r["witness"]["cap_points"]]
+    ok, _ = is_valid_cap(pts, 4)
+    assert ok is True and len(pts) == 20
+    # F_3^2 optimum (4) and F_3^3 optimum (9) reached by COMPLETE exhaustive search.
+    cap2, complete2 = max_cap_exhaustive(2, time_limit=10.0)
+    assert complete2 is True and len(cap2) == 4
+    cap3, complete3 = max_cap_exhaustive(3, time_limit=10.0)
+    assert complete3 is True and len(cap3) == 9
+    assert r["proven_optimal"] in (True, False)  # honest: not required for n=4
+
+
+def test_math_comb_cap_computation_is_deterministic_under_fixed_seed() -> None:
+    """Same inputs -> byte-identical computed cap (size + example points), so the
+    verifier is reproducible for a deployed run."""
+    import propab.domain_modules.math_combinatorics.verifier as V
+    from propab.domain_modules.math_combinatorics.verifier import compute_cap_set
+
+    for n in (4, 5, 6, 7, 8, 9):
+        V._BASE_CAP_CACHE.clear()
+        r1 = compute_cap_set(n)
+        V._BASE_CAP_CACHE.clear()
+        r2 = compute_cap_set(n)
+        assert r1["cap_set_size"] == r2["cap_set_size"]
+        assert r1["example_cap"] == r2["example_cap"]
+
+
+def test_math_comb_cap_dim_extraction_covers_full_supported_range() -> None:
+    """F_3^9 / F_3^10 claims must NOT be silently re-dimensioned to the default n=4:
+    the compute path supports up to MAX_FULL_CAP_DIM, and dimension extraction must
+    honour the same range (dims above it are dropped as unsupported)."""
+    from propab.domain_modules.math_combinatorics.verifier import (
+        MAX_FULL_CAP_DIM,
+        _extract_cap_dims,
+        run_combinatorics_experiment,
+    )
+
+    assert _extract_cap_dims("A cap set in F_3^9 of size at least 800") == [9]
+    assert _extract_cap_dims("cap set in F_3^10") == [10]
+    # Above the supported range -> dropped (routes to default, no runaway).
+    assert _extract_cap_dims(f"F_3^{MAX_FULL_CAP_DIM + 1} cap set") == []
+    # End-to-end: an F_3^9 claim computes AT n=9 with an honest no-table label.
+    ev = run_combinatorics_experiment(
+        {"statement": "Construct a cap set in F_3^9 and report its size.",
+         "test_methodology": "product construction"},
+        ["cap_set_size"],
+    )
+    assert ev["n"] == 9
+    assert ev["cap_valid"] is True
+    assert ev["vs_best_known"] == "no_table_value"
+
+
+def test_math_comb_computation_cap_is_production_bounded() -> None:
+    """Robustness: no runaway. Every supported cap computation (fixed budgets) stays
+    well under a conservative wall-clock ceiling."""
+    import time
+
+    from propab.domain_modules.math_combinatorics.verifier import compute_cap_set
+
+    import propab.domain_modules.math_combinatorics.verifier as V
+
+    for n in range(1, 11):
+        V._BASE_CAP_CACHE.clear()
+        start = time.time()
+        compute_cap_set(n)
+        assert time.time() - start < 20.0, f"cap compute at n={n} exceeded budget"

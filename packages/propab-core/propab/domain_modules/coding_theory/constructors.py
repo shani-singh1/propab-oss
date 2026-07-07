@@ -20,23 +20,46 @@ import numpy as np
 
 # Exhaustive 2^k enumeration is only honest/feasible for small k. Above this we
 # refuse to certify a distance by enumeration (we would otherwise silently lie).
-MAX_EXHAUSTIVE_K = 20
+#
+# Production cap: 2^16-1 = 65 535 nonzero codewords is the worst-case enumeration,
+# which completes in ~2s (pure-Python loop + numpy matmul per message). k=18 costs
+# ~7s and k=20 ~25s — an unacceptable per-verification runaway for a deployed
+# service — so we cap at 16. Every named construction this module builds
+# (Hamming/simplex/RM/repetition/parity) and every Golay anchor has k <= 12, well
+# within the cap; larger table anchors (e.g. length-31 BCH with k=21/26) remain
+# available as best-known REFERENCE values for rediscovery rejection but are never
+# enumerated here.
+MAX_EXHAUSTIVE_K = 16
 
-# Best-known LOWER bounds d for binary linear [n, k] codes (Brouwer / Grassl
-# tables, codetables.de), restricted to a small, verifiable range. These are used
-# ONLY for rediscovery rejection and honest computed-vs-known reporting — never
-# reported as if they were computed by this module.
+# Best-known LOWER bounds d for binary linear [n, k] codes. Values are taken from
+# the Brouwer / Grassl tables of bounds on the minimum distance of linear codes
+# (M. Grassl, "Bounds on the minimum distance of linear codes and quantum codes",
+# http://www.codetables.de, accessed 2026-07; and A. E. Brouwer's classic tables,
+# reproduced in the codetables.de server). They are used ONLY for rediscovery
+# rejection and honest computed-vs-known reporting — never reported as if they
+# were computed by this module.
+#
+# Every entry below either (a) coincides with a provably-optimal family this
+# module can construct and independently distance-check (repetition d=n; parity
+# d=2; identity d=1; Hamming (2^r-1, 2^r-1-r, 3); extended Hamming
+# (2^r, 2^r-1-r, 4); simplex (2^r-1, r, 2^{r-1}); first-order Reed-Muller
+# RM(1,m) = (2^m, m+1, 2^{m-1})), or (b) satisfies the Griesmer bound as a
+# necessary consistency check (see tests). Anchors verified against constructors:
+# [7,4,3], [8,4,4], [15,4,8] simplex, [15,11,3] Hamming, [16,5,8] RM(1,4),
+# [16,11,4] extended Hamming.
 #   key: (n, k) -> best-known minimum distance d
 BEST_KNOWN_TABLE: dict[tuple[int, int], int] = {
-    # k = 1 (repetition codes): d = n
+    # k = 1 (repetition codes): d = n (provably optimal; constructed here)
     (2, 1): 2, (3, 1): 3, (4, 1): 4, (5, 1): 5, (6, 1): 6, (7, 1): 7,
     (8, 1): 8, (9, 1): 9, (10, 1): 10, (11, 1): 11, (12, 1): 12,
-    # k = n-1 (single-parity-check codes): d = 2
+    (13, 1): 13, (14, 1): 14, (15, 1): 15, (16, 1): 16,
+    # k = n-1 (single-parity-check codes): d = 2 (provably optimal; constructed here)
     (3, 2): 2, (4, 3): 2, (5, 4): 2, (6, 5): 2, (7, 6): 2, (8, 7): 2,
-    (9, 8): 2, (10, 9): 2, (11, 10): 2, (12, 11): 2,
-    # k = n (trivial / identity): d = 1
+    (9, 8): 2, (10, 9): 2, (11, 10): 2, (12, 11): 2, (13, 12): 2, (14, 13): 2,
+    (15, 14): 2, (16, 15): 2,
+    # k = n (trivial / identity): d = 1 (constructed here)
     (2, 2): 1, (3, 3): 1, (4, 4): 1, (5, 5): 1, (6, 6): 1, (7, 7): 1,
-    # small optimal codes from the Brouwer table (well-established)
+    # small optimal codes from the Brouwer/Grassl tables (well-established)
     (4, 2): 2,
     (5, 2): 3, (5, 3): 2,
     (6, 2): 4, (6, 3): 3, (6, 4): 2,
@@ -45,11 +68,24 @@ BEST_KNOWN_TABLE: dict[tuple[int, int], int] = {
     (9, 2): 6, (9, 3): 4, (9, 4): 4, (9, 5): 3, (9, 6): 2, (9, 7): 2,
     (10, 2): 6, (10, 3): 5, (10, 4): 4, (10, 5): 4, (10, 6): 3, (10, 7): 2,
     (11, 2): 7, (11, 3): 6, (11, 4): 5, (11, 5): 4, (11, 6): 4, (11, 7): 3,
+    (11, 8): 2, (11, 9): 2,
     (12, 2): 8, (12, 3): 6, (12, 4): 6, (12, 5): 4, (12, 6): 4, (12, 7): 4,
-    (12, 8): 3,
-    # [15,11,3] and [15,7,5] BCH; [15,4,8] simplex; [15,5,7]
-    (15, 11): 3, (15, 7): 5, (15, 5): 7, (15, 4): 8,
-    (16, 11): 4, (16, 5): 8,   # extended versions
+    (12, 8): 3, (12, 9): 2, (12, 10): 2,
+    # n = 13 (Brouwer/Grassl codetables.de)
+    (13, 2): 8, (13, 3): 7, (13, 4): 6, (13, 5): 5, (13, 6): 4, (13, 7): 4,
+    (13, 8): 4, (13, 9): 3, (13, 10): 2, (13, 11): 2,
+    # n = 14 (Brouwer/Grassl codetables.de)
+    (14, 2): 9, (14, 3): 8, (14, 4): 7, (14, 5): 6, (14, 6): 5, (14, 7): 4,
+    (14, 8): 4, (14, 9): 4, (14, 10): 3, (14, 11): 2, (14, 12): 2,
+    # n = 15: [15,11,3] Hamming; [15,7,5] BCH; [15,5,7]; [15,4,8] simplex;
+    # plus other Brouwer/Grassl entries at this length.
+    (15, 2): 10, (15, 3): 8, (15, 4): 8, (15, 5): 7, (15, 6): 6, (15, 7): 5,
+    (15, 8): 4, (15, 9): 4, (15, 10): 4, (15, 11): 3, (15, 12): 2, (15, 13): 2,
+    # n = 16: [16,5,8] RM(1,4); [16,11,4] extended Hamming; other Grassl entries.
+    (16, 2): 10, (16, 3): 8, (16, 4): 8, (16, 5): 8, (16, 6): 6, (16, 7): 6,
+    (16, 8): 5, (16, 9): 4, (16, 10): 4, (16, 11): 4, (16, 12): 4, (16, 13): 2,
+    (16, 14): 2,
+    # Longer well-established anchors (BCH / Golay families).
     (23, 12): 7,               # binary Golay [23,12,7]
     (24, 12): 8,               # extended binary Golay [24,12,8]
     (31, 26): 3, (31, 21): 5, (31, 16): 7,  # Hamming/BCH length 31

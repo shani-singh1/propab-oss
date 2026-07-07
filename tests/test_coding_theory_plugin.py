@@ -325,3 +325,146 @@ def test_parse_code_params_nkd() -> None:
 def test_parse_code_params_nk_only() -> None:
     p = parse_code_params("A binary linear [15, 11] code")
     assert p["n"] == 15 and p["k"] == 11 and p["d"] is None
+
+
+# =========================================================================== #
+# v1: widened reference table integrity, correctness at scale, robustness
+# =========================================================================== #
+
+
+def _griesmer_length(k: int, d: int) -> int:
+    """Griesmer bound: minimal n for a binary [n,k,d] code = sum ceil(d/2^i)."""
+    return sum(-(-d // (2 ** i)) for i in range(k))
+
+
+def test_coding_best_known_table_is_griesmer_consistent() -> None:
+    """Every widened Brouwer/Grassl entry must satisfy the Griesmer bound (a
+    NECESSARY condition) and basic [n,k,d] ranges. A table entry that violated
+    Griesmer would be an impossible distance and would poison rediscovery rejection."""
+    from propab.domain_modules.coding_theory.constructors import BEST_KNOWN_TABLE
+
+    assert len(BEST_KNOWN_TABLE) >= 120  # widened well beyond the original ~90
+    for (n, k), d in BEST_KNOWN_TABLE.items():
+        assert 1 <= k <= n, f"[{n},{k}] out of range"
+        assert 1 <= d <= n, f"[{n},{k},{d}] distance out of range"
+        assert _griesmer_length(k, d) <= n, f"[{n},{k},{d}] violates Griesmer bound"
+
+
+def test_coding_constructible_optimal_families_match_table_exactly() -> None:
+    """Correctness at scale: for every code this module can BUILD, the independently
+    computed minimum distance must equal the tabulated best-known d — never exceed
+    it (a construction that spuriously 'beats' an optimal family would be a bug and a
+    false discovery)."""
+    from propab.domain_modules.coding_theory.constructors import (
+        best_known_distance,
+        compute_min_distance,
+        extended_hamming_code,
+        hamming_code,
+        parity_check_code,
+        reed_muller_rm1,
+        repetition_code,
+        simplex_code,
+    )
+
+    cases: list[tuple[np.ndarray, int, int]] = []
+    for r in (2, 3, 4):
+        cases.append((hamming_code(r), 2 ** r - 1, 2 ** r - 1 - r))
+        cases.append((extended_hamming_code(r), 2 ** r, 2 ** r - 1 - r))
+        cases.append((simplex_code(r), 2 ** r - 1, r))
+    for m in (2, 3, 4):
+        cases.append((reed_muller_rm1(m), 2 ** m, m + 1))
+    for n in (2, 5, 7, 10, 13, 16):
+        cases.append((repetition_code(n), n, 1))
+    for k in (2, 4, 7, 11, 14):
+        cases.append((parity_check_code(k), k + 1, k))
+
+    for g, n, k in cases:
+        d = compute_min_distance(g)["min_distance"]
+        bk = best_known_distance(n, k)
+        assert bk is not None, f"[{n},{k}] missing from widened table"
+        assert d == bk, f"[{n},{k}] computed d={d} but table={bk}"
+
+
+def test_coding_new_table_anchors_present_and_correct() -> None:
+    """Spot-check a handful of the newly-added, theory-anchored entries."""
+    from propab.domain_modules.coding_theory.constructors import best_known_distance
+
+    # RM(1,4) = [16,5,8]; simplex r=4 = [15,4,8]; ext-Hamming r=4 = [16,11,4].
+    assert best_known_distance(16, 5) == 8
+    assert best_known_distance(15, 4) == 8
+    assert best_known_distance(16, 11) == 4
+    # New n=13/14 rows (Brouwer/Grassl codetables.de).
+    assert best_known_distance(13, 4) == 6
+    assert best_known_distance(14, 5) == 6
+    assert best_known_distance(13, 2) == 8
+    assert best_known_distance(14, 2) == 9
+
+
+def test_coding_wider_table_rejects_more_rediscoveries() -> None:
+    """A wider correct table lets the engine flag more meets/below-known results as
+    rediscoveries. A random [14,5] code meeting-or-below the known d=6 must not be a
+    discovery, and a [13,4] code likewise checks against the newly-added entry."""
+    from propab.domain_modules.coding_theory.constructors import trivial_rediscovery
+
+    # Newly-tabulated [14,5] has best-known d=6; any computed d<=6 is a rediscovery.
+    ev = {"verification_method": "exhaustive_enumeration", "witness_codeword": [1]}
+    assert trivial_rediscovery(ev, 14, 5, 4) is True   # below known -> rediscovery
+    assert trivial_rediscovery(ev, 14, 5, 6) is True   # meets known -> rediscovery
+    assert trivial_rediscovery(ev, 14, 5, 7) is False  # would beat known -> not
+
+
+def test_coding_max_exhaustive_k_is_production_bounded() -> None:
+    """Robustness: the exhaustive-enumeration cap keeps the worst case feasible. At
+    the cap, enumeration completes quickly; beyond it we refuse to certify."""
+    import time
+
+    from propab.domain_modules.coding_theory.constructors import (
+        MAX_EXHAUSTIVE_K,
+        compute_min_distance,
+        random_generator,
+    )
+
+    assert MAX_EXHAUSTIVE_K <= 16, "cap must bound 2^k enumeration for production"
+    # At the cap, a real computation finishes well under a conservative ceiling.
+    g = random_generator(MAX_EXHAUSTIVE_K + 8, MAX_EXHAUSTIVE_K, seed=11)
+    start = time.time()
+    dist = compute_min_distance(g)
+    assert time.time() - start < 10.0
+    assert dist["enumeration_complete"] is True
+    # Above the cap, refuse to certify a distance (no silent lie).
+    g_big = random_generator(MAX_EXHAUSTIVE_K + 10, MAX_EXHAUSTIVE_K + 2, seed=11)
+    over = compute_min_distance(g_big)
+    assert over["min_distance"] is None
+    assert over["enumeration_complete"] is False
+
+
+def test_coding_computation_is_deterministic_under_fixed_seed() -> None:
+    """A fixed seed yields byte-identical generator, distance, and witness."""
+    from propab.domain_modules.coding_theory.constructors import (
+        compute_min_distance,
+        random_generator,
+    )
+
+    for k in (4, 8, 12):
+        g1 = random_generator(k + 6, k, seed=99)
+        g2 = random_generator(k + 6, k, seed=99)
+        assert np.array_equal(g1, g2)
+        d1 = compute_min_distance(g1)
+        d2 = compute_min_distance(g2)
+        assert d1["min_distance"] == d2["min_distance"]
+        assert d1["witness_codeword"] == d2["witness_codeword"]
+
+
+def test_coding_reproduces_known_hamming_7_4_3_optimum() -> None:
+    """Reproduce a known optimum end-to-end: [7,4,3] Hamming, honestly labelled as a
+    rediscovery (meets best-known d=3), with an independently re-checked witness."""
+    hyp = {
+        "statement": "Construct the [7,4,3] Hamming code and verify its minimum distance",
+        "test_methodology": "hamming exhaustive enumeration",
+    }
+    ev = run_coding_experiment(hyp)
+    assert ev["computed_min_distance"] == 3
+    assert ev["best_known_distance"] == 3
+    assert ev["witness_recheck_ok"] is True
+    assert ev["trivial_rediscovery"] is True
+    assert ev["discovery_worthy"] is False
