@@ -75,3 +75,31 @@ not discoveries.
 - **DISC3 · HIGH** — hypothesis generation diversity/ambition (biggest, most open-ended).
 - **DISC4 · MED** — domain-aware theme classification.
 - **DISC5 · MED** — confirmation-level dedup (also seen as the paper's duplicate table rows).
+
+---
+
+## FIXES APPLIED (loop, no new campaign)
+
+- **DISC1 · FIXED** (fix/disc1-novelty-gate, merged) — novelty gate wired: for each
+  confirmed finding the finalize/paper path calls the literature `/novelty` endpoint;
+  a `verdict=="known"` finding is demoted to a rediscovery and excluded from the
+  headline discovery count. Honest non-blocking fallback (outage/uncertain never demotes).
+  Live-verified `/novelty` works (returned "uncertain" for a specific numeric cap-set
+  claim — the safe, conservative default; it won't false-demote a real discovery).
+- **DISC2 · FIXED** (fix/disc2-rediscovery, merged) — `best_known_table`-sourced confirms
+  are now flagged `trivial_rediscovery=True, discovery_worthy=False` and moved to the
+  `rediscovery` bucket, excluded from the discovery count. **REPLAY on the real campaign's
+  21 confirmed nodes: 19 flip to rediscovery, 2 remain genuine discoveries.**
+- Merge unified both signals into one `rediscovery` bucket + one honest `counts["confirmed"]`
+  (a finding is a rediscovery if the evidence is a table-lookup OR the literature knows it).
+
+**Honest revised result of campaign 5f99b96d: ~2 discoveries + 19 rediscoveries, NOT 21
+"confirmed findings."** The engine is now HONEST about not discovering.
+
+### STILL OPEN (the hard part — what makes it actually discover)
+- **DISC3 · HIGH** — real hypothesis generation. 1 LLM hypothesis vs 128 template
+  expansions + 48 frontier-empties is the core gap; discovery needs conceptually novel,
+  ambitious hypotheses targeting OPEN problems, not (q,n,k) sweeps of one greedy algorithm.
+  This is a capability, not a patch — the biggest remaining lever.
+- **DISC4 · MED** — domain-aware theme classification (cap-sets mislabeled diffusion/percolation).
+- **DISC5 · MED** — confirmation-level dedup (near-identical parameter variants).
