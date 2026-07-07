@@ -16,6 +16,14 @@ from propab.domain_modules.graph_invariants.adapter import (
     GraphInvariantsAdapter,
     _real_frame,
     _source_dir,
+    real_graph_data_available,
+)
+
+# Skip real-data tests cleanly (not ERROR) when the git-ignored SNAP data is absent —
+# e.g. on CI / a fresh checkout before scripts/fetch_graph_datasets.py has run.
+_NEEDS_GRAPH_DATA = pytest.mark.skipif(
+    not real_graph_data_available(),
+    reason="real SNAP graph data not cached; run scripts/fetch_graph_datasets.py",
 )
 from propab.domain_modules.graph_invariants.plugin import GraphInvariantsPlugin
 from propab.domain_modules.graph_invariants.routing_inspector import inspect_corpus, inspect_routing
@@ -40,6 +48,8 @@ def real_frame():
     Module-scoped because the snowball sampling + eigendecomposition is a few
     seconds of work we don't want to repeat per test.
     """
+    if not real_graph_data_available():
+        pytest.skip("real SNAP graph data not cached; run scripts/fetch_graph_datasets.py")
     return _real_frame()
 
 
@@ -47,11 +57,13 @@ def test_graph_plugin_registered():
     assert get_domain_plugin("graph_invariants") is not None
 
 
+@_NEEDS_GRAPH_DATA
 def test_graph_preflight(tmp_data):
     r = GraphInvariantsPlugin().preflight()
     assert r.passed, r.reason
 
 
+@_NEEDS_GRAPH_DATA
 def test_graph_routing_corpus(tmp_data):
     report = inspect_corpus()
     assert report["routing_mismatches"] == 0
@@ -60,6 +72,7 @@ def test_graph_routing_corpus(tmp_data):
 
 # ── Real data: the SNAP edge lists are present and load into real networks ────
 
+@_NEEDS_GRAPH_DATA
 def test_real_snap_files_present_on_disk():
     """Every configured real network file must exist on disk — no fabrication."""
     src = _source_dir()
@@ -67,6 +80,7 @@ def test_real_snap_files_present_on_disk():
         assert (src / filename).is_file(), f"missing real SNAP file: {filename}"
 
 
+@_NEEDS_GRAPH_DATA
 def test_plugin_reports_real_data():
     """uses_synthetic_data() must be False now that real graphs are wired."""
     assert GraphInvariantsPlugin().uses_synthetic_data() is False
@@ -86,6 +100,7 @@ def test_real_frame_has_three_real_families(real_frame):
         assert (real_frame["network_family"] == fam).sum() >= 20
 
 
+@_NEEDS_GRAPH_DATA
 def test_real_frame_meta_records_real_provenance(tmp_data):
     """The adapter cache meta must say synthetic=False / provenance=real and cite
     the SNAP sources — never relabel real data or leave a stale synthetic flag."""

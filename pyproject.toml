@@ -30,6 +30,7 @@ dependencies = [
   "jinja2>=3.1.0",
   "scipy>=1.11.0",
   "matplotlib>=3.5.0",
+  "networkx>=3.0",
 ]
 
 [project.scripts]
@@ -67,6 +68,10 @@ packages = [
   "propab.domain_modules.enzyme_kinetics",
   "propab.domain_modules.graph_invariants",
   "propab.domain_modules.math_combinatorics",
+  "propab.domain_modules.coding_theory",
+  "propab.domain_modules.genomics",
+  "propab.domain_modules.network_diffusion",
+  "propab.skills",
   "propab.tools",
   "propab.tools.mandrake",
   "propab.tools.materials",
@@ -96,6 +101,10 @@ propab = "packages/propab-core/propab"
 "propab.domain_modules.enzyme_kinetics" = "packages/propab-core/propab/domain_modules/enzyme_kinetics"
 "propab.domain_modules.graph_invariants" = "packages/propab-core/propab/domain_modules/graph_invariants"
 "propab.domain_modules.math_combinatorics" = "packages/propab-core/propab/domain_modules/math_combinatorics"
+"propab.domain_modules.coding_theory" = "packages/propab-core/propab/domain_modules/coding_theory"
+"propab.domain_modules.genomics" = "packages/propab-core/propab/domain_modules/genomics"
+"propab.domain_modules.network_diffusion" = "packages/propab-core/propab/domain_modules/network_diffusion"
+"propab.skills" = "packages/propab-core/propab/skills"
 "propab.tools" = "packages/propab-core/propab/tools"
 "propab.tools.mandrake" = "packages/propab-core/propab/tools/mandrake"
 "propab.tools.materials" = "packages/propab-core/propab/tools/materials"
@@ -115,3 +124,4 @@ propab = "packages/propab-core/propab"
 
 [tool.setuptools.package-data]
 propab = ["templates/*.j2"]
+"propab.skills" = ["core/*.skill.md", "domains/*/*.skill.md"]
