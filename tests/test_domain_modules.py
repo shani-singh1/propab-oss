@@ -20,15 +20,17 @@ def test_builtin_plugins_registered():
 def test_uses_synthetic_data_flag_per_domain():
     """DOM2: synthetic-data domains report True; real-data domains report False.
 
-    The genomics / graph_invariants / enzyme_kinetics demo domains run on
-    seed-generated frames (adapter meta ``synthetic: True``) presented under real
-    dataset names; materials and mandrake use real data.
+    The genomics / enzyme_kinetics demo domains still run on seed-generated frames
+    (adapter meta ``synthetic: True``) presented under real dataset names.
+    graph_invariants was migrated to REAL SNAP networks (ca-GrQc collaboration,
+    email-Eu-core communication) via connected-subgraph sampling, so it now reports
+    False alongside materials and mandrake.
     """
-    for did in ("genomics", "graph_invariants", "enzyme_kinetics"):
+    for did in ("genomics", "enzyme_kinetics"):
         plugin = get_domain_plugin(did)
         assert plugin is not None, f"{did} plugin not registered"
         assert plugin.uses_synthetic_data() is True, f"{did} should report synthetic data"
-    for did in ("mandrake", "materials"):
+    for did in ("mandrake", "materials", "graph_invariants"):
         plugin = get_domain_plugin(did)
         assert plugin is not None, f"{did} plugin not registered"
         assert plugin.uses_synthetic_data() is False, f"{did} should report real data"
