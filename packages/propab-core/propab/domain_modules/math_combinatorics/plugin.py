@@ -43,6 +43,10 @@ _TOPIC_RE = re.compile(
             r"\|A\+A\|",
             r"\bF_3\b",
             r"\bf_3\b",
+            r"\bb[_\s-]?3\b",
+            r"\ba396704\b",
+            r"threefold\s+sum",
+            r"\{0,\s*1\}",
             r"\|\{1,\.\.\.,n\}\|",
             r"\{1,\.\.\.,n\}",
         )
@@ -103,6 +107,12 @@ _VERIFIABLE_METHODOLOGY_RE = re.compile(
             r"algebraic\s+construction",
             r"greedy\s+construction",
             r"sidon",
+            # B_3 binary-cube (A396704) is now a real, implemented verification path
+            # (discovery/finder.py); its statements count as verifiable.
+            r"\bb[_\s-]?3\b",
+            r"\ba396704\b",
+            r"threefold\s+sum",
+            r"binary\s+cube",
         )
     ),
     re.IGNORECASE,
@@ -216,6 +226,7 @@ class MathCombinatoricsPlugin(DomainPlugin):
             "sumset_growth",
             "arithmetic_progression_free_density",
             "b2_plus_set_density",
+            "b3_binary_cube_size",
         ]
 
     def run_verification(

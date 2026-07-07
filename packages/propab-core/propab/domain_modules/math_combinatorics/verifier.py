@@ -64,6 +64,128 @@ CAP_WITNESS_SAMPLE = 24
 
 CapPoint = tuple[int, ...]
 
+# --- B_3 sets in the binary cube {0,1}^n (OEIS A396704) ----------------------
+# Per-hypothesis wall budget for the discovery finder and the largest dimension a
+# single node attempts. The real record attempt (a(7) -> 17) runs a long campaign
+# with a bigger budget; a per-node computation must stay bounded.
+B3_TIME_BUDGET = 25.0
+B3_MAX_N = 9
+
+
+def _is_b3_binary_cube_hypothesis(statement: str, methodology: str = "") -> bool:
+    """True for a maximum-B_3-set-in-{0,1}^n hypothesis (OEIS A396704).
+
+    A B_3 set has all threefold sums distinct — a *different* object from a Sidon
+    (B_2) set or a cap, so it must route before them. Requires both a B_3 signal
+    and a binary-cube signal (or an explicit A396704 reference) so a generic
+    "B_2/Sidon in {0,1}^n" claim does not mis-route here.
+    """
+    t = f"{statement}\n{methodology}".lower()
+    if "a396704" in t:
+        return True
+    has_b3 = bool(re.search(r"\bb[_\s-]?3\b", t)) or "threefold sum" in t or "three-fold sum" in t
+    compact = t.replace(" ", "")
+    has_cube = "{0,1}^" in compact or "binarycube" in compact or "0,1}^" in compact
+    return has_b3 and has_cube
+
+
+def _extract_b3_dim(statement: str, default: int = 7) -> int:
+    compact = statement.replace(" ", "")
+    for pat in (r"\{0,1\}\^(\d+)", r"0,1\}\^(\d+)"):
+        m = re.search(pat, compact, re.I)
+        if m:
+            return min(max(1, int(m.group(1))), B3_MAX_N)
+    for pat in (r"\bn\s*=\s*(\d+)", r"dimension\s+(\d+)", r"\bn\s*=\s*(\d+)\b"):
+        m = re.search(pat, statement, re.I)
+        if m:
+            return min(max(1, int(m.group(1))), B3_MAX_N)
+    return default
+
+
+def _run_b3_binary_cube_experiment(hypothesis: dict[str, Any]) -> dict[str, Any]:
+    """Compute a real B_3 set in {0,1}^n and compare HONESTLY to best-known (A396704).
+
+    Mirrors the cap-set path: the size is always backed by an independently
+    re-verified witness, never a table read. A size that strictly beats a
+    provisional/open best-known is routed through the paranoid ``certify_b3_record``
+    gate; only a certified witness is surfaced as discovery-worthy, and even then
+    it certifies a lower-bound improvement only (never optimality).
+    """
+    from propab.domain_modules.math_combinatorics.discovery import (
+        best_known,
+        certify_b3_record,
+        find_max_b3,
+        record_status,
+    )
+
+    statement = str(hypothesis.get("statement") or hypothesis.get("text") or "")
+    n = _extract_b3_dim(statement)
+    res = find_max_b3(n, time_budget=B3_TIME_BUDGET)
+    size = int(res["size"])
+    bk = best_known("A396704", n)
+    status = record_status("A396704", n)
+    witness = {"n": n, "claimed_size": size, "set": res["set"]}
+    base: dict[str, Any] = {
+        "verified_true_steps": 0,
+        "verified_false_steps": 0,
+        "trivial_rediscovery": False,
+        "discovery_worthy": False,
+        "deterministic": True,
+        "verification_method": "combinatorial_computation",
+        "metric_value": float(size),
+        "metric_name": "b3_binary_cube_size",
+        "n": n,
+        "b3_size": size,
+        "computed_size": size,
+        "method": res.get("method"),
+        "proven_optimal": bool(res.get("proven_optimal")),
+        "best_known_size": bk,
+        "record_status": status,
+        "witness": witness,
+    }
+    if bk is None:
+        base["vs_best_known"] = "no_table_value"
+        base["notes"] = f"Computed a real B_3 set of size {size} in {{0,1}}^{n}; no best-known table value."
+        return base
+    if size < bk:
+        base["vs_best_known"] = "below_best_known"
+        base["gap_to_best_known"] = bk - size
+        base["notes"] = f"B_3 size {size} in {{0,1}}^{n} below best-known {bk} (honest gap {bk - size})."
+        return base
+    if size == bk:
+        base["vs_best_known"] = "matches_best_known"
+        base["gap_to_best_known"] = 0
+        if status == "proven_optimal":
+            base["trivial_rediscovery"] = True
+            base["notes"] = f"Reproduced PROVEN-optimal a({n})={bk} for B_3 in {{0,1}}^{n} (rediscovery)."
+        else:
+            base["notes"] = (
+                f"Reproduced the provisional lower bound a({n})>={bk} for B_3 in {{0,1}}^{n} "
+                f"(honest: matched a search bound, not a record)."
+            )
+        return base
+    # size > bk — candidate record. The certifier is the ONLY gate that may confirm.
+    cert = certify_b3_record(witness, bk, expected_n=n)
+    base["certification"] = cert
+    if cert.get("certified") and status in ("provisional_lower_bound", "open"):
+        base["discovery_worthy"] = True
+        base["verified_true_steps"] = 1
+        base["vs_best_known"] = "exceeds_best_known"
+        base["gap_to_best_known"] = bk - size  # negative => exceeds
+        base["record_witness_json"] = witness
+        base["notes"] = (
+            f"CANDIDATE RECORD: certified B_3 set of size {size} in {{0,1}}^{n} beats best-known "
+            f"{bk} (A396704). Witness emitted for independent re-verification. Certifies a "
+            f"lower-bound improvement only, NOT optimality."
+        )
+    else:
+        base["vs_best_known"] = "exceeds_best_known_uncertified"
+        base["notes"] = (
+            f"Search reported size {size} > best-known {bk} but certification returned "
+            f"certified={cert.get('certified')} (status={status}); NOT surfaced as a record."
+        )
+    return base
+
 
 def run_combinatorics_experiment(hypothesis: dict[str, Any], features: list[str]) -> dict[str, Any]:
     start = time.time()
@@ -71,6 +193,17 @@ def run_combinatorics_experiment(hypothesis: dict[str, Any], features: list[str]
     methodology = str(hypothesis.get("test_methodology") or "")
     claim = extract_claim_text(statement, test_methodology=methodology, full_text=statement)
     primary_feature = features[0] if features else "sidon_set_density"
+
+    if _is_b3_binary_cube_hypothesis(statement, methodology):
+        result = _run_b3_binary_cube_experiment(hypothesis)
+        # A B_3 record is gated by the independent certify_b3_record INSIDE the
+        # runner — its own authoritative, paranoid gate. The generic Sidon/cap
+        # threshold claim-validation below would wrongly zero a no-threshold
+        # "maximize" result, so the B_3 path returns directly.
+        result["deterministic"] = True
+        result["verification_method"] = "combinatorial_computation"
+        result["elapsed_seconds"] = time.time() - start
+        return result
 
     if is_cap_set_hypothesis(statement, methodology, full_text=statement):
         result = _run_cap_set_experiment(hypothesis)
