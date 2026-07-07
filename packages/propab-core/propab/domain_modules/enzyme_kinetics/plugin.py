@@ -203,6 +203,21 @@ class EnzymeKineticsPlugin(DomainPlugin):
             ),
         }
 
+    def known_value_check(
+        self, claim_text: str, evidence: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        """Flag a claim that merely rediscovers an established enzyme-kinetics fact.
+
+        Consumes this plugin's own ``literature_profile()`` Bar-Even 2011 anchors
+        (median kcat/Km ~1e5, diffusion-limit ceiling 1e8-1e9) and returns a
+        verdict dict with ``trivial_rediscovery=True`` / ``discovery_worthy=False``
+        when the claim restates a known value or violates the known ceiling, else
+        None. These are the flags ``paper_narrative._is_rediscovery`` reads.
+        """
+        from propab.domain_modules.enzyme_kinetics.rediscovery import check_rediscovery
+
+        return check_rediscovery(claim_text, evidence, self.literature_profile())
+
     def hypothesis_on_topic(self, text: str, methodology: str | None = None) -> bool:
         combined = f"{text} {methodology or ''}".lower()
         if any(x in combined for x in ("sidon", "cap-set", "docker", "filesystem")):

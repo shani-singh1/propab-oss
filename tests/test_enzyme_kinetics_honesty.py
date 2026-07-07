@@ -15,22 +15,26 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from propab import config
 from propab.domain_modules.enzyme_kinetics import verifier as EV
 from propab.domain_modules.enzyme_kinetics.adapter import (
     EnzymeExperimentSpec,
     EnzymeKineticsAdapter,
     dataset_is_synthetic,
+    real_data_cached,
 )
 from propab.domain_modules.enzyme_kinetics.verifier import (
     classify_enzyme_verdict,
     run_enzyme_experiment,
 )
 
-
-@pytest.fixture
-def tmp_data(monkeypatch, tmp_path):
-    monkeypatch.setattr(config.settings, "propab_data_dir", str(tmp_path))
+# Real-data tests SKIP (not error, not vacuously pass) when the real DLKcat cache
+# is absent or is the synthetic fallback, so CI/deploy goes green-with-skips
+# rather than downloading DLKcat or asserting nothing. Populate the real cache
+# with ``scripts/build_real_domain_datasets.py``.
+requires_real_data = pytest.mark.skipif(
+    not real_data_cached(),
+    reason="real DLKcat data not cached; run scripts/build_real_domain_datasets.py",
+)
 
 
 def _grouped_signal_frame(seed: int = 0, n_per: int = 120) -> pd.DataFrame:
@@ -126,15 +130,20 @@ def test_confirm_gate_refuses_when_null_stats_absent():
 
 # --- real data is genuinely real ---------------------------------------------
 
-def test_real_dataset_flag_is_honest(tmp_data):
-    """When real DLKcat data is served, the synthetic flag must be False; the
-    frame must be keyed by real EC classes with a real measured kcat target."""
-    adapter = EnzymeKineticsAdapter()
-    df = adapter.load_frame()
+@requires_real_data
+def test_real_dataset_flag_is_honest():
+    """When real DLKcat data is cached, the synthetic flag must be False; the
+    frame must be keyed by real EC classes with a real measured kcat target.
+
+    Skipped cleanly when only the synthetic fallback is on disk — a green run
+    then honestly reports "real-data assertion not exercised" instead of a
+    vacuous pass on the synthetic frame.
+    """
+    assert not dataset_is_synthetic()
+    df = EnzymeKineticsAdapter().load_frame()
     assert {"ec_class", "log_kcat", "kcat"}.issubset(df.columns)
-    if not dataset_is_synthetic():
-        # Real DLKcat records carry organism/substrate provenance and >3 EC classes.
-        assert df["ec_class"].nunique() >= 3
-        assert (df["kcat"] > 0).all()
-        assert df["organism"].str.len().gt(0).any()
-        assert not df["organism"].eq("synthetic").all()
+    # Real DLKcat records carry organism/substrate provenance and >3 EC classes.
+    assert df["ec_class"].nunique() >= 3
+    assert (df["kcat"] > 0).all()
+    assert df["organism"].str.len().gt(0).any()
+    assert not df["organism"].eq("synthetic").all()

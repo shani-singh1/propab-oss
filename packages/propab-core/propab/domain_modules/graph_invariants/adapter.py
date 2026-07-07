@@ -130,6 +130,15 @@ class RealNetworkUnavailable(FileNotFoundError):
     """
 
 
+def real_graph_data_available() -> bool:
+    """True when every real SNAP edge list is present on disk (no raise, no load).
+
+    Lets tests SKIP cleanly instead of ERRORING when the git-ignored real graph data
+    is absent (CI / a fresh checkout before ``scripts/fetch_graph_datasets.py`` runs).
+    """
+    return all((_source_dir() / fn).is_file() for _fam, fn, _desc, _url in REAL_NETWORKS)
+
+
 def _load_real_network(filename: str) -> nx.Graph:
     """Load a real SNAP edge list (gzipped, whitespace-separated, ``#`` comments)."""
     path = _source_dir() / filename

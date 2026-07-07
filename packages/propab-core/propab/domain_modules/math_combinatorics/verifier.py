@@ -167,7 +167,13 @@ def _wants_bc_matched_comparison(statement: str) -> bool:
 
 
 def _extract_cap_dims(statement: str) -> list[int]:
-    max_dim = max(CAP_SET_BEST_KNOWN)
+    # Accept any dimension the compute path actually supports (up to
+    # MAX_FULL_CAP_DIM), NOT just those with a best-known table value. Clamping at
+    # the table max silently dropped F_3^9 / F_3^10 claims and defaulted them to
+    # n=4 — a dishonest re-dimensioning. Dims above MAX_FULL_CAP_DIM are still
+    # dropped (unsupported), so a too-large claim routes to the default rather than
+    # a runaway computation.
+    max_dim = MAX_FULL_CAP_DIM
     dims: list[int] = []
     for m in re.finditer(r"F_3\^(\d+)", statement, re.I):
         dims.append(int(m.group(1)))

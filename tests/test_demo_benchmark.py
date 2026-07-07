@@ -16,10 +16,17 @@ def test_single_domain():
     assert body["breakthrough_criteria"]["metric_name"] == "final_outbreak_fraction"
 
 
-def test_gold_corpus_enforcement():
-    require_gold_campaign(BASELINE_CAMPAIGN_ID)
+def test_gold_corpus_enforcement(tmp_path):
+    # Self-contained: build a temp gold corpus rather than depend on the git-ignored
+    # data/lifetime_knowledge/gold_corpus.json (absent on CI / a fresh checkout).
+    from propab.operator_credit.campaign_era import GoldCorpus
+
+    gc_path = tmp_path / "gold_corpus.json"
+    GoldCorpus(campaign_ids=[BASELINE_CAMPAIGN_ID]).save(gc_path)
+
+    require_gold_campaign(BASELINE_CAMPAIGN_ID, gc_path)  # in corpus -> no raise
     try:
-        require_gold_campaign("00000000-0000-0000-0000-000000000000")
+        require_gold_campaign("00000000-0000-0000-0000-000000000000", gc_path)
         assert False, "should raise"
     except ValueError:
         pass

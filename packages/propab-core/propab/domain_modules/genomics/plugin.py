@@ -187,6 +187,24 @@ class GenomicsPlugin(DomainPlugin):
                 {
                     "name": "Housekeeping gene reference set (Eisenberg & Levanon 2013)",
                     "identifiers": ["HRT_Atlas", "housekeeping_genes"],
+                    # Canonical human housekeeping genes — the textbook constitutive
+                    # set used as the ground truth for "this gene is broadly/constant-
+                    # ly expressed". A claim that one of these is a housekeeping /
+                    # low-tissue-specificity / constitutively-expressed gene is a
+                    # rediscovery of an established fact, not a novel finding. Both
+                    # HGNC symbols and their Ensembl accessions are listed so a claim
+                    # keyed by either id form is caught.
+                    "housekeeping_genes": [
+                        "ACTB", "GAPDH", "TUBB", "B2M", "PPIA", "HPRT1", "TBP",
+                        "GUSB", "RPL13A", "RPLP0", "PGK1", "YWHAZ", "SDHA", "UBC",
+                    ],
+                    "housekeeping_gene_ensembl": [
+                        "ENSG00000075624", "ENSG00000111640", "ENSG00000196230",
+                        "ENSG00000166710", "ENSG00000196262", "ENSG00000165704",
+                        "ENSG00000112592", "ENSG00000169919", "ENSG00000161016",
+                        "ENSG00000089157", "ENSG00000102144", "ENSG00000164924",
+                        "ENSG00000073578", "ENSG00000150991",
+                    ],
                     "source": "Eisenberg & Levanon 2013, Trends Genet. (10.1016/j.tig.2013.05.010)",
                 },
             ],
@@ -209,6 +227,23 @@ class GenomicsPlugin(DomainPlugin):
                 "table or the Eisenberg-Levanon housekeeping reference set."
             ),
         }
+
+    def known_value_check(
+        self, claim_text: str, evidence: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        """Flag a claim that merely rediscovers an established genomics fact.
+
+        Consumes this plugin's own ``literature_profile()`` reference anchors
+        (canonical housekeeping-gene set + tau~0.5 tissue-specificity threshold)
+        and returns a verdict dict with ``trivial_rediscovery=True`` /
+        ``discovery_worthy=False`` when the claim restates a known value, else
+        None. The flags are the ones ``paper_narrative._is_rediscovery`` reads,
+        so a flagged finding is labelled "rediscovery (known value)" and dropped
+        from the headline discovery count.
+        """
+        from propab.domain_modules.genomics.rediscovery import check_rediscovery
+
+        return check_rediscovery(claim_text, evidence, self.literature_profile())
 
     def implementable_methodologies(self) -> list[str]:
         return ["leave-tissue-out", "lofo", "tissue label shuffle", "cross-tissue"]

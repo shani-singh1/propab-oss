@@ -15,13 +15,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from propab import config
 from propab.domain_modules.genomics import verifier as GV
 from propab.domain_modules.genomics.adapter import (
     GenomicsAdapter,
     GenomicsExperimentSpec,
     compute_gene_features,
     dataset_is_synthetic,
+    real_data_cached,
 )
 from propab.domain_modules.genomics.verifier import (
     classify_genomics_verdict,
@@ -30,10 +30,14 @@ from propab.domain_modules.genomics.verifier import (
 
 TISSUES = ["Brain", "Heart", "Liver", "Lung", "Muscle", "Skin", "Blood"]
 
-
-@pytest.fixture
-def tmp_genomics_data(monkeypatch, tmp_path):
-    monkeypatch.setattr(config.settings, "propab_data_dir", str(tmp_path))
+# Real-data tests SKIP (not error, not vacuously pass) when the real GTEx cache
+# is absent or is the synthetic fallback, so CI/deploy goes green-with-skips
+# rather than downloading GTEx or asserting nothing. Populate the real cache with
+# ``scripts/build_real_domain_datasets.py``.
+requires_real_data = pytest.mark.skipif(
+    not real_data_cached(),
+    reason="real GTEx data not cached; run scripts/build_real_domain_datasets.py",
+)
 
 
 def _long_frame(seed: int = 0, n_genes: int = 300) -> pd.DataFrame:
@@ -123,18 +127,23 @@ def test_confirm_gate_refuses_when_null_stats_absent():
 
 # --- real data is genuinely real ---------------------------------------------
 
-def test_real_dataset_flag_is_honest(tmp_genomics_data):
-    """When real GTEx data is served, the synthetic flag must be False and the
-    frame must carry real Ensembl gene ids across multiple named tissues."""
-    adapter = GenomicsAdapter()
-    df = adapter.load_frame()
+@requires_real_data
+def test_real_dataset_flag_is_honest():
+    """When real GTEx data is cached, the synthetic flag must be False and the
+    frame must carry real Ensembl gene ids across multiple named tissues.
+
+    Skipped cleanly when only the synthetic fallback is on disk — a green run
+    then honestly reports "real-data assertion not exercised" instead of a
+    vacuous pass on the synthetic frame.
+    """
+    assert not dataset_is_synthetic()
+    df = GenomicsAdapter().load_frame()
     assert {"gene_id", "tissue", "expression"}.issubset(df.columns)
-    if not dataset_is_synthetic():
-        assert df["tissue"].nunique() >= 3
-        assert df["gene_id"].nunique() >= 30
-        # Real GTEx ids are Ensembl ENSG accessions; the synthetic fallback uses
-        # a zero-padded counter (ENSG00000000000..) — assert real, non-degenerate ids.
-        ids = df["gene_id"].astype(str)
-        assert ids.str.startswith("ENSG").all()
-        assert ids.nunique() == df["gene_id"].nunique()
-        assert not ids.eq("ENSG00000000000").any()
+    assert df["tissue"].nunique() >= 3
+    assert df["gene_id"].nunique() >= 30
+    # Real GTEx ids are Ensembl ENSG accessions; the synthetic fallback uses
+    # a zero-padded counter (ENSG00000000000..) — assert real, non-degenerate ids.
+    ids = df["gene_id"].astype(str)
+    assert ids.str.startswith("ENSG").all()
+    assert ids.nunique() == df["gene_id"].nunique()
+    assert not ids.eq("ENSG00000000000").any()
