@@ -647,6 +647,27 @@ pair. **CFG6 · LOW · VERIFIED — token usage never captured** (`llm.py:235-23
 `input_tokens/output_tokens` hardcoded `None` though all 3 providers return counts) → no
 honest usage-based budget signal (compounds BUD1).
 
+## CAMPAIGN SMOKE TEST #1 — PASSED (2026-07-07, live, campaign e62ee0b7)
+
+Rebuilt the full stack with current code (api/orchestrator/worker/literature + infra;
+all `/health` green, literature all sources up) and ran a short Sidon campaign
+(`[domain_profile:math_combinatorics]`, budget 0.3h, max_hypotheses 10). **Result: the
+system ran end-to-end WITHOUT breaking, and was HONEST.**
+- **Real literature layer confirmed:** prior `source=literature_service`, `fallback=null`,
+  **24 established_facts + 4 key_papers**, evidence_status READY — the REAL service fed the
+  prior, no fallback (the user's #1 requirement, validated live).
+- **Real computation:** workers ran actual cap-set sweeps (n=3/4/5 real field sizes, cap
+  sizes, CLP bounds) + Sidon crossing search — not fabricated.
+- **Honest verdicts:** all 10 hypotheses REFUTED, 0 confirmed — the verifier correctly
+  refuted wrong claims (e.g. "no crossing below 0.5 at n=200") rather than false-confirming.
+- **O3 honesty fix fired:** orchestrator logged "FINALIZED WITH ZERO CONFIRMED FINDINGS …
+  produced no verified result."
+- **No crashes/tracebacks.** Paper compiled.
+**Config learnings (not bugs):** max_hypotheses=10 hit the cap in ~5 min (too shallow);
+hypotheses tested trivially-small n (n=200) where the real greedy-Sidon crossing is ~n=35000,
+so all honestly refuted. A real run needs max_hypotheses ~120 + an hours budget to explore
+deeper. Smoke test goal ("does it break?") = PASS; honesty machinery = works.
+
 ## CAMPAIGN READINESS (2026-07-07, overnight)
 
 **LIT-WIRE · CRITICAL · FIXED (feat/wire-literature-service + docker-compose, merged+verified) —
