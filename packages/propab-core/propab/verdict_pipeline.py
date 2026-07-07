@@ -42,17 +42,20 @@ def classify_evidence_type(evidence: dict[str, Any]) -> str:
         "counterexample",
     }
     method = evidence.get("verification_method")
+    # V3: a "deterministic" (gate-bypassing) classification requires an EXPLICIT
+    # proof method or an explicit `deterministic` flag. The former "any
+    # non-significance method name + a verified_true counter" clause was a
+    # gate-bypass hole — a domain emitting e.g. verification_method=
+    # "cross_network_lofo" with verified_true_steps=1 earned a free "confirmed"
+    # with NO adversarial null. A genuine statistical/lofo result that carries real
+    # null statistics is already classified as "lofo" above (has_lofo) or
+    # "statistical" below (has_stats); anything left with only a step counter and
+    # an unrecognized method must go THROUGH the artifact gate, not around it, so
+    # it falls to "unknown" and is gated. Domain-general: keyed on evidence shape,
+    # never on domain id.
     is_deterministic = (
         evidence.get("deterministic") is True
         or method in _PROOF_METHODS
-        or (
-            vt > 0
-            and vf == 0
-            # An explicit non-significance verification method still counts as a
-            # proof-style check, but a bare counter (no method / "significance")
-            # no longer qualifies.
-            and method not in {None, "", "significance"}
-        )
     )
     if is_deterministic:
         return "deterministic"

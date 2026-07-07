@@ -19,6 +19,35 @@ def _family_correlation(df, family: str, src: str, tgt: str) -> float:
     return float(np.corrcoef(x, y)[0, 1])
 
 
+def _label_shuffle_null(
+    df, held: str, src: str, tgt: str, observed_abs: float, *, n_perm: int = 200, seed: int = 0
+) -> tuple[float, float] | None:
+    """Adversarial null for the held-out src->tgt correlation.
+
+    Shuffles the target invariant against the source WITHIN the held-out family
+    (breaking any real src->tgt relationship while preserving each column's own
+    distribution), recomputes |corr| n_perm times, and returns
+    (null_p95, permutation_p). Returns None when a null cannot be built (held
+    family too small or degenerate) — the caller then emits NO null stats, so the
+    result fails closed to "unknown"/inconclusive rather than a free confirm.
+    """
+    sub = df[df["network_family"] == held]
+    if len(sub) < 5:
+        return None
+    x = sub[src].to_numpy(dtype=float)
+    y = sub[tgt].to_numpy(dtype=float)
+    if np.std(x) < 1e-9 or np.std(y) < 1e-9:
+        return None
+    rng = np.random.default_rng(seed)
+    null_abs = np.empty(n_perm, dtype=float)
+    for i in range(n_perm):
+        yp = rng.permutation(y)
+        null_abs[i] = 0.0 if np.std(yp) < 1e-9 else abs(float(np.corrcoef(x, yp)[0, 1]))
+    p95 = float(np.percentile(null_abs, 95))
+    perm_p = float(np.mean(null_abs >= observed_abs))
+    return p95, perm_p
+
+
 def run_graph_invariant_check(spec: GraphInvariantSpec) -> dict[str, Any]:
     df = GraphInvariantsAdapter().load_frame()
     src, tgt = spec.source_invariant, spec.target_invariant
@@ -42,7 +71,15 @@ def run_graph_invariant_check(spec: GraphInvariantSpec) -> dict[str, Any]:
         holds_held = held_corr > 0.05
 
     verified = holds_train and holds_held
-    return {
+
+    # Real adversarial null (replaces the old bare-threshold confirm that, via
+    # verification_method="cross_network_lofo", was classified "deterministic" and
+    # bypassed the artifact gate entirely). We emit the label-shuffle null in the
+    # lofo shape the gate reads (lofo_r2 / label_shuffle_null_p95 /
+    # label_shuffle_permutation_p) so classify_evidence_type routes this as "lofo"
+    # and the artifact gate — not this threshold — decides confirmation. When the
+    # null cannot be built the stats are omitted, so the result fails closed.
+    result: dict[str, Any] = {
         "metric_name": "invariant_correlation",
         "metric_value": held_corr,
         "train_correlation": train_corr,
@@ -55,6 +92,13 @@ def run_graph_invariant_check(spec: GraphInvariantSpec) -> dict[str, Any]:
         "discovery_worthy": verified,
         "trivial_rediscovery": not verified,
     }
+    null = _label_shuffle_null(df, held, src, tgt, abs(held_corr))
+    if null is not None:
+        p95, perm_p = null
+        result["lofo_r2"] = abs(held_corr)
+        result["label_shuffle_null_p95"] = p95
+        result["label_shuffle_permutation_p"] = perm_p
+    return result
 
 
 def classify_graph_verdict(hypothesis_text: str, result: dict[str, Any]) -> tuple[str, str, float]:
