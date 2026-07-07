@@ -263,3 +263,162 @@ def test_bose_chowla_exceeds_greedy_refuted(plugin: MathCombinatoricsPlugin) -> 
     evidence = run_combinatorics_experiment(hypothesis, ["sidon_set_density"])
     verdict, _, _ = plugin.classify_verdict(hypothesis["statement"], evidence)
     assert verdict == "refuted"
+
+
+# --- Real cap-set computation (F_3^n): validity, witness, honest sizes --------
+
+
+def test_cap_third_point_completes_line() -> None:
+    from propab.domain_modules.math_combinatorics.verifier import cap_third_point
+
+    # In F_3, a line through distinct a, b has third point c with a+b+c=0 mod 3.
+    a, b = (0, 0), (1, 2)
+    c = cap_third_point(a, b)
+    assert all((a[k] + b[k] + c[k]) % 3 == 0 for k in range(2))
+
+
+def test_is_valid_cap_accepts_known_cap_and_rejects_collinear() -> None:
+    from propab.domain_modules.math_combinatorics.verifier import is_valid_cap
+
+    # {(0,0), (0,1), (1,0)} is a cap in F_3^2 (no third point completes a line).
+    ok, _ = is_valid_cap([(0, 0), (0, 1), (1, 0)], 2)
+    assert ok is True
+
+    # {(0,0), (1,1), (2,2)} is a full line in F_3^2 -> NOT a cap.
+    bad, detail = is_valid_cap([(0, 0), (1, 1), (2, 2)], 2)
+    assert bad is False
+    assert detail["reason"] == "collinear_triple"
+
+    # Duplicate points are rejected.
+    dup, ddetail = is_valid_cap([(0, 0), (0, 0)], 2)
+    assert dup is False
+    assert ddetail["reason"] == "duplicate_point"
+
+
+def test_compute_cap_set_returns_validated_cap_with_matching_size() -> None:
+    from propab.domain_modules.math_combinatorics.verifier import compute_cap_set, is_valid_cap
+
+    for n in (2, 3, 6, 7):
+        r = compute_cap_set(n)
+        # Reported size must equal the actual computed set size, independently re-checked.
+        assert r["cap_valid"] is True
+        assert r["cap_set_size"] == r["computed_size"]
+        pts = r["witness"].get("cap_points")
+        if pts is not None:
+            # Full witness: re-validate from scratch and confirm the reported size.
+            revalid, _ = is_valid_cap([tuple(p) for p in pts], n)
+            assert revalid is True
+            assert len(pts) == r["cap_set_size"]
+        assert r["construction_source"] == "computed"
+
+
+def test_compute_cap_set_reproduces_f3_4_max_20() -> None:
+    """Near-exhaustive branch-and-bound reproduces the known max cap in F_3^4 = 20."""
+    from propab.domain_modules.math_combinatorics.verifier import (
+        compute_cap_set,
+        is_valid_cap,
+    )
+
+    r = compute_cap_set(4)
+    assert r["cap_set_size"] == 20
+    assert r["cap_valid"] is True
+    assert r["vs_best_known"] == "matches_best_known"
+    pts = [tuple(p) for p in r["witness"]["cap_points"]]
+    ok, _ = is_valid_cap(pts, 4)
+    assert ok is True
+    assert len(pts) == 20
+
+
+def test_max_cap_exhaustive_optimal_small_dim() -> None:
+    """Exhaustive search proves the maximum cap in F_3^2 is 4 (complete search)."""
+    from propab.domain_modules.math_combinatorics.verifier import (
+        is_valid_cap,
+        max_cap_exhaustive,
+    )
+
+    cap, complete = max_cap_exhaustive(2, time_limit=5.0)
+    assert complete is True  # whole tree searched -> provably optimal
+    assert len(cap) == 4
+    ok, _ = is_valid_cap(cap, 2)
+    assert ok is True
+
+
+def test_product_construction_yields_valid_larger_cap() -> None:
+    from propab.domain_modules.math_combinatorics.verifier import (
+        _base_cap,
+        _cap_product,
+        is_valid_cap,
+    )
+
+    a = _base_cap(2)
+    b = _base_cap(3)
+    prod = _cap_product(a, b)
+    assert len(prod) == len(a) * len(b)
+    ok, _ = is_valid_cap(prod, 5)
+    assert ok is True
+
+
+def test_compute_cap_set_reports_honest_gap_below_best_known() -> None:
+    from propab.domain_modules.math_combinatorics.verifier import compute_cap_set
+
+    # F_3^8 best-known is 512; our product construction is genuinely smaller.
+    r = compute_cap_set(8)
+    assert r["best_known_size"] == 512
+    assert r["cap_set_size"] < 512
+    assert r["vs_best_known"] == "below_best_known"
+    assert r["gap_to_best_known"] == 512 - r["cap_set_size"]
+    assert r["cap_valid"] is True
+
+
+def test_large_cap_uses_certificate_witness_with_validated_factors() -> None:
+    from propab.domain_modules.math_combinatorics.verifier import compute_cap_set
+
+    r = compute_cap_set(10)  # 3^10 = 59049 points; full set too large to list.
+    assert r["cap_valid"] is True
+    assert r["witness"]["kind"] == "certificate"
+    # Every base factor of the product is fully validated.
+    factors = r["witness"]["factor_validity"]
+    assert factors and all(f["valid"] for f in factors)
+    # Certificate reports a checkable size and sample.
+    assert r["cap_set_size"] == r["computed_size"]
+    assert len(r["witness"]["sample_points"]) > 0
+
+
+def test_cap_compute_path_not_flagged_rediscovery(plugin: MathCombinatoricsPlugin) -> None:
+    hypothesis = {
+        "statement": "Construct a cap set in F_3^6 and report its size.",
+        "test_methodology": "greedy construction",
+    }
+    evidence = run_combinatorics_experiment(hypothesis, ["cap_set_size"])
+    assert evidence["construction_source"] == "computed"
+    assert evidence.get("trivial_rediscovery") is False
+    assert evidence["cap_valid"] is True
+    assert evidence["cap_set_size"] > 0
+
+
+def test_cap_table_lookup_still_flagged_rediscovery(plugin: MathCombinatoricsPlugin) -> None:
+    """DISC2 guard: a best-known TABLE lookup must stay trivial_rediscovery."""
+    hypothesis = {
+        "statement": "Report the best-known cap set size in F_3^6.",
+        "test_methodology": "best-known table lookup",
+    }
+    evidence = run_combinatorics_experiment(hypothesis, ["cap_set_size"])
+    assert evidence["cap_set_size"] == 112  # tabulated best-known value
+    assert evidence.get("trivial_rediscovery") is True
+    assert evidence["construction_source"] == "best_known_table"
+    verdict, _, confidence = plugin.classify_verdict(hypothesis["statement"], evidence)
+    assert verdict == "inconclusive"
+    assert confidence <= 0.5
+
+
+def test_cap_size_never_reported_from_table_as_computed() -> None:
+    """The compute path must not surface a CAP_SET_BEST_KNOWN value as 'computed'."""
+    from propab.domain_modules.math_combinatorics.constructors import CAP_SET_BEST_KNOWN
+    from propab.domain_modules.math_combinatorics.verifier import compute_cap_set
+
+    # For a dim where best-known > our real construction, sizes must differ.
+    for n in (6, 7, 8):
+        r = compute_cap_set(n)
+        assert r["construction_source"] == "computed"
+        assert r["cap_set_size"] != CAP_SET_BEST_KNOWN[n]
+        assert r["cap_valid"] is True

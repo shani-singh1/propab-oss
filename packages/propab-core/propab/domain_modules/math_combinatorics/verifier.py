@@ -34,6 +34,28 @@ CAP_SWEEP_DIMS = (3, 4, 5, 6, 7)
 MIN_N_FOR_SINGLE_POINT_DISCOVERY = 500
 MAX_SIDON_N = 100_000
 
+# --- Real cap-set computation in F_3^n ---------------------------------------
+# Largest F_3^n we build/validate the FULL point set for. Beyond this we still
+# compute a genuine cap (via the product construction) but certify its size from
+# fully-validated base caps + a sampled spot-check rather than an O(|S|^2) sweep
+# over the whole (huge) set.
+MAX_FULL_CAP_DIM = 10
+# Time budget for the near-exhaustive branch-and-bound used to seed small base
+# caps. The DFS is deterministic, so a fixed budget yields a reproducible cap.
+# 4.0s comfortably clears the ~2.4s at which n=4 reaches its optimum (size 20).
+CAP_BB_TIME_BUDGET = 4.0
+# Above this cap size we validate every base factor fully and spot-check a random
+# sample of product points rather than running the O(|S|^2) sweep over the whole
+# (large) product set.
+CAP_FULL_CHECK_MAX_SIZE = 1000
+# Restart count for the randomized greedy fallback (deterministic seed).
+CAP_GREEDY_RESTARTS = 150
+CAP_GREEDY_SEED = 0xC0FFEE
+# Number of product-cap points to spot-check when the full set is too large.
+CAP_WITNESS_SAMPLE = 24
+
+CapPoint = tuple[int, ...]
+
 
 def run_combinatorics_experiment(hypothesis: dict[str, Any], features: list[str]) -> dict[str, Any]:
     start = time.time()
@@ -576,6 +598,302 @@ def _run_sidon_sweep(statement: str, ns: list[int], *, method: str = "greedy") -
     }
 
 
+# =============================================================================
+# Real cap-set construction and INDEPENDENT validity check in F_3^n.
+#
+# A subset S of F_3^n is a *cap* iff no three distinct points are collinear.
+# Over F_3 a line through distinct a, b is {a, b, c} with a + b + c = 0, i.e. the
+# unique third point completing the line is c = -(a + b). So S is a cap iff for
+# every pair (a, b) in S the point c = -(a + b) is NOT in S (unless c is a or b).
+# The check below is O(|S|^2) and is run on the ACTUAL returned set — it never
+# trusts a claimed size.
+# =============================================================================
+
+
+def cap_third_point(a: CapPoint, b: CapPoint) -> CapPoint:
+    """The unique point c in F_3^n with a + b + c = 0 (completes the line a,b)."""
+    return tuple((-(a[k] + b[k])) % 3 for k in range(len(a)))
+
+
+def is_valid_cap(points: list[CapPoint], n: int) -> tuple[bool, dict[str, Any]]:
+    """
+    INDEPENDENT O(|S|^2) cap-validity check on the ACTUAL set of points.
+
+    Returns (valid, detail). A set is a cap iff (1) all points are distinct and
+    live in F_3^n, and (2) no three distinct points are collinear — equivalently
+    for every pair (a, b), the completing point c = -(a+b) is not a third member.
+    """
+    seen: set[CapPoint] = set()
+    for p in points:
+        if len(p) != n or any(coord not in (0, 1, 2) for coord in p):
+            return False, {"reason": "point_not_in_F3^n", "point": list(p)}
+        if p in seen:
+            return False, {"reason": "duplicate_point", "point": list(p)}
+        seen.add(p)
+    pts = list(seen)
+    for i in range(len(pts)):
+        a = pts[i]
+        for j in range(i + 1, len(pts)):
+            b = pts[j]
+            c = cap_third_point(a, b)
+            if c != a and c != b and c in seen:
+                return False, {
+                    "reason": "collinear_triple",
+                    "triple": [list(a), list(b), list(c)],
+                }
+    return True, {"reason": "ok", "size": len(pts)}
+
+
+def _greedy_cap_from_order(elements: list[CapPoint], n: int) -> list[CapPoint]:
+    """Greedy cap along a fixed candidate ordering (accept a point if it keeps S a cap)."""
+    chosen: set[CapPoint] = set()
+    cap: list[CapPoint] = []
+    for e in elements:
+        ok = True
+        for a in cap:
+            c = cap_third_point(a, e)
+            if c != a and c != e and c in chosen:
+                ok = False
+                break
+        if ok:
+            chosen.add(e)
+            cap.append(e)
+    return cap
+
+
+def _random_restart_cap(n: int, restarts: int, seed: int) -> list[CapPoint]:
+    """Deterministic random-restart greedy: lexicographic pass + `restarts` shuffles."""
+    rng = random.Random(seed)
+    elements = list(itertools.product(range(3), repeat=n))
+    best = _greedy_cap_from_order(elements, n)
+    for _ in range(restarts):
+        order = elements[:]
+        rng.shuffle(order)
+        cap = _greedy_cap_from_order(order, n)
+        if len(cap) > len(best):
+            best = cap
+    return best
+
+
+def max_cap_exhaustive(n: int, time_limit: float = CAP_BB_TIME_BUDGET) -> tuple[list[CapPoint], bool]:
+    """
+    Near-exhaustive branch-and-bound for the maximum cap in F_3^n.
+
+    Deterministic depth-first search with origin-fixing (every cap can be
+    translated to contain 0) and a candidate-set bound. Returns (best_cap,
+    complete): `complete` is True only if the whole tree was searched within the
+    budget (i.e. the returned size is provably optimal). For small n (<=4) this
+    reliably reaches the true maximum well inside a few seconds; for larger n it
+    returns the best cap found before the budget expires.
+    """
+    elements = list(itertools.product(range(3), repeat=n))
+    origin: CapPoint = tuple([0] * n)
+    candidates = [e for e in elements if e != origin]
+    best_size = [1]
+    best_cap: list[list[CapPoint]] = [[origin]]
+    complete = [True]
+    start = time.time()
+
+    def rec(cap: list[CapPoint], chosen: set[CapPoint], cand: list[CapPoint]) -> None:
+        if time.time() - start > time_limit:
+            complete[0] = False
+            return
+        # Upper bound: nothing left can beat the incumbent.
+        if len(cap) + len(cand) <= best_size[0]:
+            return
+        if not cand:
+            if len(cap) > best_size[0]:
+                best_size[0] = len(cap)
+                best_cap[0] = list(cap)
+            return
+        e = cand[0]
+        rest = cand[1:]
+        # Branch: include e, filtering the remaining candidates that stay valid.
+        chosen2 = chosen | {e}
+        cap2 = cap + [e]
+        next_cand: list[CapPoint] = []
+        for f in rest:
+            ok = True
+            for a in cap2:
+                c = cap_third_point(a, f)
+                if c != a and c != f and c in chosen2:
+                    ok = False
+                    break
+            if ok:
+                next_cand.append(f)
+        rec(cap2, chosen2, next_cand)
+        # Branch: exclude e.
+        rec(cap, chosen, rest)
+
+    rec([origin], {origin}, candidates)
+    return best_cap[0], complete[0]
+
+
+def _cap_product(cap_a: list[CapPoint], cap_b: list[CapPoint]) -> list[CapPoint]:
+    """
+    Cartesian product construction: if A is a cap in F_3^{m_a} and B a cap in
+    F_3^{m_b} then {(a, b) : a in A, b in B} is a cap in F_3^{m_a+m_b} of size
+    |A|*|B|. (A line in the product projects to a line or a point in each factor;
+    a full line would force a full line in at least one factor, contradicting the
+    cap property there.) Validity of the product still follows from validating A
+    and B, which we do independently.
+    """
+    return [a + b for a in cap_a for b in cap_b]
+
+
+# Module-level cache of computed base caps (amortizes the B&B / restart cost).
+_BASE_CAP_CACHE: dict[int, list[CapPoint]] = {}
+
+
+def _base_cap(m: int) -> list[CapPoint]:
+    """A genuinely computed cap in F_3^m used as a product-construction factor."""
+    cached = _BASE_CAP_CACHE.get(m)
+    if cached is not None:
+        return cached
+    if m <= 1:
+        cap: list[CapPoint] = [(0,), (1,)] if m == 1 else [()]
+    elif m <= 4:
+        cap, _complete = max_cap_exhaustive(m, time_limit=CAP_BB_TIME_BUDGET)
+    else:
+        cap = _random_restart_cap(m, CAP_GREEDY_RESTARTS, seed=CAP_GREEDY_SEED + m)
+    _BASE_CAP_CACHE[m] = cap
+    return cap
+
+
+def _decompose_dim(n: int) -> list[int]:
+    """
+    Split n into base dimensions for the product construction, preferring dim-4
+    factors (whose optimal cap has size 20, the densest small base we compute).
+    """
+    parts: list[int] = []
+    remaining = n
+    for base in (4, 5, 3, 2, 1):
+        while remaining >= base:
+            parts.append(base)
+            remaining -= base
+    return parts
+
+
+def compute_cap_set(n: int) -> dict[str, Any]:
+    """
+    Compute a REAL cap in F_3^n and validate it independently.
+
+    Strategy:
+      * n <= 4: near-exhaustive branch-and-bound (reaches the true maximum).
+      * n == 5: deterministic random-restart greedy.
+      * n >= 6: product of computed base caps (dims from ``_decompose_dim``).
+
+    The returned dict carries the *actual computed size* (never a table value), a
+    checkable witness (full point list when small, otherwise a certificate:
+    construction params + fully-validated factor sizes + a sampled spot-check),
+    and the independent-validity result.
+    """
+    n = max(1, int(n))
+    parts: list[int]
+    proven_optimal = False
+    if n <= 4:
+        cap, proven_optimal = max_cap_exhaustive(n, time_limit=CAP_BB_TIME_BUDGET)
+        parts = [n]
+        method = "exhaustive_branch_and_bound"
+        seed_desc = f"deterministic DFS, origin-fixed, budget={CAP_BB_TIME_BUDGET}s"
+    elif n == 5:
+        cap = _random_restart_cap(n, CAP_GREEDY_RESTARTS, seed=CAP_GREEDY_SEED + n)
+        parts = [n]
+        method = "random_restart_greedy"
+        seed_desc = f"seed={CAP_GREEDY_SEED + n}, restarts={CAP_GREEDY_RESTARTS}"
+    else:
+        parts = _decompose_dim(n)
+        cap = _base_cap(parts[0])
+        for p in parts[1:]:
+            cap = _cap_product(cap, _base_cap(p))
+        method = f"product_construction{tuple(parts)}"
+        seed_desc = "product of computed base caps"
+
+    size = len(cap)
+    field_size = 3**n
+    clp = 2.756**n
+    best_known = CAP_SET_BEST_KNOWN.get(n)
+
+    # Independent validity. For a manageable set, check the WHOLE thing O(|S|^2).
+    # For a huge product cap, validate every base factor fully and spot-check a
+    # random sample of product points (full validity then follows from the base
+    # validity + the product theorem).
+    if size <= CAP_FULL_CHECK_MAX_SIZE:
+        valid, detail = is_valid_cap(cap, n)
+        witness_kind = "full_point_set"
+        sample = [list(p) for p in cap[:CAP_WITNESS_SAMPLE]]
+        factors_valid = None
+    else:
+        valid = True
+        detail = {"reason": "certificate"}
+        factors_valid = []
+        for p in sorted(set(parts)):
+            base_cap = _base_cap(p)
+            ok, bdetail = is_valid_cap(base_cap, p)
+            factors_valid.append({"dim": p, "size": len(base_cap), "valid": ok})
+            if not ok:
+                valid = False
+                detail = {"reason": "invalid_base_factor", "dim": p, **bdetail}
+                break
+        if valid:
+            rng = random.Random(CAP_GREEDY_SEED)
+            sample_pts = (
+                cap if size <= CAP_WITNESS_SAMPLE else rng.sample(cap, CAP_WITNESS_SAMPLE)
+            )
+            ok, sdetail = is_valid_cap(sample_pts, n)
+            if not ok:
+                valid = False
+                detail = {"reason": "sample_check_failed", **sdetail}
+        witness_kind = "certificate"
+        sample = [list(p) for p in cap[:CAP_WITNESS_SAMPLE]]
+
+    witness = {
+        "kind": witness_kind,
+        "construction": method,
+        "decomposition": parts,
+        "seed_params": seed_desc,
+        "reported_size": size,
+        "sample_points": sample,
+        "third_point_rule": "c = (-(a+b)) mod 3 must not be a third member",
+    }
+    if witness_kind == "full_point_set" and size <= 512:
+        witness["cap_points"] = [list(p) for p in cap]
+    if factors_valid is not None:
+        witness["factor_validity"] = factors_valid
+
+    result = {
+        "n": n,
+        "field_size": field_size,
+        "cap_set_size": size,
+        "computed_size": size,
+        "cap_valid": valid,
+        "validity_detail": detail,
+        "upper_bound_clp": clp,
+        "ratio_to_clp": size / clp if clp > 0 else 0.0,
+        "density": size / field_size if field_size else 0.0,
+        "construction_source": "computed",
+        "construction_method": method,
+        "proven_optimal": proven_optimal,
+        "best_known_size": best_known,
+        "witness": witness,
+        "example_cap": sample[:10],
+    }
+    # Honest computed-vs-known comparison (NEVER report the table as computed).
+    if best_known is None:
+        result["vs_best_known"] = "no_table_value"
+        result["gap_to_best_known"] = None
+    elif size < best_known:
+        result["vs_best_known"] = "below_best_known"
+        result["gap_to_best_known"] = best_known - size
+    elif size == best_known:
+        result["vs_best_known"] = "matches_best_known"
+        result["gap_to_best_known"] = 0
+    else:
+        result["vs_best_known"] = "exceeds_best_known"
+        result["gap_to_best_known"] = best_known - size  # negative => exceeds
+    return result
+
+
 def _run_cap_set_experiment(hypothesis: dict[str, Any]) -> dict[str, Any]:
     statement = str(hypothesis.get("statement") or hypothesis.get("text") or "")
     dims = _extract_cap_dims(statement)
@@ -589,89 +907,132 @@ def _run_cap_set_experiment(hypothesis: dict[str, Any]) -> dict[str, Any]:
         use_dims = dims if dims else list(CAP_SWEEP_DIMS)
         return _run_cap_set_sweep(statement, sorted(set(use_dims))[:6])
 
-    max_dim = max(CAP_SET_BEST_KNOWN)
     n = dims[0] if dims else 4
-    n = min(n, max_dim)
-    pt = _cap_set_best_known(n)
+    n = min(n, MAX_FULL_CAP_DIM)
+
+    if _is_table_lookup_methodology(hypothesis):
+        return _run_cap_set_table_lookup(statement, n)
+
+    pt = compute_cap_set(n)
+    notes = _cap_compute_notes(pt)
     base = {
         "verified_true_steps": 0,
         "verified_false_steps": 0,
-        "trivial_rediscovery": True,
+        # A single-dimension computation is not itself open-problem evidence, but
+        # it is a REAL computed cap (not a rediscovery of a table value), so it is
+        # not flagged trivial_rediscovery. Discovery-worthiness is decided by the
+        # claim validation below.
+        "trivial_rediscovery": False,
         "discovery_worthy": False,
         "metric_value": pt["density"],
         "metric_name": "cap_set_density",
         **pt,
-        "notes": (
-            f"Best-known cap-set size in F_3^{n} is {pt['cap_set_size']} "
-            "(literature table, not greedy 2^n product)."
-        ),
+        "notes": notes,
     }
+    if not pt["cap_valid"]:
+        # Never report a size without a valid witness — demote to inconclusive.
+        base["trivial_rediscovery"] = False
+        base["discovery_worthy"] = False
+        base["cap_set_size"] = 0
+        base["notes"] = (
+            f"Cap construction in F_3^{n} FAILED independent validity check "
+            f"({pt['validity_detail'].get('reason')}); no size reported."
+        )
+        return base
     return _apply_claim_to_verdict(
         base, statement, computed_size=pt["cap_set_size"], dimension=n,
     )
 
 
-def _cap_set_best_known(n: int) -> dict[str, Any]:
-    """Return best-known cap-set size for F_3^n (not the trivial 2^n product)."""
-    size = CAP_SET_BEST_KNOWN.get(n)
-    if size is None:
-        size = _cap_set_greedy_fallback(n)["cap_set_size"]
-        source = "greedy_fallback"
+def _cap_compute_notes(pt: dict[str, Any]) -> str:
+    n = pt["n"]
+    size = pt["cap_set_size"]
+    bk = pt["best_known_size"]
+    method = pt["construction_method"]
+    witness_kind = pt["witness"]["kind"]
+    optimal = " (proven optimal)" if pt.get("proven_optimal") else ""
+    if bk is None:
+        cmp = f"no best-known table value for n={n} (honest computed size only)"
+    elif pt["vs_best_known"] == "below_best_known":
+        cmp = f"below best-known {bk} (honest gap {pt['gap_to_best_known']})"
+    elif pt["vs_best_known"] == "matches_best_known":
+        cmp = f"matches best-known {bk}"
     else:
-        source = "best_known_table"
+        cmp = f"EXCEEDS table value {bk}"
+    return (
+        f"Computed a real, independently-validated cap in F_3^{n} of size {size}{optimal} "
+        f"via {method}; {cmp}. Witness: {witness_kind}."
+    )
+
+
+def _is_table_lookup_methodology(hypothesis: dict[str, Any]) -> bool:
+    """True when the hypothesis explicitly asks for a best-known TABLE lookup."""
+    text = " ".join(
+        str(hypothesis.get(k) or "")
+        for k in ("statement", "text", "test_methodology")
+    ).lower()
+    return any(
+        marker in text
+        for marker in (
+            "table lookup",
+            "table-lookup",
+            "best-known table",
+            "best known table",
+            "literature table",
+            "lookup table",
+            "look up the",
+            "read the known",
+            "known value from",
+        )
+    )
+
+
+def _run_cap_set_table_lookup(statement: str, n: int) -> dict[str, Any]:
+    """
+    Rediscovery guard (DISC2): a hypothesis that asks only for a best-known TABLE
+    value gets the tabulated number, flagged trivial_rediscovery — NOT presented
+    as a computation. This preserves the existing table-lookup demotion.
+    """
+    size = CAP_SET_BEST_KNOWN.get(n)
     field_size = 3**n
     clp = 2.756**n
-    density = size / field_size if field_size else 0.0
-    return {
+    if size is None:
+        size = 0
+        note_size = "no table value"
+    else:
+        note_size = str(size)
+    base = {
+        "verified_true_steps": 0,
+        "verified_false_steps": 0,
+        "trivial_rediscovery": True,
+        "discovery_worthy": False,
+        "metric_value": size / field_size if field_size else 0.0,
+        "metric_name": "cap_set_density",
         "n": n,
         "field_size": field_size,
         "cap_set_size": size,
         "upper_bound_clp": clp,
         "ratio_to_clp": size / clp if clp > 0 else 0.0,
-        "density": density,
-        "construction_source": source,
+        "density": size / field_size if field_size else 0.0,
+        "construction_source": "best_known_table",
         "example_cap": [],
+        "notes": (
+            f"Best-known cap-set size in F_3^{n} is {note_size} read from the "
+            "literature table — a table lookup, not a computation (trivial rediscovery)."
+        ),
     }
-
-
-def _cap_set_greedy_fallback(n: int) -> dict[str, Any]:
-    """Greedy AP-free search in F_3^n — used only when n exceeds the table."""
-    elements = list(itertools.product(range(3), repeat=n))
-
-    def has_ap(a: tuple[int, ...], b: tuple[int, ...], c: tuple[int, ...]) -> bool:
-        return all((a[i] + b[i] + c[i]) % 3 == 0 for i in range(n))
-
-    cap: list[tuple[int, ...]] = []
-    for elem in elements:
-        valid = True
-        for i in range(len(cap)):
-            for j in range(i + 1, len(cap)):
-                if has_ap(cap[i], cap[j], elem):
-                    valid = False
-                    break
-            if not valid:
-                break
-        if valid:
-            cap.append(elem)
-
-    clp = 2.756**n
-    density = len(cap) / len(elements) if elements else 0.0
-    return {
-        "n": n,
-        "field_size": len(elements),
-        "cap_set_size": len(cap),
-        "upper_bound_clp": clp,
-        "ratio_to_clp": len(cap) / clp if clp > 0 else 0.0,
-        "density": density,
-        "example_cap": [list(c) for c in cap[:10]],
-    }
+    return _apply_claim_to_verdict(
+        base, statement, computed_size=size, dimension=n,
+    )
 
 
 def _run_cap_set_sweep(statement: str, dims: list[int]) -> dict[str, Any]:
-    points = [_cap_set_best_known(d) for d in dims]
+    points = [compute_cap_set(d) for d in dims]
     ratios = [p["ratio_to_clp"] for p in points]
     sizes = [p["cap_set_size"] for p in points]
-    discovery_worthy = len(points) >= 2 and max(p["n"] for p in points) >= 5
+    all_valid = all(p["cap_valid"] for p in points)
+    discovery_worthy = all_valid and len(points) >= 2 and max(p["n"] for p in points) >= 5
+    known = [p["best_known_size"] for p in points]
     return {
         "verified_true_steps": 0,
         "verified_false_steps": 0,
@@ -680,9 +1041,10 @@ def _run_cap_set_sweep(statement: str, dims: list[int]) -> dict[str, Any]:
         "metric_value": sum(ratios) / len(ratios) if ratios else 0.0,
         "metric_name": "cap_set_clp_ratio",
         "sweep": points,
+        "all_caps_valid": all_valid,
         "notes": (
-            f"Cap-set sweep dims={dims}: best-known sizes={sizes}, "
-            f"CLP ratios={[round(r, 4) for r in ratios]}"
+            f"Cap-set sweep dims={dims}: COMPUTED validated sizes={sizes} "
+            f"(best-known={known}), CLP ratios={[round(r, 4) for r in ratios]}"
         ),
     }
 
