@@ -18,7 +18,7 @@ from services.orchestrator.intake import ParsedQuestion
 from services.orchestrator.schemas import Prior, RankedHypothesis
 
 
-# Tokens that carry no domain signal — never used as the subject of a seed claim.
+# Tokens that carry no domain signal — never used as the subject of a claim.
 _STOPWORDS = frozenset(
     {
         "which", "what", "where", "when", "whether", "does", "doing", "about",
@@ -62,184 +62,31 @@ def _salient_terms(question: str, *, prior: Prior | None = None, limit: int = 8)
     return seen[:limit]
 
 
-def _parametric_families(question: str) -> list[str]:
-    """Parametric knobs literally present in the question (e.g. 'n', 'k', 'p<0.05', '10^6')."""
-    text = strip_question_suffix(question or "")
-    families: list[str] = []
-    # single-letter parameters like n, k, p, m used as variables
-    for m in re.findall(r"(?<![A-Za-z])([a-z])\s*(?:[=<>≤≥]|\b(?:up to|below|above)\b)", text, flags=re.I):
-        if m.lower() not in {s.lower() for s in families}:
-            families.append(m)
-    # explicit numeric bounds / powers
-    for m in re.findall(r"(\d+(?:\^\d+|e\d+|,\d{3})*)", text):
-        if m not in families:
-            families.append(m)
-    return families[:4]
+def _open_gap_lines(prior: Prior | None, *, limit: int = 6) -> list[str]:
+    """Human-readable open-gap statements from the literature prior, richest first.
 
-
-def _domain_shape_options(question: str, *, prior: Prior | None = None) -> list[str]:
-    """Domain-GENERAL discovery fallbacks derived from the question's own structure.
-
-    Produces, for ANY question with zero keyword matches, a set of concrete,
-    falsifiable seed claims: a discovery claim, a competing-mechanism contrast,
-    a parametric/boundary probe, and a finite-verification claim — each phrased
-    from the question's salient terms and (when available) the literature prior.
-    This replaces the former hardcoded per-topic keyword table.
+    Feeds the generation prompt the literature's genuinely OPEN questions (with
+    any stated best-known bound and computationally-approachable angle) so the
+    model targets what is unknown, rather than re-deriving tabulated constants.
     """
-    terms = _salient_terms(question, prior=prior)
-    subject = " ".join(terms[:3]) if terms else "the stated phenomenon"
-    # Full-context phrase reuses the question's own salient vocabulary so the
-    # domain-general seed still shares enough tokens with the question to clear
-    # the lexical relevance gate (the embedding gate is primary in production).
-    context = " ".join(terms) if terms else subject
-    secondary = " ".join(terms[3:6]) if len(terms) > 3 else subject
-    families = _parametric_families(question)
-    fam = families[0] if families else None
-    bound = next((f for f in families if any(c.isdigit() for c in f)), "10^4")
-
-    if fam and fam.isalpha():
-        boundary = (
-            f"Within {context}, there is a boundary regime in parameter {fam} where the "
-            f"effect claimed for {subject} weakens or reverses, locatable by sweeping {fam}."
-        )
-    elif families:
-        boundary = (
-            f"Within {context}, the claimed effect on {subject} has a threshold near "
-            f"{families[0]} beyond which the sign or magnitude of the effect changes."
-        )
-    else:
-        boundary = (
-            f"Within {context}, a parametric regime exists in which the claimed effect on "
-            f"{subject} weakens or reverses, identifiable by a systematic parameter sweep."
-        )
-
-    return [
-        (
-            f"Within {context}, a measurable structured pattern relating {subject} to "
-            f"{secondary} is detectable by direct simulation or exact enumeration and "
-            f"exceeds a matched noise-only null model."
-        ),
-        (
-            f"For {context}, two competing mechanisms for {subject} make divergent, "
-            f"testable predictions on held-out instance families, so their ranking can be "
-            f"decided empirically rather than assumed."
-        ),
-        boundary,
-        (
-            f"Finite verification up to {bound} distinguishes the leading claim about "
-            f"{subject} within {context} from a random baseline with a reproducible test statistic."
-        ),
-    ]
-
-
-def _domain_fallback_options(question: str, *, prior: Prior | None = None) -> list[str]:
-    """Domain-general discovery fallbacks for seed generation.
-
-    PRIMARY behaviour is now domain-shape driven (``_domain_shape_options``): any
-    question — including ones matching none of the historical demo topics — yields
-    concrete, question-relevant seed claims. The canned demo hypotheses survive
-    ONLY as an optional supplement, appended after the general seeds so the demo
-    topics keep their tuned phrasing without gating the general path.
-    """
-    general = _domain_shape_options(question, prior=prior)
-    extra = _demo_topic_supplement(question)
-    if not extra:
-        return general
-    # General seeds first, demo phrasings appended, de-duplicated.
-    merged: list[str] = list(general)
-    seen = {g.strip().lower() for g in general}
-    for opt in extra:
-        key = opt.strip().lower()
-        if key not in seen:
-            merged.append(opt)
-            seen.add(key)
-    return merged
-
-
-def _scoped_contagion_text(claim: str, *, ood: str) -> str:
-    return (
-        f"{claim}\n"
-        "Population: N=300–5000 node graphs, ≥30 instances per topology family\n"
-        "Distribution: Barabási–Albert (m=3–5) and stochastic block model, avg degree 6–12\n"
-        f"Claimed generalization: Effect transfers to Watts–Strogatz with matched average degree\n"
-        "Expected failure modes: Vanishes on ER graphs or when modularity Q<0.2; breaks if seed set >5%\n"
-        f"OOD test: {ood}"
-    )
-
-
-def _demo_topic_supplement(question: str) -> list[str]:
-    """OPTIONAL extra phrasings for the historical demo topics.
-
-    These are NEVER the sole source of seeds (see ``_domain_fallback_options``);
-    they only enrich the general seeds when a demo topic is recognized, so the
-    tuned demo behaviour is preserved without making the engine look
-    domain-general while being keyword-gated.
-    """
-    ql = (question or "").lower()
-    if any(k in ql for k in ("egyptian", "unit fraction", "1/n", "erdős", "erdos", "strauss")):
-        return [
-            "Odd n ≡ 1 (mod 4) below 10,000 more often admit five-term odd-denominator representations than other residue classes.",
-            "A finite scan up to n = 10,000 finds no counterexample to a fixed modular necessary condition for five-term sums.",
-            "Density of representable odd n decreases as the smallest prime factor of n increases, testable by exact enumeration.",
-        ]
-    if any(k in ql for k in ("collatz", "3n+1", "stopping time")):
-        return [
-            "Residue class mod 8 predicts median Collatz stopping time among integers below 10^6.",
-            "Numbers with many factors of 2 in their trajectory prefix have shorter stopping times on average.",
-            "Stopping-time variance is higher for n ≡ 3 (mod 4) than for n ≡ 1 (mod 4).",
-        ]
-    if any(k in ql for k in ("prime gap", "cramér", "prime gaps")):
-        return [
-            "Local prime gaps above 10^6 follow a log-scaled distribution closer to Cramér heuristics than a constant baseline.",
-            "Intervals with higher prime density show smaller normalized gaps than sparse intervals.",
-            "Twin-prime-like small gaps occur more often than a naive random model predicts in [10^6, 10^6+10^5].",
-        ]
-    if any(k in ql for k in ("contagion", "epidemic", "diffusion", "spreading", "sir", "sis")):
-        return [
-            _scoped_contagion_text(
-                "Epidemic peak time on scale-free networks is more sensitive to degree exponent "
-                "γ than to average degree when avg degree is held at 8–12.",
-                ood="Hold out Watts–Strogatz; LOFO R² on peak-time vs γ must exceed 0 on WS.",
-            ),
-            _scoped_contagion_text(
-                "Competing SIS and IC diffusion models rank hub-removal impact differently on "
-                "Barabási–Albert ensembles with m=3–5.",
-                ood="Evaluate same ranking on SBM graphs; confirm or refute if ranking flips.",
-            ),
-            _scoped_contagion_text(
-                "Assortative mixing raises outbreak final size under fixed R0 in configuration-model "
-                "replicas with heavy-tailed degree sequences.",
-                ood="Transfer test on ER graphs with matched mean degree; effect should weaken.",
-            ),
-        ]
-    if any(k in ql for k in ("cache", "replacement", "lru", "miss rate")):
-        return [
-            "LRU-adversarial traces expose at least 2× higher miss rate for LRU than for LFU on fixed capacity.",
-            "Zipf access with exponent s>1 favors adaptive policies over FIFO at capacity ≤ 256.",
-            "Belady-optimal offline policy gap to LRU shrinks as trace length increases beyond 10^5 references.",
-        ]
-    return []
-
-
-def _null_hypothesis_text(question: str) -> str:
-    q = (question or "").strip()
-    return (
-        f"Null hypothesis: No falsifiable pattern in the research question holds beyond "
-        f"what random variation would produce under the same verification procedure. "
-        f"(Question: {q})"
-    )
-
-
-def _fallback_hypothesis_text(question: str, rank: int, *, prior: Prior | None = None) -> str:
-    """Discovery or control fallback without generic ML template phrasing."""
-    if rank >= 5:
-        null = _null_hypothesis_text(question)
-        from propab.scoped_claim import enrich_entry_with_scope
-        return enrich_entry_with_scope({"text": null}, question)["text"]
-    options = _domain_fallback_options(question, prior=prior)
-    text = options[(rank - 1) % len(options)]
-    from propab.scoped_claim import enrich_entry_with_scope
-    return enrich_entry_with_scope({"text": text}, question)["text"]
+    lines: list[str] = []
+    for gap in (prior.open_gaps or []) if prior else []:
+        if not isinstance(gap, dict):
+            continue
+        text = str(gap.get("what_is_open") or gap.get("text") or gap.get("gap") or "").strip()
+        if not text:
+            continue
+        bound = str(gap.get("best_known_bound") or "").strip()
+        angle = str(gap.get("approachable_angle") or "").strip()
+        extra = []
+        if bound:
+            extra.append(f"best-known bound: {bound}")
+        if angle:
+            extra.append(f"approachable angle: {angle}")
+        lines.append(text + (f" ({'; '.join(extra)})" if extra else ""))
+        if len(lines) >= limit:
+            break
+    return lines
 
 
 def _ensure_null_hypothesis(hypotheses: list[RankedHypothesis], question: str) -> list[RankedHypothesis]:
@@ -296,44 +143,87 @@ def _build_hypothesis_prompt(
     prior: Prior,
     max_hypotheses: int,
     prior_round_findings: str = "",
+    *,
+    novelty_nudge: bool = False,
 ) -> str:
     prior_block = (
         f"\nResults from previous research rounds:\n{prior_round_findings}\n"
         if prior_round_findings.strip()
         else ""
     )
+    # Domain flavor comes ENTIRELY from the injected literature gaps (already
+    # specific to this research area's own literature) — never from hardcoded
+    # domain keywords. An empty gaps list simply yields a general open-question
+    # instruction; no fabricated domain content is inserted.
+    gap_lines = _open_gap_lines(prior)
+    if gap_lines:
+        gaps_block = "Open questions in this research area (from its literature — TARGET THESE):\n" + "\n".join(
+            f"- {g}" for g in gap_lines
+        )
+    else:
+        gaps_block = (
+            "No pre-catalogued open questions were retrieved. Infer where the frontier of "
+            "THIS research question genuinely lies and target that, not settled ground."
+        )
+
+    nudge_block = ""
+    if novelty_nudge:
+        nudge_block = (
+            "\nRETRY — the previous attempt produced no usable, on-topic hypothesis. Propose "
+            "conceptually DISTINCT, genuinely novel directions this time. Do not restate the "
+            "question back, and do not hedge into unfalsifiable generalities.\n"
+        )
+
     return f"""
-You are a research hypothesis generator.
+You are a research hypothesis generator whose job is to ADVANCE what is known — not to
+re-measure or re-derive it. Propose hypotheses whose answers are currently UNKNOWN and,
+if resolved, would change what this research area accepts as established.
 
 Research question: {parsed.text}
 
-Prior established facts:
+Prior established facts (already known — do NOT propose hypotheses whose answer these settle):
 {json.dumps(prior.established_facts)}
 
-Prior open gaps:
+{gaps_block}
+
+Prior open gaps (structured):
 {json.dumps(prior.open_gaps)}
 
 Prior dead ends (do not repeat these):
 {json.dumps(prior.dead_ends)}
-{prior_block}
+{prior_block}{nudge_block}
 Generate exactly {max_hypotheses} hypotheses.
 
-Requirements:
+NOVELTY REQUIREMENTS (these override everything else):
+- Each hypothesis must target an OPEN question grounded in the gaps above — something whose
+  answer is not already tabulated, catalogued, or settled in the established facts.
+- Do NOT propose a claim whose answer is a known or tabulated value, a re-derivation of an
+  established result, or a measurement of an already-characterized method/procedure.
+- Do NOT restate a previously-tested hypothesis with different parameters (no re-tests of a
+  known result under a new size/dimension/threshold). A parameter sweep of a settled finding
+  is NOT a new hypothesis.
+- Prefer hypotheses that could change what is known: challenge or improve a current
+  best-known result, propose a genuinely new construction or mechanism, or state a
+  falsifiable structural conjecture that the literature has not resolved.
+- Cover CONCEPTUALLY DISTINCT directions across the set (different mechanisms, invariants, or
+  questions) — not several variations of the same idea.
+
+FORM REQUIREMENTS:
 - Each hypothesis must be specific and falsifiable, NOT generic.
-- Each must state its test methodology naming at least one specific statistical tool
+- Each must state its test methodology naming at least one specific analysis tool
   (e.g. statistical_significance, bootstrap_confidence, literature_baseline_compare).
 - Do NOT repeat confirmed findings, refuted hypotheses, or dead ends from prior rounds.
 - Do NOT use generic phrasing like "Hypothesis 1: ..." or "The intervention has an effect."
 - One hypothesis should be a null hypothesis (no significant effect).
-- EVERY hypothesis MUST include explicit scope boundaries (fixes.md Step 2):
+- EVERY hypothesis MUST include explicit scope boundaries:
   * population — who/what instances (size, family, regime)
-  * distribution — training/generating distribution (graph family, dataset, simulator)
+  * distribution — the generating/sampling distribution (dataset, ensemble, simulator, corpus)
   * claimed_generalization — where you expect this to transfer (must differ from distribution)
   * expected_failure_modes — at least one regime where the claim should break
-  * ood_test — concrete hold-out / LOFO / transfer test run BEFORE confirmation
-- BAD: "k-shell predicts spreading."
-- GOOD: "In BA and SBM graphs with avg degree 6–12, k-shell predicts spreading velocity;
-  should transfer to WS graphs; OOD: train BA+SBM, evaluate WS LOFO R²."
+  * ood_test — concrete hold-out / transfer test run BEFORE confirmation
+- BAD (too vague): "Factor X predicts outcome Y."
+- GOOD (scoped, transferable): state the population/distribution it holds on, where it should
+  transfer, where it should break, and the out-of-distribution test that decides it.
 {f'- For non-round-1: hypotheses should be MORE targeted based on prior round results.' if prior_round_findings else ''}
 
 Return JSON array only. Each item:
@@ -361,59 +251,6 @@ def _is_ml_template_hypothesis(text: str) -> bool:
     return False
 
 
-def _inject_discovery_fallbacks(
-    kept: list[RankedHypothesis],
-    *,
-    question: str,
-    max_hypotheses: int,
-    min_discovery: int = 3,
-    prior: Prior | None = None,
-) -> list[RankedHypothesis]:
-    """Ensure at least ``min_discovery`` discovery hypotheses survive the gate.
-
-    Injected seeds are marked ``is_fallback=1.0`` in their scores so downstream
-    consumers can distinguish a synthesized seed from an LLM-validated,
-    scope-checked hypothesis (G2: fallbacks must never masquerade as validated).
-    """
-    from propab.research_quality import infer_node_role
-
-    discovery = [h for h in kept if infer_node_role(h.text) != "CONTROL"]
-    if len(discovery) >= min_discovery:
-        return kept
-    existing_texts = {strip_question_suffix(h.text) for h in kept}
-    options = _domain_fallback_options(question, prior=prior)
-    rank_base = len(kept) + 1
-    for opt in options:
-        if len(discovery) >= min_discovery:
-            break
-        candidate = f"{opt} (Question: {question.strip()})"
-        if strip_question_suffix(candidate) in existing_texts:
-            continue
-        if _is_ml_template_hypothesis(candidate):
-            continue
-        kept.append(
-            RankedHypothesis(
-                id=f"fallback_d{len(discovery)+1}",
-                text=candidate,
-                test_methodology=(
-                    "Test with statistical_significance, bootstrap_confidence, or finite enumeration."
-                ),
-                scores={
-                    "question_relevance": 0.5,
-                    "composite": 0.4,
-                    "scope_fit": 0.5,
-                    "is_fallback": 1.0,
-                    "scope_fallback": 1.0,
-                },
-                rank=rank_base,
-            )
-        )
-        discovery.append(kept[-1])
-        existing_texts.add(strip_question_suffix(candidate))
-        rank_base += 1
-    return kept[:max_hypotheses]
-
-
 async def generate_ranked_hypotheses(
     parsed: ParsedQuestion,
     prior: Prior,
@@ -430,8 +267,14 @@ async def generate_ranked_hypotheses(
     raw = await llm.call(prompt=prompt, purpose="hypothesis_generation", session_id=session_id)
     generated = _parse_hypothesis_json(raw)
     if not generated:
+        # Honest single retry with a diversity/novelty-nudged prompt. NO template
+        # fabrication: if the model still yields nothing usable, we return empty
+        # below and the caller stops the round honestly (frontier-exhausted).
+        retry_prompt = _build_hypothesis_prompt(
+            parsed, prior, max_hypotheses, prior_round_findings, novelty_nudge=True
+        )
         raw_retry = await llm.call(
-            prompt=prompt + "\n\nReturn ONLY a JSON array of exactly "
+            prompt=retry_prompt + "\n\nReturn ONLY a JSON array of exactly "
             f"{max_hypotheses} hypothesis objects. No markdown.",
             purpose="hypothesis_generation_retry",
             session_id=session_id,
@@ -461,54 +304,42 @@ async def generate_ranked_hypotheses(
             session_id=session_id,
             event_type=EventType.HYPO_GENERATED,
             step="hypothesis.generate",
-            payload={"hypotheses": [], "note": "Model returned non-array JSON; falling back to templates."},
+            payload={"hypotheses": [], "note": "Model returned non-array JSON; no usable hypotheses this round."},
         )
 
+    # Build hypotheses ONLY from real LLM entries. Propab must REASON, never
+    # expand a template: an entry the model did not produce, or one whose scope is
+    # missing/invalid, is DROPPED (and counted) — it is never replaced by a
+    # fabricated templated hypothesis.
+    from propab.scoped_claim import (
+        enrich_entry_with_scope,
+        parse_scope_from_entry,
+        validate_scoped_claim,
+    )
+
+    gen_list = [x for x in (generated if isinstance(generated, list) else []) if isinstance(x, dict)]
     hypotheses: list[RankedHypothesis] = []
-    for idx in range(max_hypotheses):
-        rank = idx + 1
+    n_dropped_no_scope = 0
+    n_dropped_template = 0
+    for idx, raw_entry in enumerate(gen_list[:max_hypotheses]):
+        rank = len(hypotheses) + 1
         composite = round(max(0.15, 1.0 - idx * 0.12), 3)
-        gen_list = generated if isinstance(generated, list) else []
-        raw_entry = gen_list[idx] if idx < len(gen_list) and isinstance(gen_list[idx], dict) else {}
 
-        from propab.scoped_claim import enrich_entry_with_scope, parse_scope_from_entry, validate_scoped_claim
-
-        scope = parse_scope_from_entry(raw_entry) if raw_entry else None
-        used_fallback = False
+        scope = parse_scope_from_entry(raw_entry)
         if scope is None or not validate_scoped_claim(scope)[0]:
-            used_fallback = True
-            entry = enrich_entry_with_scope(
-                {"text": _fallback_hypothesis_text(parsed.text, rank, prior=prior), "id": raw_entry.get("id", f"h{rank}")},
-                parsed.text,
-                allow_template_fill=False,
-            )
-        else:
-            entry = enrich_entry_with_scope(dict(raw_entry), parsed.text, allow_template_fill=False)
+            # No valid scope from the model → drop honestly rather than template-fill.
+            n_dropped_no_scope += 1
+            continue
+        entry = enrich_entry_with_scope(dict(raw_entry), parsed.text, allow_template_fill=False)
 
         raw_text = str(entry.get("text", ""))
         if not raw_text or _is_ml_template_hypothesis(raw_text):
-            used_fallback = True
-            entry = enrich_entry_with_scope(
-                {"text": _fallback_hypothesis_text(parsed.text, rank, prior=prior), "id": f"h{rank}"},
-                parsed.text,
-                allow_template_fill=False,
-            )
-            raw_text = str(entry.get("text", ""))
+            n_dropped_template += 1
+            continue
 
         methodology = str(entry.get("test_methodology", ""))
         if not methodology.strip():
-            methodology = (
-                "Test with statistical_significance or bootstrap_confidence, "
-                "comparing treatment vs baseline metric vectors."
-            )
-
-        scores_extra: dict[str, float] = {
-            "scope_valid": 1.0 if entry.get("_scope_valid") else 0.0,
-            "scope_fallback": 1.0 if used_fallback else 0.0,
-            # G2: a fallback seed is never an LLM-validated, on-topic hypothesis;
-            # mark it so downstream consumers cannot count it as validated.
-            "is_fallback": 1.0 if used_fallback else 0.0,
-        }
+            methodology = "Test with statistical_significance or bootstrap_confidence against a matched baseline."
 
         hypotheses.append(
             RankedHypothesis(
@@ -521,11 +352,32 @@ async def generate_ranked_hypotheses(
                     "impact": round(max(0.25, composite - 0.05), 3),
                     "scope_fit": round(max(0.2, composite - 0.08), 3),
                     "composite": composite,
-                    **scores_extra,
+                    "scope_valid": 1.0 if entry.get("_scope_valid") else 0.0,
+                    "scope_fallback": 0.0,
+                    "is_fallback": 0.0,
                 },
                 rank=rank,
             )
         )
+    if meta is not None:
+        meta["n_dropped_no_scope"] = n_dropped_no_scope
+        meta["n_dropped_template"] = n_dropped_template
+
+    if not hypotheses:
+        # No usable, scope-valid, on-topic LLM hypothesis this round. Return empty
+        # and let the caller stop honestly — never fabricate a templated seed.
+        await emitter.emit(
+            session_id=session_id,
+            event_type=EventType.HYPO_REJECTED,
+            step="hypothesis.no_usable_llm_output",
+            payload={
+                "n_raw_llm": len(gen_list),
+                "n_dropped_no_scope": n_dropped_no_scope,
+                "n_dropped_template": n_dropped_template,
+                "note": "LLM produced no usable on-topic hypothesis; round returns empty (no template fill).",
+            },
+        )
+        return []
 
     if use_llm_ranking and (
         settings.llm_provider.strip().lower() == "ollama" or settings.llm_api_secret.strip()
@@ -562,25 +414,16 @@ async def generate_ranked_hypotheses(
                 "missing": scope_missing,
             })
             continue
-        is_fallback = (h.scores or {}).get("scope_fallback") == 1.0 or (h.scores or {}).get("is_fallback") == 1.0
         if scope and is_boilerplate_scope(scope, parsed.text):
-            if not is_fallback:
-                # A non-fallback (i.e. purportedly LLM-validated) hypothesis with
-                # verbatim template scope is a cosmetic gate bypass — reject it.
-                rejected.append({
-                    "id": h.id,
-                    "text": core_text[:200],
-                    "question_relevance_score": rel,
-                    "reason": "boilerplate_scope",
-                })
-                continue
-            # G2: a fallback with template scope may carry the campaign, but it
-            # MUST stay flagged so it cannot be counted as a validated,
-            # scope-checked, on-topic hypothesis downstream.
-            h.scores = dict(h.scores or {})
-            h.scores["is_fallback"] = 1.0
-            h.scores["boilerplate_scope"] = 1.0
-            h.scores["scope_valid"] = 0.0
+            # Every hypothesis here is genuine LLM output (no fabricated fallbacks);
+            # a verbatim template scope is therefore a cosmetic gate bypass — reject.
+            rejected.append({
+                "id": h.id,
+                "text": core_text[:200],
+                "question_relevance_score": rel,
+                "reason": "boilerplate_scope",
+            })
+            continue
         h.scores = dict(h.scores or {})
         h.scores["question_relevance"] = rel
         if rel >= threshold:
@@ -594,52 +437,12 @@ async def generate_ranked_hypotheses(
             step="hypothesis.relevance_gate",
             payload={"threshold": threshold, "rejected_count": len(rejected), "rejected": rejected[:12]},
         )
-    if kept:
-        hypotheses = _inject_discovery_fallbacks(
-            kept,
-            question=parsed.text,
-            max_hypotheses=max_hypotheses,
-            min_discovery=min(3, max(1, max_hypotheses - 1)),
-            prior=prior,
-        )
-    else:
-        # Gate rejected everything — rebuild from domain-general fallbacks + null.
-        hypotheses = []
-        for idx in range(max_hypotheses):
-            rank = idx + 1
-            hypotheses.append(
-                RankedHypothesis(
-                    id=f"h{rank}",
-                    text=_fallback_hypothesis_text(parsed.text, rank, prior=prior),
-                    test_methodology="Test with statistical_significance or bootstrap_confidence.",
-                    # G2: rebuilt seeds are fallbacks, flagged so they are never
-                    # mistaken for validated LLM hypotheses.
-                    scores={
-                        "composite": 0.4,
-                        "question_relevance": 0.45,
-                        "is_fallback": 1.0,
-                        "scope_fallback": 1.0,
-                    },
-                    rank=rank,
-                )
-            )
-        hypotheses = _ensure_null_hypothesis(hypotheses, parsed.text)
-        texts = [strip_question_suffix(h.text) for h in hypotheses]
-        relevance_scores = await compute_question_relevance_scores(parsed.text, prior, texts)
-        hypotheses = [
-            h
-            for h, rel in zip(hypotheses, relevance_scores, strict=False)
-            if not _is_ml_template_hypothesis(h.text) and rel >= threshold
-        ]
-        hypotheses = _inject_discovery_fallbacks(
-            hypotheses,
-            question=parsed.text,
-            max_hypotheses=max_hypotheses,
-            min_discovery=min(3, max(1, max_hypotheses - 1)),
-            prior=prior,
-        )
+    # Whatever survived the gate is what we return. If the gate rejected
+    # everything, we return an empty list — the caller stops the round honestly.
+    # We do NOT rebuild from templates to keep the round alive.
+    hypotheses = kept
 
-    n_generated = max_hypotheses
+    n_generated = len(gen_list)
     scope_rejected = sum(1 for r in rejected if r.get("reason") in ("missing_scope", "boilerplate_scope"))
     from collections import Counter
 

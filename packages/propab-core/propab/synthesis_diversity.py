@@ -76,6 +76,7 @@ def filter_seed_dicts_for_diversity(
         forced = bootstrap_forced_problem_type(question)
     if not forced:
         return seed_dicts
+    _ = generation, question  # kept for signature compatibility; no template fabrication
     filtered = [
         sd for sd in seed_dicts
         if classify_hypothesis_bucket(
@@ -85,7 +86,12 @@ def filter_seed_dicts_for_diversity(
     ]
     if filtered:
         return filtered
-    return fallback_synthesis_seeds(forced, generation=generation, question=question)
+    # No LLM seed matched the forced problem type. Propab must REASON, never
+    # expand a template: return the real LLM seeds unchanged rather than
+    # fabricating a deterministic templated seed. The diversity force still
+    # applies downstream (synthesis rounds), so a genuine monoculture is caught
+    # honestly without inventing hypotheses the model did not propose.
+    return seed_dicts
 
 
 def forced_from_tree_monoculture(
@@ -166,65 +172,6 @@ def diversity_requirement_prompt(forced_type: str, *, avoid_type: str | None = N
         f"MANDATORY DIVERSITY: This round MUST propose at least 2 frontier hypotheses "
         f"focused on problem type '{forced_type}' with falsifiable numeric claims.{avoid}"
     )
-
-
-FALLBACK_SEED_TEMPLATES: dict[str, dict[str, str]] = {
-    "sidon": {
-        "text": (
-            "Population: Greedy Sidon in {1,...,n} for n in [1000, 5000, 10000]. "
-            "Claim: F(n)/sqrt(n) is strictly decreasing across the sweep."
-        ),
-        "test_methodology": "greedy Sidon density sweep",
-    },
-    "ap_free": {
-        "text": (
-            "Population: AP-free greedy sets in {1,...,n} for n in [500, 1000, 2000, 5000]. "
-            "Claim: AP-free density decreases monotonically across the sweep."
-        ),
-        "test_methodology": "greedy AP-free density sweep",
-    },
-    "bc_comparison": {
-        "text": (
-            "Population: Greedy Sidon vs Bose-Chowla at matched n=q^2+q for prime q in [50, 200]. "
-            "Claim: Greedy ratio exceeds Bose-Chowla ratio at every matched n in the range."
-        ),
-        "test_methodology": "matched BC vs greedy comparison",
-    },
-    "sumset": {
-        "text": (
-            "Population: Random vs Sidon-like sets in {1,...,n} for n=500. "
-            "Claim: Sidon-like construction yields strictly smaller |A+A|/|A| than random."
-        ),
-        "test_methodology": "structured sumset growth comparison",
-    },
-    "cap_set": {
-        "text": (
-            "Population: Best-known cap sets in F_3^n for n in [8, 10]. "
-            "Claim: CLP ratio size/3^n decreases from n=8 to n=10."
-        ),
-        "test_methodology": "cap-set CLP table lookup",
-    },
-}
-
-
-def fallback_synthesis_seeds(
-    forced_type: str,
-    *,
-    generation: int,
-    question: str = "",
-) -> list[dict[str, Any]]:
-    """Deterministic seeds when LLM synthesis ignores diversity reset (B3 fallback)."""
-    _ = question
-    tpl = FALLBACK_SEED_TEMPLATES.get(forced_type)
-    if not tpl:
-        return []
-    return [{
-        "id": f"fallback_{forced_type}_{generation}",
-        "text": tpl["text"],
-        "test_methodology": tpl["test_methodology"],
-        "expansion_type": "diagnostic",
-        "expansion_reason": f"diversity_fallback_{forced_type}",
-    }]
 
 
 def history_problem_counts(recent_buckets: list[dict[str, str]]) -> Counter[str]:

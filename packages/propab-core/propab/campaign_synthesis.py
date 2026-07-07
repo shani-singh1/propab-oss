@@ -74,6 +74,129 @@ def _numeric_signature(text: str) -> frozenset[str]:
     return frozenset(_NUM_RE.findall(text or ""))
 
 
+# --------------------------------------------------------------------------
+# Anti-retest / anti-monoculture guard — CLAIM SKELETON matching.
+#
+# A "retest" is the same structural claim with different parameters (a new
+# size / dimension / lookahead / threshold / identifier). The campaign that
+# produced a 34-way monoculture kept proposing parametric variations of ONE
+# tested claim. To catch that in CODE (not just the prompt), we compare the
+# candidate's CLAIM SKELETON — the claim with all numbers, parameter values,
+# and free identifiers normalized away — against every already-TESTED node.
+# This is DOMAIN-GENERAL: it normalizes structurally (digits, decimals,
+# scientific/exponent notation, single-letter/param=value tokens, and the
+# scope-scaffold values), with NO domain-specific vocabulary.
+# --------------------------------------------------------------------------
+
+_SCOPE_SCAFFOLD_RE = re.compile(
+    r"^\s*(population|distribution|claimed generalization|expected failure modes?|"
+    r"ood test|claim|claimed)\s*:",
+    re.I,
+)
+
+_SKELETON_STOPWORDS = frozenset(
+    {
+        "the", "a", "an", "of", "in", "on", "for", "to", "and", "or", "is", "are",
+        "be", "as", "at", "by", "with", "that", "this", "these", "those", "than",
+        "then", "it", "its", "num", "param", "range", "vs", "versus", "between",
+    }
+)
+
+# Structural tokens stripped so only the claim's SHAPE remains. Order matters:
+# compound numeric forms (1e6, 3^n, 10,000, 0.60) before bare digits.
+_SKELETON_SUBS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # param=value / param<value / k=3 / n>=1000 / p < 0.05  → PARAM
+    (re.compile(r"\b[a-zA-Z]\w*\s*[=<>≤≥]+\s*[-+]?\d[\d.,^eE+\-]*"), " PARAM "),
+    # ranges / intervals like [1000, 5000] or (8, 10)         → RANGE
+    (re.compile(r"[\[(]\s*[-+]?\d[\d.,\s]*[-+]?\d*\s*[\])]"), " RANGE "),
+    # scientific / exponent notation: 1e6, 10^4, 3^n           → NUM
+    (re.compile(r"\b\d+(?:\.\d+)?\s*(?:[eE]\s*[-+]?\d+|\^\s*[a-zA-Z0-9]+)"), " NUM "),
+    # grouped / decimal / bare numbers: 10,000  0.60  42       → NUM
+    (re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?"), " NUM "),
+)
+
+
+def claim_skeleton(text: str) -> str:
+    """The structural skeleton of a claim: the claim text with all numbers,
+    parameter values, ranges, and incidental identifiers normalized to
+    placeholder tokens. Two claims that differ ONLY in their parameters (a
+    re-test / parametric sweep of the same structural claim) collapse to the
+    same skeleton; two conceptually distinct claims do not.
+
+    Domain-general: no field-specific terms — only structural normalization of
+    numeric/parameter surface forms and the scope scaffold. Used by the
+    anti-monoculture guard to reject a parametric retest of an already-tested
+    node by SHAPE rather than raw text."""
+    # Use only the CLAIM lines, dropping the scope scaffold (Population /
+    # Distribution / … / OOD test), whose parameter values would otherwise make
+    # two skeletons look distinct. The scope narrows; the skeleton is the claim.
+    claim_lines: list[str] = []
+    for ln in (text or "").splitlines():
+        stripped = ln.strip()
+        low = stripped.lower()
+        if _SCOPE_SCAFFOLD_RE.match(low):
+            continue
+        if low.startswith("(question:"):
+            continue
+        claim_lines.append(stripped)
+    core = " ".join(claim_lines) if claim_lines else (text or "")
+    core = core.lower()
+    for pattern, repl in _SKELETON_SUBS:
+        core = pattern.sub(repl, core)
+    core = re.sub(r"[^a-z ]+", " ", core)          # drop residual punctuation
+    core = re.sub(r"\s+", " ", core).strip()
+    return core
+
+
+def _skeleton_content_tokens(skeleton: str) -> frozenset[str]:
+    return frozenset(t for t in skeleton.split() if t not in _SKELETON_STOPWORDS and len(t) > 2)
+
+
+def skeletons_match(a: str, b: str, *, min_overlap: float = 0.72) -> bool:
+    """True when two claim skeletons describe the same structural claim.
+
+    Compares content-token overlap (Jaccard-like, on the larger side) of the two
+    skeletons after parameter normalization. Robust to reordering and to the
+    parameters differing — precisely the retest signature."""
+    sa = _skeleton_content_tokens(a)
+    sb = _skeleton_content_tokens(b)
+    if not sa or not sb:
+        return False
+    inter = len(sa & sb)
+    denom = max(len(sa), len(sb))
+    return (inter / denom) >= min_overlap
+
+
+def is_retest_of_tested_node(
+    text: str,
+    tree: HypothesisTree,
+    *,
+    exclude_parent_id: str | None = None,
+) -> tuple[bool, str]:
+    """True when ``text`` is a parametric RE-TEST — same claim skeleton — of a
+    node that has already been TESTED (verdict decided). This is the code-level
+    anti-monoculture guard: a campaign that already swept a claim's parameters
+    must not keep proposing more of the same skeleton.
+
+    The candidate's designated parent is excluded so a genuine deepening child
+    (which legitimately shares its parent's skeleton) is not rejected here — the
+    caller additionally exempts confirmed-lineage deepening entirely."""
+    cand = claim_skeleton(text)
+    if not cand:
+        return False, ""
+    for node in tree.nodes.values():
+        verdict = node.verdict if hasattr(node, "verdict") else node.get("verdict")
+        if verdict not in ("confirmed", "refuted", "inconclusive"):
+            continue
+        node_id = node.id if hasattr(node, "id") else str(node.get("id", "?"))
+        if exclude_parent_id and node_id == exclude_parent_id:
+            continue
+        node_text = node.text if hasattr(node, "text") else str(node.get("text", ""))
+        if skeletons_match(cand, claim_skeleton(node_text)):
+            return True, f"retest_skeleton:{node_id}"
+    return False, ""
+
+
 def text_similarity(a: str, b: str) -> float:
     """Normalized text similarity for frontier dedup (fixes.md P2)."""
     full = SequenceMatcher(None, _norm_text(a), _norm_text(b)).ratio()
@@ -378,6 +501,7 @@ def apply_synthesis_to_frontier(
         "n_rejected_off_topic": 0,
         "n_rejected_unimplementable": 0,
         "n_rejected_diversity": 0,
+        "n_rejected_retest": 0,
         "beliefs_promoted_by_trend": 0,
         "binding_rejected_count": 0,
         "binding_accepted_count": 0,
@@ -523,6 +647,29 @@ def apply_synthesis_to_frontier(
             metrics["n_rejected_duplicate"] = int(metrics.get("n_rejected_duplicate") or 0) + 1
             logger.debug("Rejected duplicate frontier candidate (%s): %s", dup_reason, raw_text[:80])
             continue
+        # Anti-monoculture guard (code, not just prompt): reject a candidate that
+        # is a parametric RE-TEST — same claim SKELETON — of an already-tested
+        # node, unless it genuinely DEEPENS a confirmed finding (the convergence
+        # move, which legitimately shares a lineage's skeleton). This runs AFTER
+        # the text-dedup check on purpose: text-dedup deliberately lets a
+        # parameter-varied candidate through (``_distinct_parameters``) so real
+        # convergence can narrow; the skeleton guard is what stops that from
+        # becoming an endless sweep of the SAME structural claim with new
+        # numbers/dims once the claim has already been tested.
+        if not _is_deepening_confirmed(item, _eligible_by_id):
+            # An INFERRED (not explicitly named) parent is not a deliberate
+            # refinement, so its inferred parent is not excluded and a
+            # diagnostic/retest re-run of an already-tested claim is caught. When a
+            # parent is EXPLICITLY named, exclude it so a legitimately-authored
+            # refinement of that specific node isn't flagged against itself.
+            exclude = parent.id if (parent and parent_mode == "explicit") else None
+            retest, retest_reason = is_retest_of_tested_node(
+                raw_text, tree, exclude_parent_id=exclude
+            )
+            if retest:
+                metrics["n_rejected_retest"] = int(metrics.get("n_rejected_retest") or 0) + 1
+                logger.debug("Rejected parametric retest (%s): %s", retest_reason, raw_text[:80])
+                continue
         entry = enrich_entry_with_scope(
             {
                 "id": str(item.get("id") or f"syn_{len(candidate_dicts)}"),
@@ -558,63 +705,12 @@ def apply_synthesis_to_frontier(
             entry_dict["_parent_mode"] = parent_mode
         candidate_dicts.append(entry_dict)
 
-    if not candidate_dicts and forced_type:
-        from propab.synthesis_diversity import fallback_synthesis_seeds
-
-        fallback_items = fallback_synthesis_seeds(
-            forced_type,
-            generation=generation,
-            question=question,
-        )
-        metrics["diversity_fallback_injected"] = len(fallback_items)
-        for item in fallback_items:
-            raw_text = str(item.get("text") or "")
-            parent, parent_mode = _resolve_synthesis_parent(item, raw_text, tree, eligible_parents)
-            dup, dup_reason = _is_duplicate_frontier_candidate(
-                raw_text,
-                tree,
-                belief_state,
-                same_round_texts=same_round_texts,
-                allowed_parent_id=parent.id if parent else None,
-            )
-            if dup:
-                metrics["n_rejected_duplicate"] = int(metrics.get("n_rejected_duplicate") or 0) + 1
-                logger.debug("Rejected duplicate fallback candidate (%s): %s", dup_reason, raw_text[:80])
-                continue
-            entry = enrich_entry_with_scope(
-                {
-                    "id": str(item.get("id") or f"fallback_{forced_type}_{len(candidate_dicts)}"),
-                    "text": raw_text,
-                    "test_methodology": str(item.get("test_methodology") or "sub_agent"),
-                },
-                question,
-            )
-            scope = parse_scope_from_methodology(entry["text"], entry["test_methodology"])
-            ok, _ = validate_scoped_claim(scope)
-            if not ok:
-                metrics["n_rejected_invalid_scope"] = int(metrics.get("n_rejected_invalid_scope") or 0) + 1
-                continue
-            same_round_texts.append(raw_text)
-            entry_dict = {
-                "id": entry["id"],
-                "text": entry["text"],
-                "test_methodology": entry["test_methodology"],
-                "claim_scope": entry.get("claim_scope"),
-                "expansion_type": item.get("expansion_type") or "diagnostic",
-                "expansion_reason": item.get("expansion_reason") or f"diversity_fallback_{forced_type}",
-                "_raw_item": item,
-            }
-            if parent is not None:
-                entry_dict["parent_id"] = parent.id
-                entry_dict["_parent_mode"] = parent_mode
-            elif not eligible_parents:
-                entry_dict["_parent_mode"] = parent_mode
-            else:
-                metrics["n_rejected_missing_parent"] = int(metrics.get("n_rejected_missing_parent") or 0) + 1
-                continue
-            candidate_dicts.append(entry_dict)
-
     if not candidate_dicts:
+        # No usable LLM candidate survived the frontier filters. Propab must
+        # REASON, never expand a template: we do NOT inject deterministic seeds
+        # here. The caller sees an empty round and stops honestly
+        # (frontier-exhausted / campaign stop) rather than sweeping a templated
+        # monoculture forward.
         return [], metrics
 
     snippets = list(prior_snippets or [])
@@ -704,43 +800,6 @@ def apply_synthesis_to_frontier(
     # Rises when the search deepens real findings; flat ⇒ shallow-breadth failure.
     metrics["confirmed_lineage_depth"] = round(tree.confirmed_lineage_depth(), 3)
     return filtered, metrics
-
-
-def apply_diversity_fallback_seeds(
-    tree: HypothesisTree,
-    *,
-    forced_type: str,
-    generation: int,
-    question: str = "",
-    prior_snippets: list[str] | None = None,
-    relevance_threshold: float = 0.35,
-    belief_state: CampaignBeliefState | None = None,
-) -> list[HypothesisNode]:
-    """Inject deterministic seeds when LLM synthesis ignores diversity reset."""
-    from propab.synthesis_diversity import fallback_synthesis_seeds
-
-    seed_dicts = fallback_synthesis_seeds(
-        forced_type,
-        generation=generation,
-        question=question,
-    )
-    if not seed_dicts:
-        return []
-    added, _metrics = apply_synthesis_to_frontier(
-        tree,
-        belief_state or CampaignBeliefState(),
-        {"beliefs": [], "frontier_candidates": seed_dicts, "direction_exhausted": False},
-        question=question,
-        generation=generation,
-        # Deterministic fallback seeds are already the escape hatch after an empty
-        # synthesis pass; keep the historical behavior that they are not dropped
-        # by lexical relevance scoring.
-        relevance_threshold=0.0,
-        prior_snippets=prior_snippets,
-    )
-    for node in added:
-        node.question_relevance_score = 1.0
-    return added
 
 
 async def run_campaign_synthesis_pass(
@@ -861,6 +920,7 @@ async def run_campaign_synthesis_pass(
                 "falsifiability_rejected_count": metrics.get("falsifiability_rejected_count", 0),
                 "belief_cap_rejected_count": metrics.get("belief_cap_rejected_count", 0),
                 "n_rejected_diversity": metrics.get("n_rejected_diversity", 0),
+                "n_rejected_retest": metrics.get("n_rejected_retest", 0),
                 "beliefs_promoted_by_trend": metrics.get("beliefs_promoted_by_trend", 0),
                 "active_beliefs": [b.to_dict() for b in belief_state.active_beliefs],
                 "branch_exhausted": belief_state.branch_exhausted,
