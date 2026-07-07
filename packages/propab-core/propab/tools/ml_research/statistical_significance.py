@@ -174,7 +174,16 @@ def statistical_significance(
                 b_ = rng.choice(pooled, size=len(b), replace=True)
                 if np.mean(a_) - np.mean(b_) >= obs:
                     cnt += 1
-            p = 2 * min(cnt / n_boot, 1 - cnt / n_boot) if alt == "two_sided" else cnt / n_boot
+            # `cnt` counts the UPPER tail (resampled diff >= observed). Pick the
+            # tail matching the alternative — for "less" it is the LOWER tail,
+            # NOT `cnt/n_boot` (that inverted the p-value for one-sided-less).
+            frac_ge = cnt / n_boot
+            if alt == "two_sided":
+                p = 2 * min(frac_ge, 1 - frac_ge)
+            elif alt == "less":
+                p = 1 - frac_ge
+            else:  # "greater"
+                p = frac_ge
             stat = obs
         elif test_l == "mcnemar":
             return ToolResult(success=False, error=ToolError(type="validation_error", message="mcnemar requires paired binary outcomes — not supported in v1."))
