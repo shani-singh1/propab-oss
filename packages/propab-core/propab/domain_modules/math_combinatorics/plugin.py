@@ -43,6 +43,10 @@ _TOPIC_RE = re.compile(
             r"\|A\+A\|",
             r"\bF_3\b",
             r"\bf_3\b",
+            r"\bb[_\s-]?3\b",
+            r"\ba396704\b",
+            r"threefold\s+sum",
+            r"\{0,\s*1\}",
             r"\|\{1,\.\.\.,n\}\|",
             r"\{1,\.\.\.,n\}",
         )
@@ -103,6 +107,12 @@ _VERIFIABLE_METHODOLOGY_RE = re.compile(
             r"algebraic\s+construction",
             r"greedy\s+construction",
             r"sidon",
+            # B_3 binary-cube (A396704) is now a real, implemented verification path
+            # (discovery/finder.py); its statements count as verifiable.
+            r"\bb[_\s-]?3\b",
+            r"\ba396704\b",
+            r"threefold\s+sum",
+            r"binary\s+cube",
         )
     ),
     re.IGNORECASE,
@@ -216,6 +226,7 @@ class MathCombinatoricsPlugin(DomainPlugin):
             "sumset_growth",
             "arithmetic_progression_free_density",
             "b2_plus_set_density",
+            "b3_binary_cube_size",
         ]
 
     def run_verification(
@@ -307,6 +318,48 @@ class MathCombinatoricsPlugin(DomainPlugin):
             "holdout_type": "none",
             "null_test": "exhaustive_counterexample_search",
             "verification_type": "deterministic",
+        }
+
+    def verification_budget_hint(self) -> dict[str, Any]:
+        """Computable-parameter ceilings for the deterministic verifier.
+
+        These are the regimes the search loops finish inside the per-node compute
+        budget (greedy Sidon up to a few thousand; a real, independently-validated
+        cap only up to F_3^~6 before the point set / validation cost explodes;
+        greedy AP-free up to a couple thousand). Proposing at or below these keeps
+        hypotheses in the computable regime; larger instances routinely timed out
+        and produced no signal in the v1 math campaign. Advisory only — the model
+        may still ladder up after a smaller instance confirms.
+        """
+        return {
+            "sidon_max_N": 5000,
+            "cap_set_max_field_power": 6,
+            "ap_free_max_N": 2000,
+            "note": (
+                "Propose parameters at or below these computable ceilings. Ladder "
+                "up to a larger instance only after a smaller one confirms — an "
+                "instance beyond these usually cannot be verified within the "
+                "per-node compute budget and returns no signal."
+            ),
+        }
+
+    def objective_spec(self) -> dict[str, Any]:
+        """Combinatorics is judged by deterministic verification against the
+        best-known value for each object — never by a trained ML metric.
+
+        ``is_ml=False`` is the load-bearing flag: it stops core from measuring a
+        meaningless MLP baseline (the v1 math campaign 1ae74abd was mis-scored
+        against ``val_accuracy=0.875`` and could not, structurally, register a
+        record). The metric label deliberately contains no ML token so the
+        campaign runs in the deterministic ``baseline_value≈0`` confirmation
+        frame, where a hypothesis confirms by surviving exhaustive counterexample
+        search rather than beating a scalar accuracy.
+        """
+        return {
+            "metric_name": "extremal_witness_ratio",
+            "direction": "higher_is_better",
+            "is_ml": False,
+            "baseline_kind": "best_known",
         }
 
     def preflight(self) -> PreflightResult:

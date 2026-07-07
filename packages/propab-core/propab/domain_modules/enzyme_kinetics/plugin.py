@@ -83,6 +83,26 @@ class EnzymeKineticsPlugin(DomainPlugin):
             "verification_type": "statistical",
         }
 
+    def objective_spec(self) -> dict[str, Any]:
+        """Enzyme kinetics is scored by a held-out *statistic*, not a trained ML metric.
+
+        The verifier emits ``metric_name="lofo_r2"`` (``enzyme_kinetics/verifier.py``):
+        a leave-one-EC-class-out R² measuring whether a kcat/turnover relationship
+        survives holding out an entire enzyme family, gated by an EC-label-shuffle
+        null. Statistical holdout evidence, not MLP training.
+
+        ``is_ml=False`` stops core from measuring a meaningless trained baseline for
+        this family-LOFO fit (the 1ae74abd mis-scoring). The label carries no ML
+        token; there is no external best-known table for a subset LOFO R², so the
+        baseline is ``"measured"`` from the domain's own holdout.
+        """
+        return {
+            "metric_name": "lofo_r2",
+            "direction": "higher_is_better",
+            "is_ml": False,
+            "baseline_kind": "measured",
+        }
+
     def run_verification(
         self,
         hypothesis: dict[str, Any],

@@ -89,6 +89,22 @@ class GraphInvariantsPlugin(DomainPlugin):
             "verification_type": "deterministic",
         }
 
+    def objective_spec(self) -> dict[str, Any]:
+        """Graph-invariant discovery is a held-out-family correlation survival test,
+        NOT ML training. ``is_ml=False`` is load-bearing: graph questions almost
+        always contain the word "network" (a `_ML_QUESTION_TOKENS` entry), so
+        without this the run would be misclassified as an ML campaign and scored
+        against a trained baseline. The metric matches what the verifier emits
+        (``invariant_correlation``) and carries no ML token; the baseline is the
+        measured held-out correlation, judged against a label-shuffle null.
+        """
+        return {
+            "metric_name": "invariant_correlation",
+            "direction": "higher_is_better",
+            "is_ml": False,
+            "baseline_kind": "measured",
+        }
+
     def run_verification(
         self,
         hypothesis: dict[str, Any],

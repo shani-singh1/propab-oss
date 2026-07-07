@@ -34,6 +34,14 @@ CAP_SWEEP_DIMS = (3, 4, 5, 6, 7)
 MIN_N_FOR_SINGLE_POINT_DISCOVERY = 500
 MAX_SIDON_N = 100_000
 
+# Per-construction wall budget (seconds) for the greedy Sidon multi-start search.
+# When exceeded, the search stops and returns the best (valid, possibly smaller)
+# Sidon set found so far, tagged partial — a real lower-bound witness beats a bare
+# timeout that yields no signal.
+SIDON_TIME_BUDGET = 8.0
+# Wall budget (seconds) for the randomized-restart greedy cap search (n == 5).
+CAP_GREEDY_TIME_BUDGET = 6.0
+
 # --- Real cap-set computation in F_3^n ---------------------------------------
 # Largest F_3^n we build/validate the FULL point set for. Beyond this we still
 # compute a genuine cap (via the product construction) but certify its size from
@@ -56,6 +64,128 @@ CAP_WITNESS_SAMPLE = 24
 
 CapPoint = tuple[int, ...]
 
+# --- B_3 sets in the binary cube {0,1}^n (OEIS A396704) ----------------------
+# Per-hypothesis wall budget for the discovery finder and the largest dimension a
+# single node attempts. The real record attempt (a(7) -> 17) runs a long campaign
+# with a bigger budget; a per-node computation must stay bounded.
+B3_TIME_BUDGET = 25.0
+B3_MAX_N = 9
+
+
+def _is_b3_binary_cube_hypothesis(statement: str, methodology: str = "") -> bool:
+    """True for a maximum-B_3-set-in-{0,1}^n hypothesis (OEIS A396704).
+
+    A B_3 set has all threefold sums distinct — a *different* object from a Sidon
+    (B_2) set or a cap, so it must route before them. Requires both a B_3 signal
+    and a binary-cube signal (or an explicit A396704 reference) so a generic
+    "B_2/Sidon in {0,1}^n" claim does not mis-route here.
+    """
+    t = f"{statement}\n{methodology}".lower()
+    if "a396704" in t:
+        return True
+    has_b3 = bool(re.search(r"\bb[_\s-]?3\b", t)) or "threefold sum" in t or "three-fold sum" in t
+    compact = t.replace(" ", "")
+    has_cube = "{0,1}^" in compact or "binarycube" in compact or "0,1}^" in compact
+    return has_b3 and has_cube
+
+
+def _extract_b3_dim(statement: str, default: int = 7) -> int:
+    compact = statement.replace(" ", "")
+    for pat in (r"\{0,1\}\^(\d+)", r"0,1\}\^(\d+)"):
+        m = re.search(pat, compact, re.I)
+        if m:
+            return min(max(1, int(m.group(1))), B3_MAX_N)
+    for pat in (r"\bn\s*=\s*(\d+)", r"dimension\s+(\d+)", r"\bn\s*=\s*(\d+)\b"):
+        m = re.search(pat, statement, re.I)
+        if m:
+            return min(max(1, int(m.group(1))), B3_MAX_N)
+    return default
+
+
+def _run_b3_binary_cube_experiment(hypothesis: dict[str, Any]) -> dict[str, Any]:
+    """Compute a real B_3 set in {0,1}^n and compare HONESTLY to best-known (A396704).
+
+    Mirrors the cap-set path: the size is always backed by an independently
+    re-verified witness, never a table read. A size that strictly beats a
+    provisional/open best-known is routed through the paranoid ``certify_b3_record``
+    gate; only a certified witness is surfaced as discovery-worthy, and even then
+    it certifies a lower-bound improvement only (never optimality).
+    """
+    from propab.domain_modules.math_combinatorics.discovery import (
+        best_known,
+        certify_b3_record,
+        find_max_b3,
+        record_status,
+    )
+
+    statement = str(hypothesis.get("statement") or hypothesis.get("text") or "")
+    n = _extract_b3_dim(statement)
+    res = find_max_b3(n, time_budget=B3_TIME_BUDGET)
+    size = int(res["size"])
+    bk = best_known("A396704", n)
+    status = record_status("A396704", n)
+    witness = {"n": n, "claimed_size": size, "set": res["set"]}
+    base: dict[str, Any] = {
+        "verified_true_steps": 0,
+        "verified_false_steps": 0,
+        "trivial_rediscovery": False,
+        "discovery_worthy": False,
+        "deterministic": True,
+        "verification_method": "combinatorial_computation",
+        "metric_value": float(size),
+        "metric_name": "b3_binary_cube_size",
+        "n": n,
+        "b3_size": size,
+        "computed_size": size,
+        "method": res.get("method"),
+        "proven_optimal": bool(res.get("proven_optimal")),
+        "best_known_size": bk,
+        "record_status": status,
+        "witness": witness,
+    }
+    if bk is None:
+        base["vs_best_known"] = "no_table_value"
+        base["notes"] = f"Computed a real B_3 set of size {size} in {{0,1}}^{n}; no best-known table value."
+        return base
+    if size < bk:
+        base["vs_best_known"] = "below_best_known"
+        base["gap_to_best_known"] = bk - size
+        base["notes"] = f"B_3 size {size} in {{0,1}}^{n} below best-known {bk} (honest gap {bk - size})."
+        return base
+    if size == bk:
+        base["vs_best_known"] = "matches_best_known"
+        base["gap_to_best_known"] = 0
+        if status == "proven_optimal":
+            base["trivial_rediscovery"] = True
+            base["notes"] = f"Reproduced PROVEN-optimal a({n})={bk} for B_3 in {{0,1}}^{n} (rediscovery)."
+        else:
+            base["notes"] = (
+                f"Reproduced the provisional lower bound a({n})>={bk} for B_3 in {{0,1}}^{n} "
+                f"(honest: matched a search bound, not a record)."
+            )
+        return base
+    # size > bk — candidate record. The certifier is the ONLY gate that may confirm.
+    cert = certify_b3_record(witness, bk, expected_n=n)
+    base["certification"] = cert
+    if cert.get("certified") and status in ("provisional_lower_bound", "open"):
+        base["discovery_worthy"] = True
+        base["verified_true_steps"] = 1
+        base["vs_best_known"] = "exceeds_best_known"
+        base["gap_to_best_known"] = bk - size  # negative => exceeds
+        base["record_witness_json"] = witness
+        base["notes"] = (
+            f"CANDIDATE RECORD: certified B_3 set of size {size} in {{0,1}}^{n} beats best-known "
+            f"{bk} (A396704). Witness emitted for independent re-verification. Certifies a "
+            f"lower-bound improvement only, NOT optimality."
+        )
+    else:
+        base["vs_best_known"] = "exceeds_best_known_uncertified"
+        base["notes"] = (
+            f"Search reported size {size} > best-known {bk} but certification returned "
+            f"certified={cert.get('certified')} (status={status}); NOT surfaced as a record."
+        )
+    return base
+
 
 def run_combinatorics_experiment(hypothesis: dict[str, Any], features: list[str]) -> dict[str, Any]:
     start = time.time()
@@ -63,6 +193,17 @@ def run_combinatorics_experiment(hypothesis: dict[str, Any], features: list[str]
     methodology = str(hypothesis.get("test_methodology") or "")
     claim = extract_claim_text(statement, test_methodology=methodology, full_text=statement)
     primary_feature = features[0] if features else "sidon_set_density"
+
+    if _is_b3_binary_cube_hypothesis(statement, methodology):
+        result = _run_b3_binary_cube_experiment(hypothesis)
+        # A B_3 record is gated by the independent certify_b3_record INSIDE the
+        # runner — its own authoritative, paranoid gate. The generic Sidon/cap
+        # threshold claim-validation below would wrongly zero a no-threshold
+        # "maximize" result, so the B_3 path returns directly.
+        result["deterministic"] = True
+        result["verification_method"] = "combinatorial_computation"
+        result["elapsed_seconds"] = time.time() - start
+        return result
 
     if is_cap_set_hypothesis(statement, methodology, full_text=statement):
         result = _run_cap_set_experiment(hypothesis)
@@ -235,12 +376,12 @@ def _sidon_point(n: int, *, method: str = "greedy") -> dict[str, Any]:
         pt["mean_gap"] = 0.0
         pt["gap_std"] = 0.0
         return pt
-    best = _greedy_sidon_max(n)
+    best, complete = _greedy_sidon_max_budgeted(n, time_budget=SIDON_TIME_BUDGET)
     construction = "greedy"
     theoretical = math.sqrt(n)
     ratio = len(best) / theoretical if theoretical > 0 else 0.0
     gaps = [best[i + 1] - best[i] for i in range(len(best) - 1)] if len(best) > 1 else []
-    return {
+    point = {
         "n": n,
         "max_sidon_size": len(best),
         "theoretical_bound": theoretical,
@@ -254,6 +395,13 @@ def _sidon_point(n: int, *, method: str = "greedy") -> dict[str, Any]:
             else 0.0
         ),
     }
+    if not complete:
+        # Budget cut the multi-start search short: `best` is a genuine (smaller)
+        # Sidon set — a valid lower-bound witness, not a null timeout.
+        point["partial"] = True
+        point["partial_reason"] = "budget_reached"
+        point["best_so_far_size"] = len(best)
+    return point
 
 
 def _sidon_compare_at_n(n: int) -> dict[str, Any]:
@@ -296,7 +444,8 @@ def _wants_asymptotic_analysis(statement: str) -> bool:
 
 
 def _greedy_sidon_max(n: int) -> list[int]:
-    return _greedy_sidon_max_optimized(n)
+    best, _complete = _greedy_sidon_max_budgeted(n, time_budget=SIDON_TIME_BUDGET)
+    return best
 
 
 def _greedy_sidon_max_legacy(n: int) -> list[int]:
@@ -314,16 +463,51 @@ def _greedy_sidon_max_legacy(n: int) -> list[int]:
     return best
 
 
-def _greedy_sidon_max_optimized(n: int) -> list[int]:
-    """Greedy Sidon via sorted sums — O(n log n) per construction attempt."""
+def _greedy_sidon_max_optimized(n: int, *, time_budget: float | None = None) -> list[int]:
+    """Greedy Sidon via sorted sums — O(n log n) per construction attempt.
+
+    ``time_budget`` defaults to None (run to completion; unchanged legacy
+    behavior). When set, the multi-start search stops at the budget and returns
+    the best set found so far. Callers that need the completeness flag use
+    :func:`_greedy_sidon_max_budgeted` directly.
+    """
+    best, _complete = _greedy_sidon_max_budgeted(n, time_budget=time_budget)
+    return best
+
+
+def _greedy_sidon_max_budgeted(
+    n: int, *, time_budget: float | None = None
+) -> tuple[list[int], bool]:
+    """Greedy Sidon via sorted sums, returning ``(best_set, complete)``.
+
+    ``complete`` is True when the whole multi-start search ran; False means the
+    ``time_budget`` cut it short and ``best_set`` is the best construction found
+    so far. Greedy maintains the Sidon property at every step, so even a
+    budget-truncated ``current`` prefix is a valid (smaller) Sidon set — a usable
+    lower-bound witness rather than a null timeout.
+    """
     import bisect
 
     n = min(max(1, n), MAX_SIDON_N)
+    start = time.time()
     best: list[int] = []
+    complete = True
     for start_val in range(1, min(n + 1, 20)):
+        if time_budget is not None and time.time() - start > time_budget:
+            complete = False
+            break
         current = [start_val]
         sums_sorted: list[int] = []
-        for x in range(start_val + 1, n + 1):
+        for i, x in enumerate(range(start_val + 1, n + 1)):
+            # Periodic budget check inside the (potentially huge) inner loop so a
+            # single start value at large n cannot blow the budget on its own.
+            if (
+                time_budget is not None
+                and (i & 0x7FF) == 0
+                and time.time() - start > time_budget
+            ):
+                complete = False
+                break
             collision = False
             for y in current:
                 s = x + y
@@ -339,7 +523,9 @@ def _greedy_sidon_max_optimized(n: int) -> list[int]:
             current.append(x)
         if len(current) > len(best):
             best = current
-    return best
+        if not complete:
+            break
+    return best, complete
 
 
 def find_threshold_crossing(
@@ -667,18 +853,30 @@ def _greedy_cap_from_order(elements: list[CapPoint], n: int) -> list[CapPoint]:
     return cap
 
 
-def _random_restart_cap(n: int, restarts: int, seed: int) -> list[CapPoint]:
-    """Deterministic random-restart greedy: lexicographic pass + `restarts` shuffles."""
+def _random_restart_cap(
+    n: int, restarts: int, seed: int, *, time_budget: float | None = None
+) -> tuple[list[CapPoint], bool]:
+    """Deterministic random-restart greedy: lexicographic pass + `restarts` shuffles.
+
+    Returns ``(best_cap, complete)``. ``complete`` is False when ``time_budget``
+    stopped the restart loop early; ``best_cap`` is still the best valid cap found
+    so far (a real lower-bound witness).
+    """
     rng = random.Random(seed)
     elements = list(itertools.product(range(3), repeat=n))
+    start = time.time()
     best = _greedy_cap_from_order(elements, n)
+    complete = True
     for _ in range(restarts):
+        if time_budget is not None and time.time() - start > time_budget:
+            complete = False
+            break
         order = elements[:]
         rng.shuffle(order)
         cap = _greedy_cap_from_order(order, n)
         if len(cap) > len(best):
             best = cap
-    return best
+    return best, complete
 
 
 def max_cap_exhaustive(n: int, time_limit: float = CAP_BB_TIME_BUDGET) -> tuple[list[CapPoint], bool]:
@@ -761,7 +959,7 @@ def _base_cap(m: int) -> list[CapPoint]:
     elif m <= 4:
         cap, _complete = max_cap_exhaustive(m, time_limit=CAP_BB_TIME_BUDGET)
     else:
-        cap = _random_restart_cap(m, CAP_GREEDY_RESTARTS, seed=CAP_GREEDY_SEED + m)
+        cap, _complete = _random_restart_cap(m, CAP_GREEDY_RESTARTS, seed=CAP_GREEDY_SEED + m)
     _BASE_CAP_CACHE[m] = cap
     return cap
 
@@ -797,13 +995,20 @@ def compute_cap_set(n: int) -> dict[str, Any]:
     n = max(1, int(n))
     parts: list[int]
     proven_optimal = False
+    budget_partial = False
     if n <= 4:
         cap, proven_optimal = max_cap_exhaustive(n, time_limit=CAP_BB_TIME_BUDGET)
+        # An incomplete B&B (budget hit) returns a valid best-so-far cap, not the
+        # certified maximum — surface that as a partial witness below.
+        budget_partial = not proven_optimal
         parts = [n]
         method = "exhaustive_branch_and_bound"
         seed_desc = f"deterministic DFS, origin-fixed, budget={CAP_BB_TIME_BUDGET}s"
     elif n == 5:
-        cap = _random_restart_cap(n, CAP_GREEDY_RESTARTS, seed=CAP_GREEDY_SEED + n)
+        cap, cap_complete = _random_restart_cap(
+            n, CAP_GREEDY_RESTARTS, seed=CAP_GREEDY_SEED + n, time_budget=CAP_GREEDY_TIME_BUDGET
+        )
+        budget_partial = not cap_complete
         parts = [n]
         method = "random_restart_greedy"
         seed_desc = f"seed={CAP_GREEDY_SEED + n}, restarts={CAP_GREEDY_RESTARTS}"
@@ -884,6 +1089,12 @@ def compute_cap_set(n: int) -> dict[str, Any]:
         "witness": witness,
         "example_cap": sample[:10],
     }
+    if budget_partial:
+        # Search hit its time budget: the returned cap is a valid best-so-far
+        # witness (independently checked), just not the certified maximum.
+        result["partial"] = True
+        result["partial_reason"] = "budget_reached"
+        result["best_so_far_size"] = size
     # Honest computed-vs-known comparison (NEVER report the table as computed).
     if best_known is None:
         result["vs_best_known"] = "no_table_value"

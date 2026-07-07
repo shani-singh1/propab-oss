@@ -830,7 +830,21 @@ def _is_ml_campaign(campaign: ResearchCampaign) -> bool:
 
     Verification/math/combinatorics campaigns (Erdős-style problems) have no MLP to train,
     so the baseline step must be skipped rather than recording a meaningless trained metric.
+
+    An explicit domain objective wins over the keyword heuristic: a domain that declares
+    ``objective_spec()["is_ml"] is False`` (math_combinatorics, graph invariants, …) is
+    NEVER an ML campaign, even if its metric label or question happens to contain a token
+    like "network" or "error". This is the domain-general guard behind the 1ae74abd fix.
     """
+    try:
+        from propab.domain_modules.registry import resolve_domain_plugin
+
+        plugin = resolve_domain_plugin(question=campaign.question or "")
+        obj = plugin.objective_spec() if plugin is not None else None
+        if obj is not None and obj.get("is_ml") is False:
+            return False
+    except Exception:  # noqa: BLE001 — routing must never break baseline measurement
+        pass
     metric = str(campaign.breakthrough_criteria.metric_name or "").lower()
     if any(tok in metric for tok in _ML_METRIC_TOKENS):
         return True

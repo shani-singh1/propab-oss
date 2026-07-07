@@ -144,6 +144,31 @@ class NetworkDiffusionPlugin(DomainPlugin):
             "robustness_test": "alternate_simulator",
         }
 
+    def objective_spec(self) -> dict[str, Any]:
+        """Diffusion is scored by a held-out correlation, not a trained ML metric.
+
+        The verifier emits ``metric_name="cross_family_diffusion_correlation"``
+        (``network_diffusion/verifier.py``): the Spearman correlation between a
+        structural feature and a simulated diffusion outcome, measured on a
+        *held-out* real topology family and gated by a within-family shuffle null
+        plus alternate-simulator robustness. Simulation + statistics, not ML
+        training.
+
+        This override is doubly required here: the domain's own vocabulary
+        ("network", "diffusion") includes ``"network"``, which is an ML *question*
+        token — so returning ``None`` would let ``_is_ml_campaign`` fall through to
+        the keyword heuristic and mis-classify a diffusion campaign as ML. With
+        ``is_ml=False`` core short-circuits that heuristic to False. There is no
+        external best-known table for this held-out correlation, so the baseline is
+        ``"measured"``.
+        """
+        return {
+            "metric_name": "cross_family_diffusion_correlation",
+            "direction": "higher_is_better",
+            "is_ml": False,
+            "baseline_kind": "measured",
+        }
+
     def run_verification(
         self,
         hypothesis: dict[str, Any],
