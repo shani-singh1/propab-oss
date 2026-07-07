@@ -15,8 +15,17 @@ is downgraded.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
+from propab.domain_modules.graph_invariants.adapter import real_graph_data_available
 from propab.verdict_pipeline import artifact_gate_stage, classify_evidence_type
+
+# Skip the graph-verifier test cleanly (not ERROR) when the git-ignored SNAP data is
+# absent (CI / fresh checkout before scripts/fetch_graph_datasets.py runs).
+_NEEDS_GRAPH_DATA = pytest.mark.skipif(
+    not real_graph_data_available(),
+    reason="real SNAP graph data not cached; run scripts/fetch_graph_datasets.py",
+)
 
 
 # ---- V3 classifier: the gate-bypass hole is closed -------------------------
@@ -54,6 +63,7 @@ def test_deterministic_confirm_passes_gate_unchanged():
 
 # ---- graph_invariants: real adversarial null in lofo shape -----------------
 
+@_NEEDS_GRAPH_DATA
 def test_graph_verifier_emits_lofo_null_and_routes_lofo():
     from propab.domain_modules.graph_invariants.adapter import GraphInvariantSpec
     from propab.domain_modules.graph_invariants.verifier import run_graph_invariant_check
