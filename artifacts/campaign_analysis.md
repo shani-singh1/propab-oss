@@ -103,3 +103,44 @@ not discoveries.
   This is a capability, not a patch — the biggest remaining lever.
 - **DISC4 · MED** — domain-aware theme classification (cap-sets mislabeled diffusion/percolation).
 - **DISC5 · MED** — confirmation-level dedup (near-identical parameter variants).
+
+---
+
+## VERIFICATION-LAYER AUDIT (trust nothing — findings, F1 verified by me)
+
+A skeptical read-only audit of the verdict/verification layer. My earlier "0.0
+false-confirm" benchmark tested `run_verdict_pipeline` — but 4/6 domains DON'T use it.
+
+- **F1 · CRITICAL · VERIFIED (by me)** — `_plugin_verification_path` (sub_agent_loop.py:1285-1289)
+  takes `domain_plugin.classify_verdict()` RAW; `run_verdict_pipeline`/the adversarial
+  artifact gate runs ONLY in the `except` (i.e. only if classify_verdict crashes). So
+  math_combinatorics, graph_invariants, genomics, enzyme_kinetics NEVER hit the
+  permutation/label-shuffle/artifact gate — only materials + mandrake do. **The gate that
+  underpins the honesty guarantee is not applied to most domains.** Fix: route every
+  domain's verdict through the artifact gate (or an equivalent) after classify_verdict.
+- **F2 · CRITICAL · LIKELY** — best_known_table circularity STILL confirms *claims*
+  (constructors.py:329 via verifier.py cap-set sweep): `evaluate_numeric_claim` compares
+  the claim threshold against the looked-up `cap_set_size` (table value) → "supported";
+  the sweep+numeric-claim route may still force discovery_worthy. DISC2 fixed the plain
+  single-lookup discovery flag; the sweep-claim path needs the same treatment. VERIFY the
+  DISC2 coverage here myself.
+- **F3 · HIGH** — deterministic path bypasses the gate on a gameable counter:
+  `classify_evidence_type` calls it "deterministic" at `vt>=2`, and `scan_verification`
+  counts `verified_true_steps` from ANY `{"verified":true}` output with no provenance/
+  computed check → two boolean literals = "deterministic proof, confirmed", gate skipped.
+- **F4/F5 · HIGH** — graph_invariants confirms TAUTOLOGIES in its own synthetic data:
+  `algebraic_connectivity ≡ spectral_gap`, `modularity = 0.25·clustering + …` → a
+  "modularity↔clustering correlation" is true by construction; confirmed at 0.90 with no
+  gate. (DOM2b fixed modularity in the ADAPTER earlier — reconcile whether the verifier
+  still uses the tautological version.)
+- **F6 · HIGH** — confidence hard-pinned ≥0.92/0.95 for single-run deterministic checks;
+  "replication (N independent checks)" re-runs the SAME deterministic function (not
+  independent). 0.95 misrepresents a single-shot computation.
+- **F7 · MED** — artifact-gate fallback branches "survive" with NO real null: label-shuffle
+  heuristic survives on `lofo>0.05`; held-out-group branch on `lofo>-0.15` (a NEGATIVE R²
+  passes); robustness branch on `lofo>0.0`.
+- **F8 · MED** — gate strength depends on evidence SHAPE not quality: emit `verified:true`
+  booleans (F3 path) to dodge the statistical de-rating.
+**CIRCULAR-VERIFICATION SCAN (audit):** math cap-set numeric-claim = CIRCULAR (F2);
+graph_invariants = CIRCULAR by construction (F4/F5); enzyme/genomics/materials/mandrake =
+independent (real LOFO + label-shuffle null) — SAFE.
