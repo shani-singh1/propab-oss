@@ -16,6 +16,7 @@ import pytest
 from services.orchestrator.intake import ParsedQuestion
 from services.orchestrator.literature_client import (
     build_prior_via_service,
+    check_finding_novelty,
     map_prior_response,
 )
 from services.orchestrator.schemas import Prior
@@ -318,6 +319,106 @@ async def test_campaign_prior_uses_service_when_url_set(emitter, llm) -> None:
     new_build.assert_awaited_once()
     old_build.assert_not_awaited()
     assert prior is svc_prior
+
+
+# ── DISC1: novelty client ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_check_finding_novelty_known(emitter, domain_plugin) -> None:
+    """A {"verdict":"known"} NoveltyResponse is returned verbatim for demotion."""
+    from services.orchestrator import literature_client as lc
+
+    resp = {
+        "verdict": "known",
+        "confidence": 0.93,
+        "explanation": "matches OEIS A003023",
+        "matching_sources": [{"source_doi": "10.1/x", "source_title": "Known Values"}],
+        "recommendation": "cite existing result",
+    }
+    with (
+        patch.object(lc.settings, "literature_service_url", "http://literature:8000"),
+        patch.object(lc, "_post_novelty", new_callable=AsyncMock, return_value=resp) as post,
+    ):
+        out = await check_finding_novelty(
+            "F(6) = 6 for the cap-set problem",
+            {"index": 6, "value": 6},
+            domain_plugin=domain_plugin,
+            session_id=str(uuid.uuid4()),
+            emitter=emitter,
+        )
+
+    assert out["verdict"] == "known"
+    assert out["confidence"] == pytest.approx(0.93)
+    # request body carried the finding + the plugin's literature_profile.
+    body = post.await_args.args[0]
+    assert body["finding"]["claim"].startswith("F(6)")
+    assert body["finding"]["evidence"] == {"index": 6, "value": 6}
+    assert body["finding"]["domain_id"] == "graph_invariants"
+    assert body["literature_profile"] == {"search_terms": ["chromatic number"]}
+
+
+@pytest.mark.asyncio
+async def test_check_finding_novelty_novel_not_demoted(emitter, domain_plugin) -> None:
+    """A {"verdict":"novel"} response is passed through unchanged (kept a discovery)."""
+    from services.orchestrator import literature_client as lc
+
+    resp = {"verdict": "novel", "confidence": 0.9, "explanation": "", "matching_sources": []}
+    with (
+        patch.object(lc.settings, "literature_service_url", "http://literature:8000"),
+        patch.object(lc, "_post_novelty", new_callable=AsyncMock, return_value=resp),
+    ):
+        out = await check_finding_novelty(
+            "A brand new bound",
+            {},
+            domain_plugin=domain_plugin,
+            session_id=str(uuid.uuid4()),
+            emitter=emitter,
+        )
+    assert out["verdict"] == "novel"
+    assert out.get("source") != "novelty_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_check_finding_novelty_service_error_is_uncertain(emitter, domain_plugin) -> None:
+    """Service error → safe default uncertain/novelty_unavailable, never raises."""
+    from services.orchestrator import literature_client as lc
+
+    with (
+        patch.object(lc.settings, "literature_service_url", "http://literature:8000"),
+        patch.object(
+            lc, "_post_novelty", new_callable=AsyncMock,
+            side_effect=httpx.ConnectError("service unreachable"),
+        ),
+    ):
+        out = await check_finding_novelty(
+            "some finding",
+            {},
+            domain_plugin=domain_plugin,
+            session_id=str(uuid.uuid4()),
+            emitter=emitter,
+        )
+    assert out == {"verdict": "uncertain", "source": "novelty_unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_check_finding_novelty_empty_url_skips(emitter, domain_plugin) -> None:
+    """literature_service_url="" → check skipped (no HTTP), backward compatible."""
+    from services.orchestrator import literature_client as lc
+
+    with (
+        patch.object(lc.settings, "literature_service_url", ""),
+        patch.object(lc, "_post_novelty", new_callable=AsyncMock) as post,
+    ):
+        out = await check_finding_novelty(
+            "some finding",
+            {},
+            domain_plugin=domain_plugin,
+            session_id=str(uuid.uuid4()),
+            emitter=emitter,
+        )
+    post.assert_not_awaited()
+    assert out == {"verdict": "uncertain", "source": "novelty_unavailable"}
 
 
 @pytest.mark.asyncio

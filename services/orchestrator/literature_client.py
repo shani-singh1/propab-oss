@@ -223,6 +223,125 @@ async def _post_prior(request_body: dict[str, Any]) -> dict[str, Any]:
         return response.json()
 
 
+async def _post_novelty(request_body: dict[str, Any]) -> dict[str, Any]:
+    """POST /novelty and return the parsed JSON NoveltyResponse. Raises on error."""
+    base = settings.literature_service_url.rstrip("/")
+    timeout = httpx.Timeout(settings.literature_novelty_timeout_sec)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        # Best-effort health probe; a failing/unreachable service surfaces here so
+        # we return the safe default rather than hang on /novelty.
+        health = await client.get(f"{base}/health")
+        health.raise_for_status()
+        response = await client.post(f"{base}/novelty", json=request_body)
+        response.raise_for_status()
+        return response.json()
+
+
+# The safe, non-blocking default returned whenever the novelty service is
+# unavailable, unconfigured, or errors. It is deliberately NOT "known": an
+# outage must never demote a confirmed finding to a rediscovery — it only
+# skips the demotion, honestly labelled so the fallback is never silent.
+_NOVELTY_UNAVAILABLE: dict[str, Any] = {"verdict": "uncertain", "source": "novelty_unavailable"}
+
+
+async def check_finding_novelty(
+    finding_claim: str,
+    evidence: dict[str, Any] | None,
+    *,
+    domain_plugin: Any | None = None,
+    session_id: str,
+    emitter: EventEmitter,
+) -> dict[str, Any]:
+    """Ask the literature service whether a confirmed finding is already KNOWN.
+
+    POSTs ``{finding: {claim, evidence, domain_id}, literature_profile}`` to
+    ``{literature_service_url}/novelty`` and returns the parsed ``NoveltyResponse``
+    (``{verdict: "known"|"novel"|"uncertain", confidence, explanation,
+    matching_sources, recommendation}``).
+
+    This is a DISCOVERY-quality label applied AFTER a verdict is decided — it never
+    changes confirm/refute. On any of: an empty ``literature_service_url`` (backward
+    compatible), an unreachable/erroring service, or a timeout, it returns the safe
+    default ``{"verdict": "uncertain", "source": "novelty_unavailable"}`` and logs —
+    it must never raise or block finalize.
+    """
+    if not (settings.literature_service_url or "").strip():
+        # Backward compatible: no service configured → skip the check entirely.
+        return dict(_NOVELTY_UNAVAILABLE)
+
+    claim = (finding_claim or "").strip()
+    if not claim:
+        # An empty claim would be rejected by the service (422); skip honestly.
+        return dict(_NOVELTY_UNAVAILABLE)
+
+    if domain_plugin is not None:
+        try:
+            profile = domain_plugin.literature_profile()
+        except Exception:  # noqa: BLE001 — a broken profile must not block finalize
+            logger.exception("literature_profile() failed for domain plugin; using empty profile")
+            profile = {}
+        domain_id = getattr(domain_plugin, "domain_id", "") or ""
+    else:
+        profile = {}
+        domain_id = ""
+
+    request_body = {
+        "finding": {
+            "claim": claim,
+            "evidence": evidence or {},
+            "domain_id": domain_id,
+        },
+        "literature_profile": profile,
+    }
+
+    await emitter.emit(
+        session_id=session_id,
+        event_type=EventType.LIT_FETCH_STARTED,
+        step="literature.novelty_check",
+        payload={
+            "claim": claim[:400],
+            "domain_id": domain_id,
+            "service_url": settings.literature_service_url,
+        },
+    )
+
+    try:
+        payload = await _post_novelty(request_body)
+    except Exception as exc:  # noqa: BLE001 — any failure → safe non-blocking default
+        reason = f"{type(exc).__name__}: {exc}"
+        logger.warning(
+            "[session %s] literature service /novelty FAILED (%s); "
+            "treating finding as novelty-unavailable (no demotion)",
+            session_id,
+            reason,
+        )
+        await emitter.emit(
+            session_id=session_id,
+            event_type=EventType.LIT_FETCH_STARTED,
+            step="literature.novelty_unavailable",
+            payload={
+                "claim": claim[:400],
+                "novelty_service_error": reason,
+                "service_url": settings.literature_service_url,
+            },
+        )
+        return dict(_NOVELTY_UNAVAILABLE)
+
+    verdict = str(payload.get("verdict") or "uncertain")
+    await emitter.emit(
+        session_id=session_id,
+        event_type=EventType.LIT_FETCH_STARTED,
+        step="literature.novelty_checked",
+        payload={
+            "claim": claim[:400],
+            "verdict": verdict,
+            "confidence": payload.get("confidence"),
+            "matching_sources": payload.get("matching_sources") or [],
+        },
+    )
+    return payload
+
+
 async def build_prior_via_service(
     parsed: ParsedQuestion,
     *,

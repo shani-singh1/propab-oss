@@ -98,11 +98,17 @@ def _evidence_type_cell(f: dict[str, Any]) -> str:
 def summary_counts_table(counts: dict[str, int]) -> str:
     """A compact table of the authoritative outcome counts."""
     rows = [
-        ("Confirmed (supported by significant evidence)", counts.get("confirmed", 0)),
+        ("Confirmed discoveries (supported by significant evidence)", counts.get("confirmed", 0)),
         ("Refuted", counts.get("refuted", 0)),
         ("Inconclusive", counts.get("inconclusive", 0)),
         ("Total executed and tested", counts.get("tested", 0)),
     ]
+    # DISC1: rediscoveries were confirmed against the data but already established in
+    # the literature — reported honestly, but excluded from the discovery total above.
+    if counts.get("rediscovery"):
+        rows.append(
+            ("Rediscoveries (already established; excluded from discoveries)", counts["rediscovery"])
+        )
     if counts.get("unexecuted"):
         rows.append(("Generated but not executed (excluded)", counts["unexecuted"]))
     lines = [

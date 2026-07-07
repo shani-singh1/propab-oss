@@ -366,6 +366,65 @@ async def compile_session_findings(session_factory: async_sessionmaker, session_
     return {"counts": counts, **buckets}
 
 
+def _finding_novelty_claim(f: dict[str, Any]) -> str:
+    """The best short claim string to send to the novelty service for a finding."""
+    return str(f.get("key_finding") or f.get("text") or "").strip()
+
+
+def apply_novelty_demotion(
+    findings: dict[str, Any],
+    novelty_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Demote confirmed findings the literature already KNOWS to rediscoveries.
+
+    DISC1: a campaign that re-derives an established result should not count that as
+    a discovery. Given ``novelty_by_id`` (finding-id → parsed ``NoveltyResponse``),
+    any CONFIRMED finding whose novelty verdict is ``"known"`` is:
+      - flagged in place (``novelty="known"``, ``is_rediscovery=True``, plus the
+        confidence / explanation / matching_sources for the paper to cite), and
+      - moved OUT of the headline ``confirmed`` bucket into a new ``rediscovery``
+        bucket, so ``counts["confirmed"]`` (the headline discovery total that feeds
+        the abstract, results, figures, and narrative) excludes it.
+
+    ``novel`` / ``uncertain`` (and the ``novelty_unavailable`` safe default) keep
+    their confirmed status untouched — an outage or an honestly-uncertain check must
+    never demote a finding. This is a post-verdict label only; refute/inconclusive
+    buckets and the verdict pipeline are not touched.
+
+    Mutates and returns ``findings`` (same dict the rest of the paper reads).
+    """
+    confirmed = findings.get("confirmed") or []
+    kept: list[dict[str, Any]] = []
+    rediscoveries: list[dict[str, Any]] = []
+    for f in confirmed:
+        nov = novelty_by_id.get(str(f.get("id"))) or {}
+        verdict = str(nov.get("verdict") or "").strip().lower()
+        # Carry the novelty label on every checked finding for transparency, even
+        # when it stays a discovery (novel / uncertain).
+        if verdict in ("known", "novel", "uncertain"):
+            f["novelty"] = verdict
+            f["novelty_confidence"] = nov.get("confidence")
+            f["novelty_explanation"] = nov.get("explanation")
+            f["novelty_matching_sources"] = nov.get("matching_sources") or []
+        if verdict == "known":
+            f["is_rediscovery"] = True
+            f["node_role"] = "REDISCOVERY"
+            rediscoveries.append(f)
+        else:
+            kept.append(f)
+
+    findings["confirmed"] = kept
+    findings["rediscovery"] = rediscoveries
+
+    counts = dict(findings.get("counts") or {})
+    counts["confirmed"] = len(kept)
+    counts["rediscovery"] = len(rediscoveries)
+    # ``tested`` still counts every executed hypothesis (a rediscovery WAS tested and
+    # confirmed against the data) — only the headline discovery total drops.
+    findings["counts"] = counts
+    return findings
+
+
 async def _aggregate_tool_usage(session_factory: async_sessionmaker, session_id: str) -> dict[str, Any]:
     """Tool-usage and round counts for the deterministic Methods narrative."""
     async with session_factory() as session:
@@ -615,9 +674,16 @@ async def compile_session_results_latex(
 
     lead = (
         f"We evaluated {counts['tested']} hypotheses. "
-        f"{counts['confirmed']} were supported by statistically significant evidence, "
-        f"{counts['refuted']} were refuted, and {counts['inconclusive']} remained inconclusive."
+        f"{counts['confirmed']} were supported by statistically significant evidence and are reported as "
+        f"discoveries, {counts['refuted']} were refuted, and {counts['inconclusive']} remained inconclusive."
     )
+    n_rediscovery = int(counts.get("rediscovery") or 0)
+    if n_rediscovery:
+        lead += (
+            f" A further {n_rediscovery} hypothesis(es) were confirmed against the data but a literature "
+            "novelty check found the result already established; these are reported as rediscoveries and are "
+            "excluded from the discovery count above."
+        )
     if counts["unexecuted"]:
         lead += (
             f" A further {counts['unexecuted']} generated hypotheses were not executed and are excluded from "
@@ -656,6 +722,33 @@ async def compile_session_results_latex(
             + _latex_escape("; ".join((f.get("text") or "")[:120] for f in inconclusive[:3]))
             + "."
         )
+
+    # DISC1: results confirmed against the data but already established in the
+    # literature. Reported honestly so the run is not padded with rediscoveries, but
+    # kept out of the "Supported findings" section and the headline discovery count.
+    rediscovery = findings.get("rediscovery") or []
+    if rediscovery:
+        parts.append("\\subsection{Rediscoveries (already established)}")
+        parts.append(
+            f"{len(rediscovery)} confirmed result(s) were checked against the published literature and found to "
+            "restate an already-established fact. They are reported here as rediscoveries -- they validate the "
+            "pipeline but are not novel contributions -- and are excluded from the discovery count."
+        )
+        bullets_list: list[str] = []
+        for f in rediscovery[:10]:
+            sent = _finding_sentence(f)
+            src = (f.get("novelty_matching_sources") or [{}])
+            src0 = src[0] if isinstance(src, list) and src else {}
+            src_label = ""
+            if isinstance(src0, dict):
+                label = str(src0.get("source_title") or src0.get("source_doi") or src0.get("title") or "").strip()
+                if label:
+                    src_label = f" [rediscovery (already established); source: {_latex_escape(label[:160])}]"
+            if not src_label:
+                src_label = " [rediscovery (already established)]"
+            bullets_list.append(f"\\item {sent.rstrip('.')}{src_label}.")
+        if bullets_list:
+            parts.append("\\begin{itemize}\n" + "\n".join(bullets_list) + "\n\\end{itemize}")
     return "\n\n".join(p for p in parts if p)
 
 

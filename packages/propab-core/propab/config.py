@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     literature_service_timeout_sec: float = 600.0
     # Retrieval depth requested from the literature service (standard|deep|exhaustive).
     literature_service_depth: str = "standard"
+    # httpx timeout (seconds) for calls to the literature service /novelty endpoint.
+    # A novelty check is a single similarity query (no fetch/extract), so it is far
+    # cheaper than /prior — a tight timeout keeps finalize snappy and, on any timeout,
+    # the check degrades to "uncertain" (never blocks or changes a verdict).
+    literature_novelty_timeout_sec: float = 60.0
     sub_agent_plan_source: str = "llm"
     sub_agent_max_planned_steps: int = 6
     sub_agent_max_rounds: int = 4
