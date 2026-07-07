@@ -138,6 +138,39 @@ def _parse_hypothesis_json(raw: str) -> list[dict[str, Any]]:
     return []
 
 
+def _verification_budget_block(question: str) -> str:
+    """Advisory computable-parameter ceilings from the owning domain plugin.
+
+    Domain-general: resolves whichever plugin owns the question and asks for its
+    ``verification_budget_hint()``. A domain with no hint (the default ``None``)
+    yields an empty string, so non-computational domains are unaffected. This is
+    guidance in the prompt, never a hard clamp — proposals outside the ceilings
+    are discouraged (they usually cannot be verified in the per-node budget), not
+    forbidden.
+    """
+    try:
+        from propab.domain_modules.registry import resolve_domain_plugin
+
+        plugin = resolve_domain_plugin(question=question or "")
+        hint = plugin.verification_budget_hint() if plugin is not None else None
+    except Exception:  # noqa: BLE001 — advisory only; never break generation
+        hint = None
+    if not isinstance(hint, dict) or not hint:
+        return ""
+    note = str(hint.get("note") or "").strip()
+    ceilings = {k: v for k, v in hint.items() if k != "note"}
+    ceiling_lines = "\n".join(f"- {k}: {v}" for k, v in ceilings.items())
+    body = (
+        "\nCOMPUTABLE-PARAMETER GUIDANCE (advisory — proposals beyond these ceilings "
+        "usually cannot be verified within the per-node compute budget and return no "
+        "signal, so size instances at or below them):\n"
+        + ceiling_lines
+    )
+    if note:
+        body += f"\n{note}"
+    return body + "\n"
+
+
 def _build_hypothesis_prompt(
     parsed: ParsedQuestion,
     prior: Prior,
@@ -180,6 +213,11 @@ def _build_hypothesis_prompt(
     # domain/question. The agent inferred its domain and pulled what it needs.
     skills_section = f"\n{skills_block}\n" if skills_block else ""
 
+    # Feasible-parameter guidance from the owning domain plugin (default: empty for
+    # non-computational domains). Keeps proposals in the verifiable regime so a
+    # good idea is not wasted on an instance that times out with no signal.
+    budget_block = _verification_budget_block(parsed.text)
+
     return f"""
 You are a research hypothesis generator whose job is to ADVANCE what is known — not to
 re-measure or re-derive it. Propose hypotheses whose answers are currently UNKNOWN and,
@@ -197,7 +235,7 @@ Prior open gaps (structured):
 
 Prior dead ends (do not repeat these):
 {json.dumps(prior.dead_ends)}
-{prior_block}{nudge_block}
+{prior_block}{nudge_block}{budget_block}
 Generate exactly {max_hypotheses} hypotheses.
 
 NOVELTY REQUIREMENTS (these override everything else):

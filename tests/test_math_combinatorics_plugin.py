@@ -24,6 +24,46 @@ def test_available_features_nonempty(plugin: MathCombinatoricsPlugin) -> None:
     assert "sidon_set_density" in features
 
 
+def test_verification_budget_hint_math(plugin: MathCombinatoricsPlugin) -> None:
+    hint = plugin.verification_budget_hint()
+    assert isinstance(hint, dict)
+    assert hint["sidon_max_N"] == 5000
+    assert hint["cap_set_max_field_power"] == 6
+    assert "note" in hint and hint["note"]
+
+
+def test_verification_budget_hint_default_is_none() -> None:
+    # Domain-independence: the base default and a non-computational domain both
+    # return None so the generation prompt gets no budget block.
+    from propab.domain_modules.base import DomainPlugin
+
+    class _Bare(DomainPlugin):
+        domain_id = "bare"
+
+        def available_features(self) -> list[str]:
+            return []
+
+    assert _Bare().verification_budget_hint() is None
+
+
+def test_budget_block_empty_for_non_math_question() -> None:
+    from services.orchestrator.hypotheses import _verification_budget_block
+
+    # A question no computational plugin owns yields no budget block.
+    assert _verification_budget_block("What is the airspeed of a swallow?") == ""
+
+
+def test_budget_block_rendered_for_math_question() -> None:
+    from services.orchestrator.hypotheses import _verification_budget_block
+
+    block = _verification_budget_block(
+        "[domain_profile:math_combinatorics] max cap set size in F_3^n"
+    )
+    assert "sidon_max_N" in block
+    assert "5000" in block
+    assert "COMPUTABLE-PARAMETER GUIDANCE" in block
+
+
 def test_confirmation_criteria_deterministic(plugin: MathCombinatoricsPlugin) -> None:
     criteria = plugin.confirmation_criteria()
     assert criteria["verification_type"] == "deterministic"

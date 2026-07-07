@@ -309,6 +309,29 @@ class MathCombinatoricsPlugin(DomainPlugin):
             "verification_type": "deterministic",
         }
 
+    def verification_budget_hint(self) -> dict[str, Any]:
+        """Computable-parameter ceilings for the deterministic verifier.
+
+        These are the regimes the search loops finish inside the per-node compute
+        budget (greedy Sidon up to a few thousand; a real, independently-validated
+        cap only up to F_3^~6 before the point set / validation cost explodes;
+        greedy AP-free up to a couple thousand). Proposing at or below these keeps
+        hypotheses in the computable regime; larger instances routinely timed out
+        and produced no signal in the v1 math campaign. Advisory only — the model
+        may still ladder up after a smaller instance confirms.
+        """
+        return {
+            "sidon_max_N": 5000,
+            "cap_set_max_field_power": 6,
+            "ap_free_max_N": 2000,
+            "note": (
+                "Propose parameters at or below these computable ceilings. Ladder "
+                "up to a larger instance only after a smaller one confirms — an "
+                "instance beyond these usually cannot be verified within the "
+                "per-node compute budget and returns no signal."
+            ),
+        }
+
     def objective_spec(self) -> dict[str, Any]:
         """Combinatorics is judged by deterministic verification against the
         best-known value for each object — never by a trained ML metric.

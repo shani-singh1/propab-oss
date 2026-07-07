@@ -263,6 +263,23 @@ class DomainPlugin(ABC):
         """
         return None
 
+    # --- Feasible-parameter guidance ---------------------------------------
+    def verification_budget_hint(self) -> dict[str, Any] | None:
+        """Advisory computable-parameter ceilings for hypothesis generation.
+
+        A computational/verification domain returns concrete ceilings that fit
+        inside the per-node compute budget (e.g. the largest ``n`` a Sidon search
+        can finish, the largest field power a cap search can validate), so the
+        generator proposes instances that can actually be verified rather than
+        ones that time out and yield no signal. The shape is a flat dict of
+        ``{parameter_ceiling: value, ...}`` plus an optional free-text ``note``.
+
+        Domain-independence: the default is ``None`` — a non-computational domain
+        imposes no ceilings and the generation prompt gets no budget block. This
+        is advisory guidance injected into the prompt, never a hard clamp.
+        """
+        return None
+
     # --- Domain preflight ---------------------------------------------------
     def has_verification_capability(self) -> bool:
         """
