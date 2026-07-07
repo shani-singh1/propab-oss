@@ -1,16 +1,21 @@
 import { useEffect, useRef } from "react";
 import { api, normalizeEvent } from "../api";
 import { useLiveStore } from "../store";
+import { buildDemoEvents, buildDemoSnapshot } from "../lib/mockCampaign";
 
 const TERMINAL = new Set(["completed", "budget_exhausted", "failed", "breakthrough"]);
 
-// Connects a campaign to live data: initial event backfill + state snapshot, an SSE
-// subscription for new events, and a periodic snapshot poll for the overview/tree.
+// Connects a campaign to live data: initial event backfill + state snapshot, an
+// SSE subscription for new events, a reconnect-safe backfill (so events emitted
+// while the socket was down aren't lost), and a periodic snapshot poll for the
+// overview/tree. De-duplication is handled by the store, so re-fetching on
+// reconnect is safe.
 export function useCampaignLive(id: string | undefined) {
   const init = useLiveStore((s) => s.init);
   const setCampaign = useLiveStore((s) => s.setCampaign);
   const setEvents = useLiveStore((s) => s.setEvents);
   const addEvent = useLiveStore((s) => s.addEvent);
+  const mergeEvents = useLiveStore((s) => s.mergeEvents);
   const setConnected = useLiveStore((s) => s.setConnected);
   const setError = useLiveStore((s) => s.setError);
   const esRef = useRef<EventSource | null>(null);
@@ -20,6 +25,18 @@ export function useCampaignLive(id: string | undefined) {
     init(id);
     let cancelled = false;
     let poll: number | undefined;
+    let firstOpen = true;
+
+    // Offline demo: seed synthetic data, no network. Only for the literal id.
+    if (id === "demo") {
+      setEvents(buildDemoEvents());
+      setCampaign(buildDemoSnapshot());
+      setConnected(true);
+      return () => {
+        cancelled = true;
+        setConnected(false);
+      };
+    }
 
     const loadSnapshot = async () => {
       try {
@@ -40,11 +57,23 @@ export function useCampaignLive(id: string | undefined) {
         /* events backfill is best-effort */
       }
       const c = await loadSnapshot();
+      if (cancelled) return;
 
       // SSE for live events.
       const es = new EventSource(api.streamUrl(id));
       esRef.current = es;
-      es.onopen = () => !cancelled && setConnected(true);
+      es.onopen = () => {
+        if (cancelled) return;
+        setConnected(true);
+        // On a *re*connect, backfill anything emitted while we were down.
+        if (!firstOpen) {
+          api
+            .getEvents(id, 500)
+            .then((batch) => !cancelled && mergeEvents(batch))
+            .catch(() => {});
+        }
+        firstOpen = false;
+      };
       es.onerror = () => !cancelled && setConnected(false);
       es.onmessage = (msg) => {
         if (cancelled) return;
