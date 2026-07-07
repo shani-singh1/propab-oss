@@ -60,6 +60,7 @@ def _ensure_loaded() -> None:
     from propab.domain_modules.graph_invariants.plugin import GraphInvariantsPlugin
     from propab.domain_modules.network_diffusion.plugin import NetworkDiffusionPlugin
     from propab.domain_modules.math_combinatorics.plugin import MathCombinatoricsPlugin
+    from propab.domain_modules.coding_theory.plugin import CodingTheoryPlugin
     from propab.domain_modules.genomics.plugin import GenomicsPlugin
 
     for plugin_cls in (
@@ -69,6 +70,7 @@ def _ensure_loaded() -> None:
         GraphInvariantsPlugin,
         NetworkDiffusionPlugin,
         MathCombinatoricsPlugin,
+        CodingTheoryPlugin,
         GenomicsPlugin,
     ):
         try:
