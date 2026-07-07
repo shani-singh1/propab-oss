@@ -174,11 +174,21 @@ def _build_hypothesis_prompt(
             "question back, and do not hedge into unfalsifiable generalities.\n"
         )
 
+    # Research-skills injection (DOMAIN-GENERAL loader; content split core vs domain).
+    # Core methodology skills frame every domain; the question's domain adds its own
+    # technique skills. A missing skills library simply yields an empty block.
+    try:
+        from propab.skills import skills_prompt_block
+        skills_block = skills_prompt_block(getattr(parsed, "domain", None), phase="hypothesis")
+    except Exception:  # noqa: BLE001 — skills are additive; never break generation
+        skills_block = ""
+    skills_section = f"\n{skills_block}\n" if skills_block else ""
+
     return f"""
 You are a research hypothesis generator whose job is to ADVANCE what is known — not to
 re-measure or re-derive it. Propose hypotheses whose answers are currently UNKNOWN and,
 if resolved, would change what this research area accepts as established.
-
+{skills_section}
 Research question: {parsed.text}
 
 Prior established facts (already known — do NOT propose hypotheses whose answer these settle):
