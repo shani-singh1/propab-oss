@@ -68,7 +68,11 @@ class _CountingPlugin(DomainPlugin):
 
     def run_verification(self, hypothesis, evidence=None, features=None) -> dict[str, Any]:
         self.run_verification_calls += 1
-        return {"metric_value": 0.9, "verified_true_steps": 1}
+        # A counting/exact domain verifies deterministically; stamp the proof
+        # shape so the F1 artifact gate (keyed on evidence SHAPE) passes it
+        # through as a real deterministic confirm rather than treating it as
+        # shapeless "unknown" evidence.
+        return {"metric_value": 0.9, "verified_true_steps": 1, "deterministic": True}
 
     def classify_verdict(self, hypothesis_text, result):
         return "confirmed", "counting verified", 0.9
@@ -132,3 +136,51 @@ def test_missing_on_topic_method_fails_open():
     # No usable on-topic gate → verify exactly as before (never a false refusal).
     assert result["verdict"] == "confirmed"
     assert plugin.run_verification_calls == 1
+
+
+class _LofoBadNullPlugin(_CountingPlugin):
+    """On-topic plugin that 'confirms' on lofo evidence whose adversarial null FAILS."""
+
+    domain_id = "lofo_bad"
+
+    def run_verification(self, hypothesis, evidence=None, features=None) -> dict[str, Any]:
+        self.run_verification_calls += 1
+        # lofo shape (lofo_r2 + label_shuffle_null_p95) but the observed effect
+        # sits BELOW the label-shuffle null p95 → an artifact, must not confirm.
+        return {
+            "lofo_r2": 0.05,
+            "label_shuffle_null_p95": 0.20,
+            "label_shuffle_permutation_p": 0.60,
+            "metric_value": 0.05,
+            "verified_true_steps": 1,
+        }
+
+
+class _UnknownEvidencePlugin(_CountingPlugin):
+    """On-topic plugin that 'confirms' on shapeless (unknown) evidence."""
+
+    domain_id = "unknown_ev"
+
+    def run_verification(self, hypothesis, evidence=None, features=None) -> dict[str, Any]:
+        self.run_verification_calls += 1
+        # No proof method, no deterministic flag, no statistical null → "unknown".
+        return {"note": "confirmed but nothing the honesty gate can verify"}
+
+
+def test_f1_lofo_confirm_without_passing_null_is_gated():
+    # F1: a plugin "confirmed" on lofo evidence whose adversarial null FAILS must be
+    # downgraded by the artifact gate — not passed through raw. Verification still
+    # runs (the gate acts AFTER classify_verdict), then the verdict is demoted.
+    plugin = _LofoBadNullPlugin(on_topic=True)
+    result = _run(plugin)
+    assert plugin.run_verification_calls == 1
+    assert result["verdict"] != "confirmed"
+
+
+def test_f1_unknown_shaped_confirm_is_gated_to_inconclusive():
+    # F1: a "confirmed" on shapeless (unknown) evidence — no proof method, no null —
+    # cannot survive the gate and collapses to inconclusive.
+    plugin = _UnknownEvidencePlugin(on_topic=True)
+    result = _run(plugin)
+    assert plugin.run_verification_calls == 1
+    assert result["verdict"] == "inconclusive"

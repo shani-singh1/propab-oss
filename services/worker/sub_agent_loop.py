@@ -1150,7 +1150,7 @@ async def _plugin_verification_path(
     import asyncio
     import json
 
-    from propab.verdict_pipeline import run_verdict_pipeline
+    from propab.verdict_pipeline import artifact_gate_stage, run_verdict_pipeline
 
     domain_id = domain_plugin.domain_id
     hypothesis_text = str(hypothesis.get("text") or "")
@@ -1291,6 +1291,44 @@ async def _plugin_verification_path(
             hypothesis=hypothesis,
             campaign_context={"min_metric_steps": min_steps},
         )
+
+    # F1 honesty gate: a DomainPlugin's own classify_verdict is not adversarially
+    # gated on its own. Historically only the materials/mandrake worker paths ran
+    # the artifact gate, so every plugin-path domain (math, graph, genomics,
+    # enzyme, ...) could emit a "confirmed" verdict that never faced a
+    # permutation / label-shuffle null. Route a plugin "confirmed" through the same
+    # shape-aware artifact gate the except-branch (run_verdict_pipeline) already
+    # applies. This stage is DOMAIN-GENERAL: it keys on evidence SHAPE via
+    # classify_evidence_type, never on domain id — a deterministic proof passes
+    # through untouched, a lofo/statistical confirm must survive a real adversarial
+    # null (label-shuffle / permutation), and shapeless "unknown" evidence cannot
+    # confirm. Downgrade-only; no-ops unless verdict == "confirmed". We deliberately
+    # do NOT chain the OOD/scope stages here: OOD is defined for distributional
+    # (lofo/statistical) evidence and wrongly collapses a deterministic proof to
+    # inconclusive, and scope integrity is a no-op on this path (no scope_gate_result
+    # is attached). Wrapped so a gate failure can never break a run.
+    if verdict == "confirmed":
+        try:
+            _gv, _gc, _gr = artifact_gate_stage(
+                output, verdict, confidence, reason,
+                campaign_context={"min_metric_steps": min_steps},
+            )
+            if _gv != verdict:
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.TOOL_RESULT,
+                    step=f"experiment.{hypothesis_id}.artifact_gate",
+                    payload={
+                        "domain": domain_id,
+                        "gated_from": verdict,
+                        "gated_to": _gv,
+                        "reason": str(_gr)[:300],
+                    },
+                    hypothesis_id=hypothesis_id,
+                )
+            verdict, confidence, reason = _gv, _gc, _gr
+        except Exception:  # noqa: BLE001 — a gate failure must never break a run
+            pass
 
     evidence = json.dumps(output, default=str)
     key_finding = str(output.get("notes") or reason or "")[:500] if verdict == "confirmed" else None
