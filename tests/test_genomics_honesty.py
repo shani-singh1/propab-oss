@@ -54,6 +54,38 @@ def _long_frame(seed: int = 0, n_genes: int = 300) -> pd.DataFrame:
     return long.merge(compute_gene_features(long), on="gene_id", how="left")
 
 
+def _noise_frame(seed: int = 0, n_genes: int = 300) -> pd.DataFrame:
+    """Frame carrying a per-gene ``rand_target`` that is independent of every
+    expression-derived feature, so the observed LOFO R2 cannot beat the null."""
+    rng = np.random.default_rng(seed)
+    rows: list[dict] = []
+    for gi in range(n_genes):
+        gid = f"ENSG{gi:011d}"
+        base = rng.normal(4.0, 1.0)
+        rand_target = float(rng.normal())
+        for tissue in TISSUES:
+            expr = max(0.01, base + rng.normal(0, 0.8))
+            rows.append(
+                {"gene_id": gid, "tissue": tissue, "expression": float(expr), "rand_target": rand_target}
+            )
+    long = pd.DataFrame(rows)
+    return long.merge(compute_gene_features(long), on="gene_id", how="left")
+
+
+def _scripted_lofo(observed: float, nulls: list[float]):
+    """Drop-in for ``_leave_one_tissue_out_r2`` returning the observed statistic
+    on its first call and the scripted null values thereafter."""
+    seq = [observed, *nulls]
+    box = {"i": 0}
+
+    def fn(X, y, groups):  # noqa: ANN001, ARG001
+        i = box["i"]
+        box["i"] += 1
+        return seq[i] if i < len(seq) else 0.0
+
+    return fn
+
+
 # --- 1 & 2: the null must reject a broken / noise signal ----------------------
 
 def test_shuffled_labels_are_not_confirmed(monkeypatch):
@@ -100,6 +132,55 @@ def test_run_experiment_always_reports_null_stats(monkeypatch):
     )
     for key in ("lofo_r2", "label_shuffle_null_p", "label_shuffle_null_p95", "verified_true_steps"):
         assert key in result, f"missing gate field: {key}"
+
+
+# --- the permutation p-value is the FRACTION of nulls >= observed ------------
+# These exercise the real run_genomics_experiment p-value + verdict end-to-end.
+# The pre-fix formula ``np.mean([1 for n in nulls if n >= observed])`` is the mean
+# of an all-ones list (== 1.0 when any null ties/exceeds observed, nan when none
+# do), so a genuine signal was reported "refuted" and could NEVER be confirmed.
+# Both tests below FAIL against that old formula and PASS only with the fix.
+
+def test_planted_signal_yields_small_p_and_confirms(monkeypatch):
+    """Observed LOFO R2 beats the tissue-shuffle null on all but 2/50 perms ->
+    p = 0.04 (small) -> *confirmed*. Old formula pins p to 1.0 and INVERTS the
+    identical evidence to 'refuted'."""
+    df = _long_frame(seed=3)
+    monkeypatch.setattr(GenomicsAdapter, "load_frame", lambda self: df)
+    # observed=0.30; only 2 of 50 tissue-shuffle perms tie/exceed it.
+    monkeypatch.setattr(GV, "_leave_one_tissue_out_r2", _scripted_lofo(0.30, [0.34, 0.34] + [0.0] * 48))
+    result = run_genomics_experiment(
+        GenomicsExperimentSpec(
+            feature_subset=["expression_variance", "mean_expression"],
+            target_column="mean_expression",
+        )
+    )
+    assert result["lofo_r2"] == pytest.approx(0.30)
+    assert result["label_shuffle_null_p"] == pytest.approx(2 / 50)  # 0.04 — NOT 1.0
+    assert result["verified_true_steps"] == 1
+    verdict, _, conf = classify_genomics_verdict("planted cross-tissue signal", result)
+    assert verdict == "confirmed", result
+    assert conf > 0.8
+
+
+def test_pure_noise_yields_large_p_and_is_not_confirmed(monkeypatch):
+    """Real end-to-end run: target independent of every feature -> observed
+    cannot beat the null -> p is a genuine (large) fraction and the verdict is
+    never 'confirmed'. Guards against a p-value pinned regardless of the data."""
+    df = _noise_frame(seed=1)
+    monkeypatch.setattr(GenomicsAdapter, "load_frame", lambda self: df)
+    result = run_genomics_experiment(
+        GenomicsExperimentSpec(
+            feature_subset=["expression_variance", "mean_expression"],
+            target_column="rand_target",
+        )
+    )
+    p = result["label_shuffle_null_p"]
+    assert not np.isnan(p) and 0.0 <= p <= 1.0
+    assert p >= 0.05, result
+    assert result["verified_true_steps"] == 0
+    verdict, _, _ = classify_genomics_verdict("pure noise", result)
+    assert verdict != "confirmed"
 
 
 # --- 3: the confirm gate depends on the null stats ---------------------------

@@ -68,7 +68,7 @@ def run_genomics_experiment(spec: GenomicsExperimentSpec) -> dict[str, Any]:
     y = gene_df[spec.target_column].to_numpy(dtype=float)
     lofo_r2, nulls = _tissue_label_shuffle_null(X, y, tissues)
     label_shuffle_p95 = float(np.percentile(nulls, 95)) if nulls else 1.0
-    label_shuffle_null_p = float(np.mean([1 for n in nulls if n >= lofo_r2]))
+    label_shuffle_null_p = float(np.mean(np.asarray(nulls) >= lofo_r2)) if nulls else 1.0
     return {
         "lofo_r2": lofo_r2,
         "label_shuffle_null_p95": label_shuffle_p95,
