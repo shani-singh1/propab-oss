@@ -3,11 +3,11 @@ import { Link, useParams } from "react-router-dom";
 import { useCampaignLive } from "../hooks/useCampaignLive";
 import { useNow } from "../hooks/useNow";
 import { useLiveStore } from "../store";
-import { statusView, toneColor } from "../lib/status";
-import { buildCampaignModel } from "../lib/model";
-import { truncate } from "../lib/format";
-import { Dot } from "../components/primitives";
+import { statusView } from "../lib/status";
+import { breakthroughMeter, buildCampaignModel, discoverySummary } from "../lib/model";
 import NarrativeStream from "../components/campaign/NarrativeStream";
+import CampaignHud from "../components/campaign/CampaignHud";
+import DiscoveryHero from "../components/campaign/DiscoveryHero";
 import Composer from "../components/campaign/Composer";
 import RightPanel from "../components/campaign/RightPanel";
 import type { PropabEvent } from "../types";
@@ -44,9 +44,10 @@ export default function Campaign() {
   const sv = statusView(status);
   const question = c?.question ?? "";
   const beliefs = c?.belief_state?.active_beliefs ?? [];
-  const confirmed = campaign?.summary?.total_confirmed ?? 0;
 
   const model = useMemo(() => buildCampaignModel(events), [events]);
+  const meter = useMemo(() => breakthroughMeter(campaign?.summary), [campaign?.summary]);
+  const discovery = useMemo(() => discoverySummary(c, campaign?.summary), [c, campaign?.summary]);
   const active = sv.active && connected;
   const now = useNow(active);
 
@@ -70,44 +71,41 @@ export default function Campaign() {
   return (
     <>
       <main className="flex min-w-0 flex-1 flex-col bg-center">
-        {/* header */}
-        <div className="shrink-0 border-b border-line px-[26px] pb-3 pt-[14px]">
-          <div className="flex items-center gap-[11px]">
-            <Dot color={toneColor(sv.tone)} pulse={sv.active} size={8} />
-            <span className="font-mono text-[15px] font-semibold leading-none tracking-[-0.01em] text-ink">
-              {truncate(question, 34) || (id ? id.slice(0, 8) : "campaign")}
+        {/* §A — persistent Campaign HUD (vital signs + distance-to-breakthrough meter) */}
+        {campaign ? (
+          <CampaignHud
+            id={id}
+            campaign={campaign}
+            sv={sv}
+            counts={model.counts}
+            meter={meter}
+            active={active}
+            paperReady={paperReady}
+          />
+        ) : (
+          <div className="shrink-0 border-b border-line px-[26px] pb-3 pt-[14px]">
+            <span className="font-mono text-[14px] font-semibold text-ink">
+              {id ? id.slice(0, 8) : "campaign"}
             </span>
-            <span className="text-[11.5px] font-medium leading-none text-ink-2">{sv.label}</span>
-            <div className="ml-auto flex items-center gap-[14px] font-mono text-[11px] font-medium leading-none text-ink-3">
-              {active && model.counts.workersRunning > 0 && (
-                <span className="text-ink-2">{model.counts.workersRunning} running</span>
-              )}
-              <span>{confirmed} confirmed</span>
-              <span className="hidden sm:inline">{model.counts.llm} LLM</span>
-              {model.counts.errors > 0 && (
-                <span style={{ color: "var(--red)" }}>{model.counts.errors} errors</span>
-              )}
-              {paperReady && (
-                <Link to={`/campaign/${id}/paper`} className="underline hover:text-ink">
-                  paper
-                </Link>
-              )}
-            </div>
+            <span className="ml-[10px] text-[11.5px] text-ink-3">loading…</span>
           </div>
-          <div className="mt-[9px] pl-[19px]">
-            <span className="line-clamp-2 block text-[12.5px] leading-[1.45] text-ink-2">
-              {question}
-            </span>
-          </div>
-        </div>
+        )}
 
         {/* narrative */}
         <div className="pp-scroll min-h-0 flex-1 overflow-y-auto px-[26px] pb-2 pt-5">
+          {/* §B — Discovery Hero pinned atop the center column */}
+          {campaign && (
+            <div className="mx-auto max-w-[720px]">
+              <DiscoveryHero discovery={discovery} />
+            </div>
+          )}
           <NarrativeStream
             narrative={model.narrative}
             start={c?.started_at ?? null}
             now={now}
             live={{ active, label }}
+            discovery={discovery}
+            campaignId={id}
           />
         </div>
 
