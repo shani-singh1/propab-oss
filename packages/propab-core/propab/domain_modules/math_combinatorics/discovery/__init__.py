@@ -54,6 +54,12 @@ from propab.domain_modules.math_combinatorics.discovery.modular_golomb import (
     is_modular_sidon,
     min_modular_ruler,
 )
+from propab.domain_modules.math_combinatorics.discovery.construction_synthesis import (
+    ConstructionSpec,
+    VerificationResult,
+    b3_construction_spec,
+    synthesize_construction,
+)
 
 __all__ = [
     "is_B3",
@@ -83,4 +89,9 @@ __all__ = [
     "attempt_open_term",
     "A004135_TERMS",
     "A004136_TERMS",
+    # Construction synthesis: generate->execute->verify->refine loop over programs.
+    "synthesize_construction",
+    "ConstructionSpec",
+    "VerificationResult",
+    "b3_construction_spec",
 ]
