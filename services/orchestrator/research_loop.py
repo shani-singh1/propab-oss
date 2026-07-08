@@ -319,10 +319,13 @@ async def run_research_loop(
     paper_ttl_days: int,
     emitter: EventEmitter,
     session_factory: async_sessionmaker,
+    llm_model: str | None = None,
 ) -> None:
     llm = LLMClient(
         provider=settings.llm_provider,
-        model=settings.llm_model,
+        # Honor the caller-supplied model (ResearchRequest.config.llm_model) when
+        # provided; fall back to the configured default otherwise.
+        model=llm_model or settings.llm_model,
         api_key=settings.llm_api_secret,
         emitter=emitter,
         session_factory=session_factory,

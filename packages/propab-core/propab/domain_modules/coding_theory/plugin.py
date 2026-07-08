@@ -214,6 +214,27 @@ class CodingTheoryPlugin(DomainPlugin):
         """Real GF(2) computation on explicit generator matrices — not synthetic data."""
         return False
 
+    def objective_spec(self) -> dict[str, Any]:
+        """Coding theory is judged by deterministic minimum-distance computation
+        against the best-known table bound, never by a trained ML metric.
+
+        ``is_ml=False`` is the load-bearing flag: it stops core from measuring a
+        meaningless MLP baseline (the ``val_accuracy=0.875`` trap that mis-scored
+        the v1 math campaign 1ae74abd and structurally prevented any record). The
+        metric label matches exactly what ``coding_theory/verifier.py`` emits
+        (``code_minimum_distance``) and carries no ML token, so the campaign runs
+        in the deterministic ``baseline_value≈0`` confirmation frame — a code
+        confirms by its exhaustively computed, re-checked minimum distance
+        strictly beating the best-known lower bound, not by beating a scalar
+        accuracy.
+        """
+        return {
+            "metric_name": "code_minimum_distance",
+            "direction": "higher_is_better",
+            "is_ml": False,
+            "baseline_kind": "best_known",
+        }
+
     # --- Verification -------------------------------------------------------
     def run_verification(
         self,

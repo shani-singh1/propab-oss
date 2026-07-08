@@ -50,8 +50,26 @@ def test_explicit_proof_method_still_deterministic():
     assert classify_evidence_type(ev) == "deterministic"
 
 
-def test_explicit_deterministic_flag_still_deterministic():
-    assert classify_evidence_type({"deterministic": True, "verified_true_steps": 1}) == "deterministic"
+def test_bare_deterministic_flag_without_proof_method_is_not_deterministic():
+    # V4: a bare ``deterministic: True`` flag is no longer a standalone gate bypass.
+    # Without a recognized proof verification_method it must NOT classify as
+    # deterministic — otherwise any plugin that stamps deterministic=True on a
+    # thresholded/statistical result would skip the artifact gate entirely.
+    assert classify_evidence_type({"deterministic": True, "verified_true_steps": 1}) == "unknown"
+
+
+def test_deterministic_flag_with_proof_method_is_deterministic():
+    # The flag IS honored when it co-occurs with a recognized proof method.
+    ev = {"deterministic": True, "verified_true_steps": 1,
+          "verification_method": "exhaustive_enumeration"}
+    assert classify_evidence_type(ev) == "deterministic"
+
+
+def test_bare_deterministic_flag_confirm_is_gated_to_inconclusive():
+    # And such a bare-flag "confirmed" now collapses at the artifact gate.
+    ev = {"deterministic": True, "verified_true_steps": 1}
+    verdict, _conf, _reason = artifact_gate_stage(dict(ev), "confirmed", 0.95, "prelim")
+    assert verdict == "inconclusive"
 
 
 def test_deterministic_confirm_passes_gate_unchanged():
