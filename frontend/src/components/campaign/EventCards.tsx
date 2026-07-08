@@ -231,6 +231,67 @@ function FindingCard({ e, start }: { e: PropabEvent; start: string | null }) {
   );
 }
 
+// ── Certified record (finding.certified — design.md §3 item 6) ───────────────
+// A first-class certification event: renders the witness + certification checks
+// straight from the event payload (no inference). A certified record celebrates;
+// an as-yet-uncertified candidate reads calm, not alarming.
+function CertifiedCard({ e, start }: { e: PropabEvent; start: string | null }) {
+  const p = e.payload || {};
+  const certified = typeof p.certified === "boolean" ? p.certified : null;
+  const checks = boolChecks(p.checks);
+  const witness = p.witness ?? null;
+  const metricName = typeof p.metric_name === "string" ? p.metric_name : null;
+  const metricValue = num(p.metric_value);
+  const bestKnown = num(p.best_known_size);
+  const round = num(p.round);
+  const beats = p.vs_best_known === "exceeds_best_known";
+  const win = certified === true;
+
+  return (
+    <div
+      className="mb-[14px] animate-ptick overflow-hidden rounded-[10px] border motion-reduce:animate-none"
+      style={{ borderColor: win ? "var(--green)" : "var(--border)", background: win ? "var(--greenDim)" : "var(--railBg)" }}
+    >
+      <div className="flex items-center gap-[10px] px-[15px] pb-[8px] pt-[12px]">
+        <StatusDot color={win ? "var(--green)" : "var(--text3)"} live={win} size={9} />
+        <span className="text-[12.5px] font-semibold leading-none text-ink">
+          {win ? "Certified record" : "Record candidate"}
+        </span>
+        {round != null && <span className="font-mono text-[10px] text-ink-3">round {round}</span>}
+        <span className="ml-auto font-mono text-[10px] text-ink-4">{fmtOffset(start, e.timestamp)}</span>
+      </div>
+
+      {(metricValue != null || bestKnown != null) && (
+        <div className="flex flex-wrap items-baseline gap-x-[18px] gap-y-[4px] px-[15px]">
+          {metricValue != null && (
+            <span className="flex items-baseline gap-[6px]">
+              <span className="font-mono text-[18px] font-semibold leading-none tabular-nums text-ink">
+                {fmtMetric(metricValue)}
+              </span>
+              <span className="font-mono text-[9.5px] uppercase tracking-[0.06em] text-ink-3">
+                {metricName || "metric"}
+              </span>
+            </span>
+          )}
+          {bestKnown != null && (
+            <span className="font-mono text-[11px] text-ink-3">
+              vs best-known <span className="text-ink-2">{fmtMetric(bestKnown)}</span>
+              {beats ? <span className="text-pos"> · beats</span> : null}
+            </span>
+          )}
+        </div>
+      )}
+
+      {(checks || certified != null || witness != null) && (
+        <div className="mt-[11px] flex flex-col gap-[9px] px-[15px] pb-[12px]">
+          {(checks || certified != null) && <CertChecks checks={checks} certified={certified} />}
+          {witness != null && <WitnessBlock witness={witness} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Paper ready ──────────────────────────────────────────────────────────────
 function PaperCard({
   e,
@@ -357,6 +418,8 @@ export default function EventCard({
       return <BreakthroughCard e={e} start={start} discovery={discovery} campaignId={campaignId} />;
     case "synthesis.breakthrough":
       return <FindingCard e={e} start={start} />;
+    case "finding.certified":
+      return <CertifiedCard e={e} start={start} />;
     case "paper.ready":
       return <PaperCard e={e} start={start} campaignId={campaignId} />;
     case "campaign.baseline_measured":
@@ -371,6 +434,15 @@ function num(v: unknown): number | null {
   if (typeof v === "number") return isFinite(v) ? v : null;
   if (typeof v === "string" && v.trim() !== "" && isFinite(Number(v))) return Number(v);
   return null;
+}
+
+// Keep only the boolean-valued entries of a payload's `checks` map.
+function boolChecks(v: unknown): Record<string, boolean> | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const entries = Object.entries(v as Record<string, unknown>).filter(
+    ([, x]) => typeof x === "boolean",
+  ) as [string, boolean][];
+  return entries.length ? Object.fromEntries(entries) : null;
 }
 
 function safeJson(v: unknown): string | null {

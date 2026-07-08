@@ -94,6 +94,10 @@ export function eventLabel(e: PropabEvent): string {
       return "LLM prompt";
     case "llm.response":
       return "LLM response";
+    case "finding.best_updated":
+      return `New best${p.metric_name ? ` ${p.metric_name}` : ""}${p.best_metric != null ? ` ${p.best_metric}` : ""}`.trim();
+    case "finding.certified":
+      return p.certified === false ? "Record candidate" : "Certified record";
     case "paper.ready":
       return "Paper ready";
     case "paper.section_completed":
@@ -123,6 +127,8 @@ const MILESTONE_TYPES = new Set<string>([
   "synthesis.breakthrough",
   "synthesis.dead_end",
   "synthesis.all_inconclusive",
+  "finding.best_updated",
+  "finding.certified",
   "paper.ready",
   "session.completed",
   "session.failed",
@@ -140,6 +146,9 @@ export function eventDotColor(e: PropabEvent): string {
   const t = e.event_type;
   if (isErrorEvent(t)) return "var(--red)";
   if (t === "campaign.breakthrough" || t === "synthesis.breakthrough") return "var(--green)";
+  if (t === "finding.best_updated") return "var(--green)";
+  if (t === "finding.certified")
+    return e.payload?.certified === false ? "var(--text)" : "var(--green)";
   if (t === "campaign.budget_exhausted" || t === "synthesis.dead_end" || t === "session.failed")
     return "var(--red)";
   if (t === "synthesis.result_received" || t === "synthesis.ledger_updated") return "var(--green)";
