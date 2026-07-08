@@ -68,6 +68,51 @@ def test_label_shuffle_null_permutes_target_not_split():
     assert float(np.mean(nulls)) < 0.2, f"null R^2 not destroyed: {np.mean(nulls)}"
 
 
+def test_tau_index_is_not_constant(tmp_data):
+    # The Yanai tau must vary across genes. The old rank-sum formula collapsed it
+    # to a constant 0.5 for every gene (a full ranking always sums to n(n+1)/2),
+    # which made tau useless as a feature and degenerate (R^2=1.0) as a target.
+    import numpy as np
+    import pandas as pd
+
+    from propab.domain_modules.genomics.adapter import compute_gene_features
+
+    rng = np.random.default_rng(3)
+    tissues = ["A", "B", "C", "D", "E"]
+    rows = []
+    for gi in range(50):
+        # Half housekeeping (flat), half tissue-specific (one tissue dominates).
+        peak = gi % len(tissues)
+        for ti, t in enumerate(tissues):
+            base = 5.0 if gi % 2 == 0 else (10.0 if ti == peak else 0.5)
+            rows.append({"gene_id": f"G{gi}", "tissue": t, "expression": base + rng.normal(0, 0.05)})
+    feats = compute_gene_features(pd.DataFrame(rows))
+    tau = feats["tissue_specificity_tau"].to_numpy()
+    assert float(np.var(tau)) > 1e-4, f"tau is constant: var={np.var(tau)}"
+    assert len(np.unique(np.round(tau, 3))) > 1
+
+
+def test_constant_target_is_refuted(tmp_data):
+    # A degenerate (constant) target must report no signal, never a spurious 1.0.
+    import numpy as np
+    import pandas as pd
+
+    from propab.domain_modules.genomics.adapter import GenomicsAdapter
+
+    df = GenomicsAdapter().load_frame().copy()
+    df["const_col"] = 0.5  # constant target
+    # Build a spec pointing at the constant column and monkeypatch the frame.
+    spec = GenomicsExperimentSpec(feature_subset=["expression_variance"], target_column="const_col")
+    orig = GenomicsAdapter.load_frame
+    try:
+        GenomicsAdapter.load_frame = lambda self: df  # type: ignore[assignment]
+        out = V.run_genomics_experiment(spec)
+    finally:
+        GenomicsAdapter.load_frame = orig  # type: ignore[assignment]
+    assert out.get("degenerate_target") is True
+    assert out["lofo_r2"] == 0.0 and out["verified_true_steps"] == 0
+
+
 def test_pure_noise_target_is_not_confirmed():
     # No real X->y relationship: observed LOFO R^2 must not beat the null.
     rng = np.random.default_rng(1)

@@ -77,6 +77,23 @@ def run_genomics_experiment(spec: GenomicsExperimentSpec) -> dict[str, Any]:
     tissues = gene_df["gene_id"].map(dominant).fillna("Unknown").astype(str).to_numpy()
     X = gene_df[feat_cols].to_numpy(dtype=float)
     y = gene_df[spec.target_column].to_numpy(dtype=float)
+    if float(np.nanvar(y)) < 1e-12:
+        # A (near-)constant target carries no learnable signal. sklearn's r2_score
+        # degenerates to 1.0 when a constant is "predicted", and permuting a
+        # constant y leaves it unchanged, so the shuffle null is also 1.0. Report
+        # no signal outright so a broken/degenerate feature can never masquerade
+        # as a perfect cross-tissue result.
+        return {
+            "lofo_r2": 0.0,
+            "label_shuffle_null_p95": 1.0,
+            "label_shuffle_null_p": 1.0,
+            "verification_method": "leave_tissue_out",
+            "n_genes": len(gene_df),
+            "n_features": len(feat_cols),
+            "feature_subset": feat_cols,
+            "verified_true_steps": 0,
+            "degenerate_target": True,
+        }
     lofo_r2, nulls = _target_label_shuffle_null(X, y, tissues)
     label_shuffle_p95 = float(np.percentile(nulls, 95)) if nulls else 1.0
     label_shuffle_null_p = float(np.mean(np.asarray(nulls) >= lofo_r2)) if nulls else 1.0

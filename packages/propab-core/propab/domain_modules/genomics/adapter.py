@@ -108,10 +108,16 @@ def compute_gene_features(df: pd.DataFrame) -> pd.DataFrame:
     means = pivot.mean(axis=1)
     stds = pivot.std(axis=1).replace(0, np.nan)
     cv = (stds / means.replace(0, np.nan)).fillna(0.0)
-    # Tau index (Yanai et al.) — 0 = housekeeping, 1 = tissue-specific.
-    ranked = pivot.rank(axis=1, method="average")
+    # Tau index (Yanai et al. 2005) — 0 = housekeeping (uniform), 1 = tissue-specific.
+    #   tau = sum_i (1 - x_i / max_i x) / (n - 1)
+    # The previous rank-sum form was a bug: a full ranking always sums to
+    # n(n+1)/2, so tau collapsed to exactly 0.5 for EVERY gene — a constant
+    # column, useless as a feature and degenerate as a target (constant y makes
+    # the LOFO R^2 trivially 1.0 with a 1.0 null).
     n = pivot.shape[1]
-    tau = ((ranked.sum(axis=1) - n) / (n - 1) / n).clip(0, 1)
+    row_max = pivot.max(axis=1).replace(0, np.nan)
+    xhat = pivot.div(row_max, axis=0)
+    tau = ((1.0 - xhat).sum(axis=1) / (n - 1)).clip(0, 1).fillna(0.0)
     out = pd.DataFrame({
         "gene_id": pivot.index,
         "expression_variance": pivot.var(axis=1).values,
