@@ -73,3 +73,77 @@ def test_is_ml_campaign_true_for_genuine_ml_question():
         compute_budget_seconds=60,
     )
     assert _is_ml_campaign(campaign) is True
+
+
+# --- coding_theory (deterministic best-known-beating domain) ----------------
+
+def test_coding_theory_objective_spec_is_non_ml_deterministic():
+    plugin = get_domain_plugin("coding_theory")
+    assert plugin is not None
+    obj = plugin.objective_spec()
+    assert obj is not None
+    assert obj["is_ml"] is False
+    # metric label must match what coding_theory/verifier.py emits and carry no ML token
+    assert obj["metric_name"] == "code_minimum_distance"
+    assert "accuracy" not in obj["metric_name"].lower()
+    assert "loss" not in obj["metric_name"].lower()
+    assert obj["direction"] == "higher_is_better"
+
+
+def test_coding_theory_question_routes_to_coding_theory_plugin():
+    plugin = resolve_domain_plugin(
+        question="Construct a binary linear code beating the best-known minimum "
+        "distance [domain_profile:coding_theory]"
+    )
+    assert plugin is not None and plugin.domain_id == "coding_theory"
+
+
+def test_is_ml_campaign_false_for_coding_theory_even_with_val_accuracy_default():
+    from services.orchestrator.campaign_loop import _is_ml_campaign
+
+    campaign = ResearchCampaign(
+        id="test-coding",
+        question="Construct a binary linear code with improved minimum distance "
+        "[domain_profile:coding_theory]",
+        breakthrough_criteria=BreakthroughCriteria(metric_name="val_accuracy"),
+        compute_budget_seconds=60,
+    )
+    # The explicit domain objective (is_ml=False) overrides the "accuracy" token.
+    assert _is_ml_campaign(campaign) is False
+
+
+# --- materials (leave-one-crystal-system-out holdout domain) ----------------
+
+def test_materials_objective_spec_is_non_ml_holdout():
+    plugin = get_domain_plugin("materials")
+    assert plugin is not None
+    obj = plugin.objective_spec()
+    assert obj is not None
+    assert obj["is_ml"] is False
+    # metric label must match materials_adapter.py's emitted key (a holdout R², not accuracy)
+    assert obj["metric_name"] == "lofo_r2"
+    assert "accuracy" not in obj["metric_name"].lower()
+    assert "loss" not in obj["metric_name"].lower()
+    assert obj["direction"] == "higher_is_better"
+
+
+def test_materials_question_routes_to_materials_plugin():
+    plugin = resolve_domain_plugin(
+        question="Does the descriptor-dielectric relationship survive "
+        "leave-one-crystal-system-out holdout? [domain_profile:materials]"
+    )
+    assert plugin is not None and plugin.domain_id == "materials"
+
+
+def test_is_ml_campaign_false_for_materials_even_with_val_accuracy_default():
+    from services.orchestrator.campaign_loop import _is_ml_campaign
+
+    campaign = ResearchCampaign(
+        id="test-materials",
+        question="Predict matbench dielectric constant across crystal systems "
+        "[domain_profile:materials]",
+        breakthrough_criteria=BreakthroughCriteria(metric_name="val_accuracy"),
+        compute_budget_seconds=60,
+    )
+    # The explicit domain objective (is_ml=False) overrides the "accuracy" token.
+    assert _is_ml_campaign(campaign) is False
