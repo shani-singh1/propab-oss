@@ -9,6 +9,23 @@ result could register) survived a full codebase map, we ran 4 parallel deep audi
 (campaign/verdict/baseline · domain plugins · honesty gates/worker · API/config/generation).
 They found the defects below. Status legend: 🔴 open · 🟡 fixing (agent assigned) · 🟢 fixed+verified.
 
+## Iteration status
+- **All items below (C1–C2, H1–H5, M1–M6, L1) are 🟢 FIXED + verified + merged** to `main`
+  via PR #9 (each with a real regression test that fails-before/passes-after; suite green).
+- **New findings from this iteration:**
+  - **N1 🔴 (medium, reproducibility):** the time-budgeted cap search (added for the timeout
+    fix — `CAP_GREEDY_TIME_BUDGET`/`CAP_BB_TIME_BUDGET`, best-so-far on budget) makes a
+    "deterministic under fixed seed" cap result NONDETERMINISTIC under CPU load (observed 20
+    vs 18 in a loaded worktree). A `best_so_far` cap cut by wall-clock is inherently
+    run-dependent. Fix: make the determinism guarantee wall-clock-independent (iteration/
+    node-count budget, or a generous budget in the determinism path) so a claimed cap size is
+    reproducible. Matters for the honesty/reproducibility story.
+  - **N2 🟢 (frontend crash, FIXED):** the merged right-panel virtualizer infinite-looped
+    (`Maximum update depth exceeded`, crashed WorkersPanel) — a new ref callback every render
+    + an unconditional ResizeObserver state update. A GREEN BUILD MISSED IT; only live browser
+    verification caught it. Fixed in PR #11. Lesson: frontend changes need live-render
+    verification, not just `tsc`/build.
+
 ## CRITICAL
 
 ### C1 🟡 Biology domains can never confirm — permutation p-value is broken
