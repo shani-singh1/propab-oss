@@ -1,7 +1,11 @@
 """Composition tests for run_verdict_pipeline (fixes.md Task 0)."""
 from __future__ import annotations
 
-from propab.verdict_pipeline import run_verdict_pipeline
+from propab.verdict_pipeline import (
+    ood_gate_stage,
+    run_verdict_pipeline,
+    scope_integrity_stage,
+)
 
 
 def test_ml_evidence_with_permutation_null_confirms():
@@ -100,6 +104,93 @@ def test_deterministic_math_proof_confirms():
     verdict, confidence, reason = run_verdict_pipeline(evidence)
     assert verdict == "confirmed"
     assert confidence >= 0.90
+
+
+# ── Deterministic proof must survive the OOD / scope gates ───────────────────
+# Regression: the OOD gate (and the scope-integrity gate) used to fire on ANY
+# confirmed verdict once a hypothesis text was present, with no shape guard. A
+# deterministic proof carries no OOD/transfer surface, so parse_scope found no
+# scope and check_ood_evidence returned "no OOD evidence" -> the proof was
+# silently downgraded to inconclusive. With no hyp text it confirmed; with one it
+# broke. The plugin verdict path already restricts OOD/scope to lofo/statistical
+# evidence (F1 block); run_verdict_pipeline must do the same so the deterministic
+# (math/coding_theory) confirm path stays confirmable end-to-end.
+
+
+def _deterministic_proof_evidence() -> dict:
+    return {
+        "verified_true_steps": 2,
+        "verified_false_steps": 0,
+        "verification_method": "symbolic_proof",
+        "verdict_reason": "proof verified",
+    }
+
+
+def test_deterministic_proof_confirms_with_hypothesis_text():
+    """The core regression: a proof + a hypothesis text must STILL confirm
+    (previously the OOD gate downgraded it to inconclusive)."""
+    ev = _deterministic_proof_evidence()
+    verdict, confidence, _reason = run_verdict_pipeline(
+        ev, hypothesis={"text": "For all n >= 1, the construction achieves the bound"},
+    )
+    assert verdict == "confirmed"
+    assert confidence >= 0.90
+
+
+def test_deterministic_proof_confirms_with_campaign_context_hyp_text():
+    """Same via campaign_context.hyp_text (the plugin except-branch shape)."""
+    ev = {
+        "verified_true_steps": 3,
+        "verification_method": "exhaustive_enumeration",
+        "verdict_reason": "enumerated",
+    }
+    verdict, _confidence, _reason = run_verdict_pipeline(
+        ev,
+        campaign_context={"hyp_text": "A [12,4,6] code exists", "test_methodology": ""},
+    )
+    assert verdict == "confirmed"
+
+
+def test_ood_stage_skips_deterministic_evidence():
+    """Unit: ood_gate_stage is a no-op for deterministic evidence even with a
+    hypothesis text + methodology present."""
+    ev = _deterministic_proof_evidence()
+    verdict, conf, reason = ood_gate_stage(
+        ev, "confirmed", 0.95, "proof verified",
+        hypothesis={"text": "some claim with no scope labels"},
+        campaign_context={"test_methodology": "run the proof"},
+    )
+    assert verdict == "confirmed"
+    assert conf == 0.95
+    assert reason == "proof verified"
+
+
+def test_scope_integrity_stage_skips_deterministic_evidence():
+    """Unit: a pre-attached scope FAIL must not collapse a deterministic proof."""
+    ev = dict(_deterministic_proof_evidence())
+    ev["scope_gate_result"] = "FAIL"
+    ev["scope_integrity"] = {"reason": "missing declared scope"}
+    verdict, _conf, _reason = scope_integrity_stage(ev, "confirmed", 0.95, "proof verified")
+    assert verdict == "confirmed"
+
+
+def test_ood_stage_still_gates_statistical_without_ood():
+    """Over-scoping guard: a statistical confirm with a declared OOD test but no
+    passing OOD evidence is STILL downgraded (the deterministic skip must not leak
+    into distributional evidence)."""
+    ev = {
+        "metric_value": 0.94,
+        "p_value": 0.001,
+        "n_metric_steps": 3,
+    }
+    verdict, _conf, _reason = ood_gate_stage(
+        ev, "confirmed", 0.9, "sig passed",
+        campaign_context={
+            "hyp_text": "Accuracy improves",
+            "test_methodology": "OOD test: hold out family B and evaluate transfer",
+        },
+    )
+    assert verdict == "inconclusive"
 
 
 def test_lofo_evidence_with_null_stats_confirms():
