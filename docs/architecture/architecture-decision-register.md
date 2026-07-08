@@ -31,7 +31,7 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 | Backbone: db/events/llm/celery/api-entry/config | ~1.5k | ✅ (§K) |
 | services/api routes (research/sessions/stream/tools) | 1.1k | 🟡 (research.py read; rest ⬜) |
 | services/orchestrator/campaign_loop.py | 2.9k | 🟡 (verdict/dispatch/apply read; full ⬜) |
-| services/orchestrator (literature/research_loop/hypotheses/paper/retrieval/lifetime/policy_analyst/seed_validation/ranking/anomaly/ledger/prior/quality/diagnostics/budget/answer_gate/question_domain) | ~6k | ⬜ |
+| services/orchestrator (hypotheses/prior_builder/answer_gate/question_domain/lifetime/policy_analyst/ranking/seed_validation/research_loop/diagnostics/budget/ledger) | ~4k | 🟡 (design surface mapped → §M; literature.py/literature_client/retrieval/literature_cache/literature_quality full ⬜) |
 | services/worker/sub_agent_loop.py | 3.0k | 🟡 (verdict/confidence/routing/return read; full ⬜) |
 | services/worker (think_act/permutation_null/sandbox/domain_router/failure_classify/sandbox_code_rewrite/peer_findings) | ~1.5k | 🟡 (think_act/sandbox/domain_router/peer_findings/significance read → §L; permutation_null/failure_classify/sandbox_code_rewrite ⬜) |
 | services/literature (65 files) | 9.2k | ⬜ |
@@ -367,6 +367,57 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 - **Why:** ensure evidence exists before a verdict.
 - **Assessment/tradeoff:** conflates two things — (a) "did the worker GATHER significance evidence" (an experiment-completeness concern → legitimately the worker's) and (b) "is that evidence CONFIRMATORY" (the verdict → orchestrator's, E1). Keeping (a) in the worker is fine; (b) must move.
 - **Action:** FIX — worker keeps "must produce significance evidence before returning"; the *judgment* of that evidence moves to the orchestrator (C2/C3).
+
+---
+
+## M. Orchestrator modules (grounded — code read 2026-07-09)
+
+### M1. TWO execution engines: `research_loop` (rounds) + `campaign_loop` (tree) — REPLACE/REMOVE(legacy)
+- **What:** `research_loop.run_research_loop` (session → fixed rounds → hypothesis rows/checkpoints) and `campaign_loop.run_campaign_loop` (campaign → tree → frontier) are two independent orchestration engines. Both are exposed from `research.py` (POST @122 → research_loop; create_campaign @311 → campaign_loop) and `orchestrator/main.py` still delegates to `run_research_loop`.
+- **Why:** `research_loop` is the older rounds-based session engine; `campaign_loop` is the current tree-based campaign engine.
+- **How/evidence:** the frontend creates `/campaigns` (campaign_loop) and only *reads* `/sessions/*` (shared session_id); nothing in the UI drives the rounds engine.
+- **Needed?** One engine. Two is legacy debt: double the surface, double the bugs, and the redesign would otherwise have to be applied twice.
+- **Scalable/Maintainable:** ⚠ maintaining two loops is the classic "which one is real?" trap.
+- **Assessment/tradeoff:** near-certain that `research_loop` is legacy; must confirm no live caller (orchestrator/main.py entrypoint, seed_validation, tests) before deletion.
+- **Action:** INVESTIGATE → REMOVE — confirm `research_loop` has no live path, then delete it (and its `main.py` entrypoint) so the redesign targets one engine. High priority: do this BEFORE C2/C3 so we don't refactor the wrong/both engines.
+
+### M2. Seed generation (`hypotheses.generate_ranked_hypotheses`) — KEEP (folds into the agent)
+- **What:** builds a seed prompt (`_build_hypothesis_prompt`), agentically selects+reads skills (`_select_and_read_skills`), parses/repairs JSON, injects a null hypothesis (`_ensure_null_hypothesis`), guards ML-template hypotheses (`_is_ml_template_hypothesis`), ranks.
+- **Why:** turn a question + prior into ranked falsifiable hypotheses.
+- **Assessment/tradeoff:** solid and already uses the skill-catalog pattern (H2). The auto-injected "Null hypothesis: no falsifiable pattern…" boilerplate is where the constant-evidence nodes we saw originate — fine, but the orchestrator agent should own generation holistically in C3.
+- **Action:** KEEP; subsume into the orchestrator agent loop (generation becomes a reasoned tool-using step, not a one-shot prompt).
+
+### M3. Literature pipeline: `prior_builder.synthesize_prior_from_papers` + `answer_gate.evaluate_literature_short_circuit` — REPLACE(to tool) / KEEP(short-circuit)
+- **What:** papers → LLM-synthesized `Prior` (facts/gaps), injected into seed-gen; a short-circuit that skips the campaign when literature already answers the question (cosine sim).
+- **Why:** ground hypotheses in prior work; avoid re-deriving a known answer.
+- **Assessment/tradeoff:** the *pre-fetch + inject* is the A3/E-adjacent anti-pattern (user's point 3: literature should be a tool the orchestrator calls, not an injected prefetch). The **short-circuit is a genuinely good idea** — but should also be a tool/skill the reasoning orchestrator invokes, not an automatic gate.
+- **Action:** REPLACE the inject with a `literature_search` tool (C3); KEEP the short-circuit logic, re-expose as an orchestrator tool/decision.
+
+### M4. `question_domain.infer_session_domain` — hardcoded ML-first keyword taxonomy — FIX
+- **What:** fast keyword heuristic mapping a question to a domain; comment says "v1 focus: DL/ALGO/ML first."
+- **Assessment/tradeoff:** same domain-independence violation as `domain_router` (D2) and the ML think-prompt (L3): domain detection belongs in the plugins (`DomainPlugin.matches`), not a central hardcoded table biased to ML.
+- **Action:** FIX — delegate detection to plugins; delete the central taxonomy. Fold into the D2 routing move.
+
+### M5. `lifetime_knowledge` (cross-campaign policy) — KEEP-WATCH (this part IS live)
+- **What:** load ACCEPTED policy for a bucket at campaign start; enrich prior + seed context from lifetime; at end propose a CANDIDATE policy (never auto-promote). Feeds the `_policy_score_multiplier` frontier nudge.
+- **Why:** learn across campaigns without unsafe auto-promotion.
+- **Assessment/tradeoff:** unlike the SHELVED layer05 simulators + operator_credit (§I — dead), this small policy layer *is* wired into the live loop. The "candidate, never auto-promote" safety is good. Its value is bounded by how much the frontier nudge actually helps (small).
+- **Action:** KEEP-WATCH; re-evaluate once the reasoning orchestrator (C3) exists — the learned policy should feed the *reasoning*, not just a score multiplier.
+
+### M6. `policy_analyst` — LLM rationale that "never edits" decisions — INVESTIGATE(value)
+- **What:** an LLM produces narrative/predictions about policy; a deterministic engine does the actual mutation; the LLM output changes nothing.
+- **Assessment/tradeoff:** decorative — cost + surface with no decision effect. Either make it real (let it inform mutation, with guards) or drop it.
+- **Action:** INVESTIGATE → likely REMOVE or promote-to-real during C3.
+
+### M7. `hypothesis_ranking` — the dependency-inversion source — FIX (A2)
+- **What:** novelty (embeddings) / testability / impact / scope_fit scoring; also `strip_question_suffix` + `compute_question_relevance_score_lexical`, which **core** `campaign_synthesis.py` imports *upward*.
+- **Assessment/tradeoff:** the ranking itself is fine; the upward import is the A2 layering violation.
+- **Action:** FIX — move the two lexical helpers into core (they're domain-general text utilities); forbid core→services imports.
+
+### M8. `seed_validation` — offline seed-quality eval suite — KEEP (dev tooling)
+- **What:** `run_seed_pipeline_for_question` + `evaluate_suite` — a no-sandbox validation harness for seed generation (fixes.md Phase 1), with a `_NullEmitter`.
+- **Assessment/tradeoff:** appears to be an offline eval/CI harness, not the live path.
+- **Action:** confirm it's not on the live path; if so KEEP as dev tooling (or move under `tests/`/`scripts/`).
 
 ---
 
