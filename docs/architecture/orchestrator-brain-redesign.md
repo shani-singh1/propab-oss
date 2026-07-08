@@ -151,3 +151,63 @@ literature pre-fetch/inject. No legacy code paths.
 
 Integration + verification (contracts in §3, event parity, live campaign) is
 owned centrally after the agents land.
+
+## 8. Verified audit findings (fold into CORE unless noted)
+
+An independent read-only audit confirmed the following (all verified firsthand):
+
+**Blockers → CORE**
+- **Split-brain verdict.** Worker writes `hypotheses.verdict` to the DB
+  (`sub_agent_loop.py:1487`); orchestrator downgrades the *tree* node
+  (`campaign_loop.py:376-397`) but never writes back → DB (paper/API) and tree
+  diverge. Fix: single source of truth — the orchestrator owns the verdict and
+  writes tree **and** DB from one decision.
+- **Domain routing in the worker.** Which verifier/tool-cluster to use is chosen
+  by a worker LLM call over a hardcoded taxonomy (`domain_router.py:8-30,121`,
+  called `sub_agent_loop.py:1960`). Move the routing decision to the orchestrator;
+  keep detection in the plugins (domain-independence).
+- **≥4 competing verdict implementations** + duplicated confidence
+  (`_compute_confidence` sub_agent_loop.py:807 vs `_compute_pipeline_confidence`
+  verdict_pipeline.py:92). Collapse to ONE core implementation the orchestrator
+  invokes.
+
+**Major → CORE (unless noted)**
+- Orchestrator's only "judgment" is a hardcoded downgrade cascade
+  (`_apply_result_diagnostics`, campaign_loop.py:318-439) duplicating
+  `hypothesis_tree.update_node:383-394` — replace with the reasoning step.
+- **API decides framing** — `research.py:349-382` resolves the domain plugin and
+  overrides metric_name/direction/plausibility before the orchestrator runs. Move
+  to the orchestrator.
+- **Two literature-prior builders** (`literature.py:709 build_prior` vs
+  `literature_client.py:356 build_prior_via_service`), env-selected, injected —
+  replace with the single literature TOOL (§3). → CORE + TOOLS-SKILLS.
+- **Lazy core→services imports** (`campaign_synthesis.py:26,749`,
+  `replay_support.py:22,52`, `cli.py:98,214,299`) — smell to clean as logic moves;
+  not a module-load inversion.
+- **Three "what to test next" paths** (frontier `_information_gain_score`; dead
+  `build_expand_prompt`/`parse_expanded_nodes`; Tier-2 synthesis) and synthesis
+  itself is subordinated to ~15 deterministic reject filters
+  (`campaign_synthesis.py:481-802`) — the filters decide, not the model. Collapse
+  into the reasoning step; `attempts` (§3.6) doesn't exist yet.
+- **No orchestrator-reasoning EventTypes** in `types.py`; frontend `events.ts`
+  has no orchestrator phase. → CORE (emit) + FRONTEND (render).
+
+**Minor**
+- `policy_analyst.py:189` LLM call is decorative ("the LLM never edits"). → revisit.
+- A third seed path (anomaly, campaign_loop.py:1206) parallels LLM seeds+synthesis.
+
+Full report: `scratchpad/arch-audit-findings.md`.
+
+## 9. CORE is sequenced, not one shot
+The CORE stream is a coupled refactor; do it in verified phases, not one dispatch:
+1. **C1 — one verdict + single source of truth:** collapse the competing verdict/
+   confidence impls into core; orchestrator writes tree+DB from one decision (kills
+   split-brain). Behaviour-preserving on a fixed evidence set.
+2. **C2 — worker contract split:** worker returns raw evidence (no verdict); move
+   verdict + domain routing to the orchestrator; delete dead worker verdict paths.
+3. **C3 — orchestrator agent loop:** tool-use reasoning + node tools + literature
+   tool; replace frontier/synthesis expansion with reasoned DEEPEN/REFUTE/
+   INCONCLUSIVE/RETUNE/DROP; emit reasoning events.
+4. **C4 — API cleanup:** remove framing decisions from `research.py`.
+5. **C5 — FRONTEND:** panels + friendly labels consuming C3 events.
+Verify (tests + live campaign) between phases.
