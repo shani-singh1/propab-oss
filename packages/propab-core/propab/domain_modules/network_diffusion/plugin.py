@@ -119,6 +119,22 @@ class NetworkDiffusionPlugin(DomainPlugin):
         has_graph_ctx = any(w in q for w in ("network", "graph", "node", "edge", "topology"))
         return hits >= 2 or (hits >= 1 and has_graph_ctx)
 
+    def match_score(self, *, question: str = "", payload: dict[str, Any] | None = None) -> float:
+        # Score = count of distinct diffusion markers present, so a genuinely
+        # contagion/diffusion question outranks a colliding graph_invariants
+        # question (which scores its own marker count) instead of losing on
+        # registration order. Without this override the base default scored a bare
+        # 1.0, so ANY graph-invariant question carrying >=2 static-invariant markers
+        # (e.g. "spectral gap"+"clustering coefficient") would steal a diffusion
+        # question that merely also mentions a graph — the exact DOM3 collision the
+        # other content-routed domains resolve via match_score. Mirrors that shape.
+        if payload and str(payload.get("domain") or payload.get("domain_profile") or "") == "network_diffusion":
+            return float(len(self._DIFFUSION_MARKERS))
+        q = (question or "").lower()
+        if "[domain_profile:network_diffusion]" in q:
+            return float(len(self._DIFFUSION_MARKERS))
+        return float(sum(1 for m in self._DIFFUSION_MARKERS if m in q))
+
     def available_features(self) -> list[str]:
         return list(STRUCTURAL_FEATURES)
 
