@@ -16,6 +16,13 @@ class Settings(BaseSettings):
     )
     llm_provider: str = "openai"
     llm_model: str = "gpt-4o"
+    # Orchestrator-as-brain redesign: split the reasoning/judging model (orchestrator,
+    # typically an expensive frontier model) from the experimenter model (worker,
+    # typically cheaper). Both default to None → fall back to ``llm_model`` when unset,
+    # so behavior is unchanged until an operator opts in. Consumers should read the
+    # ``effective_orchestrator_model`` / ``effective_worker_model`` properties below.
+    orchestrator_model: str | None = None
+    worker_model: str | None = None
     ollama_base_url: str = "http://127.0.0.1:11434"
     orchestrator_url: str = ""
     orchestrator_internal_token: str = ""
@@ -154,6 +161,14 @@ class Settings(BaseSettings):
     campaign_inflight_multiplier: int = 1
     # 0 = derive from campaign_batch_size * campaign_inflight_multiplier (pipelined dispatch).
     campaign_max_concurrent_sub_agents: int = 0
+    # Orchestrator-as-brain redesign: canonical name for the worker-concurrency bound.
+    # Mirrors ``campaign_max_concurrent_sub_agents`` (which stays the field the campaign
+    # loop currently reads) and keeps its default of 0, where 0 = derive from
+    # campaign_batch_size * campaign_inflight_multiplier. Behavior is unchanged; a later
+    # stream will migrate consumers onto this canonical name.
+    max_parallel_workers: int = 0
+    # Max orchestrator-driven retune rounds per hypothesis before it is abandoned/finalized.
+    max_retune_rounds_per_hypothesis: int = 3
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -179,6 +194,16 @@ class Settings(BaseSettings):
         if p in {"google", "gemini"}:
             return (self.google_api_key or "").strip()
         return (self.openai_api_key or "").strip()
+
+    @property
+    def effective_orchestrator_model(self) -> str:
+        """Model id for the orchestrator (brain). Falls back to ``llm_model`` when unset."""
+        return self.orchestrator_model or self.llm_model
+
+    @property
+    def effective_worker_model(self) -> str:
+        """Model id for the worker (experimenter). Falls back to ``llm_model`` when unset."""
+        return self.worker_model or self.llm_model
 
     @property
     def effective_embed_model(self) -> str:
