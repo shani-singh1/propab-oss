@@ -831,20 +831,26 @@ def _is_ml_campaign(campaign: ResearchCampaign) -> bool:
     Verification/math/combinatorics campaigns (Erdős-style problems) have no MLP to train,
     so the baseline step must be skipped rather than recording a meaningless trained metric.
 
-    An explicit domain objective wins over the keyword heuristic: a domain that declares
-    ``objective_spec()["is_ml"] is False`` (math_combinatorics, graph invariants, …) is
-    NEVER an ML campaign, even if its metric label or question happens to contain a token
-    like "network" or "error". This is the domain-general guard behind the 1ae74abd fix.
+    Structural rule (inverted default): if the campaign resolves to a domain plugin at
+    all, it is treated as NON-ML *unless the plugin EXPLICITLY asserts* ``is_ml is True``.
+    A domain whose ``objective_spec()`` is ``None`` (base default) or omits ``is_ml`` is
+    therefore non-ML — the metric/question keyword heuristic (which trips on tokens like
+    "network"/"error"/"classification") is reserved for GENUINELY plugin-less questions.
+    This makes the guard robust without every verification domain having to patch in an
+    explicit ``is_ml=False``, and it never mis-frames a coding_theory/materials campaign as
+    an ML training run just because its metric label happens to contain "accuracy".
     """
     try:
         from propab.domain_modules.registry import resolve_domain_plugin
 
         plugin = resolve_domain_plugin(question=campaign.question or "")
-        obj = plugin.objective_spec() if plugin is not None else None
-        if obj is not None and obj.get("is_ml") is False:
-            return False
+        if plugin is not None:
+            obj = plugin.objective_spec() or {}
+            # Only an explicit is_ml=True keeps a plugin-owned campaign on the ML path.
+            return obj.get("is_ml") is True
     except Exception:  # noqa: BLE001 — routing must never break baseline measurement
         pass
+    # Plugin-less question: fall back to the metric/question keyword heuristic.
     metric = str(campaign.breakthrough_criteria.metric_name or "").lower()
     if any(tok in metric for tok in _ML_METRIC_TOKENS):
         return True
@@ -857,10 +863,18 @@ async def measure_baseline(
     llm: LLMClient,
     emitter: EventEmitter,
     session_factory: async_sessionmaker,
-) -> float:
+) -> float | None:
     """
     Run the baseline experiment and return the primary metric value.
     Uses the campaign question to infer what "standard approach" means.
+
+    Return contract:
+      - ``0.0``  → a LEGITIMATE absent-baseline: measurement was skipped by config or
+        the campaign is non-ML (verification/math) with no numeric training baseline.
+      - ``float`` (>0) → a MEASURED baseline metric.
+      - ``None`` → the ML baseline measurement FAILED (worker produced no metric, or an
+        exception/timeout occurred). The caller must NOT treat this as a real 0.0
+        baseline; it flags the criteria so the verification breakthrough frame is refused.
     """
     baseline_mode = str(getattr(settings, "campaign_baseline_mode", "sub_agent") or "sub_agent").strip().lower()
     if baseline_mode in {"skip", "none", "disabled"}:
@@ -1024,14 +1038,38 @@ Return JSON only:
             metric_val = _extract_primary_metric_from_worker_result(result, "val_accuracy")
         if metric_val is None:
             logger.warning(
-                "Baseline measurement could not read metric %r from worker result; using 0.0",
+                "Baseline measurement could not read metric %r from worker result; "
+                "returning None (FAILED baseline, not a real 0.0).",
                 metric_name,
             )
-            return 0.0
+            return None
         return float(metric_val)
     except Exception as exc:
-        logger.warning("Baseline measurement failed (%s); using 0.0", exc)
-        return 0.0
+        logger.warning(
+            "Baseline measurement failed (%s); returning None (FAILED baseline, not a real 0.0).",
+            exc,
+        )
+        return None
+
+
+def build_breakthrough_finding(
+    campaign: ResearchCampaign, node_id: str, result: dict[str, Any]
+) -> dict[str, Any]:
+    """Assemble the finding dict handed to ``is_breakthrough`` for a confirmed node.
+
+    Injects the two campaign-scoped fields that the breakthrough criteria need but that a
+    single worker ``result`` cannot know:
+      - ``replication_count``: confirmed siblings (min_replications proxy).
+      - ``confirmed_nodes``: distinct confirmed findings so far. WITHOUT this the
+        ``min_confirmed_findings`` (baseline≈0 verification/math) frame is dead — it would
+        read the default 0 and never fire. Callers must ``recount_from_tree()`` first so
+        ``total_confirmed`` reflects distinct confirmed nodes.
+    """
+    return {
+        **result,
+        "replication_count": campaign.count_replications(node_id),
+        "confirmed_nodes": campaign.total_confirmed,
+    }
 
 
 # ── Campaign synthesis (fixes.md redesign) ───────────────────────────────────
@@ -2040,10 +2078,23 @@ async def run_campaign_loop(
                 },
             )
             logger.info("[campaign %s] Measuring baseline...", campaign.id)
-            campaign.baseline_metric = await measure_baseline(
+            measured_baseline = await measure_baseline(
                 campaign, llm, emitter, session_factory,
             )
+            # None => the ML baseline MEASUREMENT failed. Do NOT record it as a real 0.0
+            # baseline: that would drop the campaign into the verification/confirmed frame
+            # and could hand a zero-gain ML run a false breakthrough. Flag the criteria so
+            # is_breakthrough refuses that frame while keeping baseline_value numeric.
+            baseline_failed = measured_baseline is None
+            campaign.baseline_metric = 0.0 if baseline_failed else measured_baseline
             campaign.breakthrough_criteria.baseline_value = campaign.baseline_metric
+            campaign.breakthrough_criteria.baseline_failed = baseline_failed
+            if baseline_failed:
+                logger.warning(
+                    "[campaign %s] Baseline measurement FAILED; marking baseline_failed so "
+                    "a false verification-frame breakthrough cannot be declared.",
+                    campaign.id,
+                )
             await db_save_campaign(campaign, session_factory)
             await emitter.emit(
                 session_id=campaign.id,
@@ -2052,6 +2103,7 @@ async def run_campaign_loop(
                 payload={
                     "metric_name": campaign.breakthrough_criteria.metric_name,
                     "baseline_value": campaign.baseline_metric,
+                    "baseline_failed": baseline_failed,
                 },
             )
             await asyncio.to_thread(write_campaign_snapshot, "post_baseline", campaign, prior_dict)
@@ -2317,10 +2369,12 @@ async def run_campaign_loop(
 
                     campaign.update_best_metric(result)
 
-                    result_with_replications = {
-                        **result,
-                        "replication_count": campaign.count_replications(node_id),
-                    }
+                    # recount_from_tree() ran just above, so total_confirmed (injected as
+                    # confirmed_nodes) is the distinct-confirmed-node count that the
+                    # min_confirmed_findings frame needs.
+                    result_with_replications = build_breakthrough_finding(
+                        campaign, node_id, result
+                    )
                     if campaign.breakthrough_criteria.is_breakthrough(result_with_replications):
                         breakthrough_found = True
 

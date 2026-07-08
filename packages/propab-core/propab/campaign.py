@@ -44,6 +44,19 @@ def _wall_seconds_since_started(started_at: str) -> float | None:
         return None
 
 
+def _pick_metric_value(finding: dict[str, Any], metric_name: str) -> Any:
+    """Return the finding's metric, preferring the generic ``metric_value`` key.
+
+    Uses explicit ``is None`` checks rather than ``a or b`` so a legitimate metric
+    of ``0.0`` (falsy but real — e.g. a lower_is_better loss that reached zero) is
+    NOT silently discarded in favor of the fallback key.
+    """
+    mv = finding.get("metric_value")
+    if mv is None:
+        mv = finding.get(metric_name)
+    return mv
+
+
 # ── Breakthrough criteria ────────────────────────────────────────────────────
 
 @dataclass
@@ -63,6 +76,12 @@ class BreakthroughCriteria:
     # Optional declared ceiling: a higher_is_better result at/above this is rejected as
     # implausible (instrumentation guard). None disables the guard. Domain-agnostic.
     plausibility_max: float | None = None
+    # True when an ML campaign's baseline MEASUREMENT failed (worker produced no metric
+    # / exception / timeout) and baseline_value was defaulted to 0.0. This is distinct
+    # from a genuine verification campaign whose baseline is legitimately 0.0. When set,
+    # is_breakthrough refuses the baseline≈0 confirmation/verification frame, so a failed
+    # baseline can never be mistaken for "no baseline needed" and hand out a false win.
+    baseline_failed: bool = False
 
     def _is_implausible(self, metric_val: float) -> bool:
         return (
@@ -74,6 +93,11 @@ class BreakthroughCriteria:
     def is_breakthrough(self, finding: dict[str, Any]) -> bool:
         """Return True when breakthrough criteria are met for this finding."""
         if abs(self.baseline_value) < 1e-12:
+            # A FAILED ML baseline measurement also lands here (baseline_value=0.0), but
+            # it is NOT a genuine verification campaign. Refuse the confidence/confirmed
+            # frame so a zero-gain ML run cannot be declared a breakthrough by accident.
+            if self.baseline_failed:
+                return False
             conf = float(finding.get("confidence", 0.0))
             reps = int(finding.get("replication_count", 1))
             if self.min_confirmed_findings is not None:
@@ -86,7 +110,7 @@ class BreakthroughCriteria:
             return False
         if finding.get("replication_count", 1) < self.min_replications:
             return False
-        metric_val = finding.get("metric_value") or finding.get(self.metric_name)
+        metric_val = _pick_metric_value(finding, self.metric_name)
         if metric_val is None:
             return False
         try:
@@ -130,6 +154,7 @@ class BreakthroughCriteria:
             "min_replications": self.min_replications,
             "plausibility_max": self.plausibility_max,
             "min_confirmed_findings": self.min_confirmed_findings,
+            "baseline_failed": self.baseline_failed,
         }
 
     @classmethod
@@ -143,6 +168,7 @@ class BreakthroughCriteria:
             min_replications=data.get("min_replications", 3),
             plausibility_max=data.get("plausibility_max"),
             min_confirmed_findings=data.get("min_confirmed_findings"),
+            baseline_failed=bool(data.get("baseline_failed", False)),
         )
 
     @classmethod
@@ -287,7 +313,7 @@ class ResearchCampaign:
         Returns True if this is a new best.
         """
         crit = self.breakthrough_criteria
-        metric_val = finding.get("metric_value") or finding.get(crit.metric_name)
+        metric_val = _pick_metric_value(finding, crit.metric_name)
         if metric_val is None:
             return False
         try:
@@ -301,9 +327,15 @@ class ResearchCampaign:
         if crit._is_implausible(metric_val):
             return False
 
+        # best_finding is the "have we recorded any best yet?" sentinel (it is set
+        # together with best_metric and starts as None). Using it — instead of the old
+        # ``best_metric == 0.0`` proxy — means a lower_is_better campaign that legitimately
+        # reaches 0.0 keeps that optimum and is not overwritten by the next WORSE finding.
+        no_best_yet = self.best_finding is None
         is_better = (
-            (crit.direction == "higher_is_better" and metric_val > self.best_metric)
-            or (crit.direction == "lower_is_better" and (self.best_metric == 0.0 or metric_val < self.best_metric))
+            no_best_yet
+            or (crit.direction == "higher_is_better" and metric_val > self.best_metric)
+            or (crit.direction == "lower_is_better" and metric_val < self.best_metric)
         )
         if is_better:
             self.best_metric = metric_val
