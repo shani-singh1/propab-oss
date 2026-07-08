@@ -79,11 +79,11 @@ Each entry: **What** · **Why (rationale)** · **Assessment + tradeoff** · **Ac
 
 ## C. HLD — Persistence & state
 
-### C1. Dual state: serialized HypothesisTree **and** per-row `hypotheses` table — REPLACE(consistency)
-- **What:** campaign state lives both as a serialized tree and as DB rows; the worker writes the row verdict, the orchestrator mutates the tree, and they **diverge** (split-brain).
+### C1. Dual state: serialized HypothesisTree **and** per-row `hypotheses` table — DONE (split-brain fixed)
+- **What:** campaign state lives both as a serialized tree and as DB rows; the worker wrote the row verdict, the orchestrator mutated the tree, and they **diverged** (split-brain).
 - **Why:** tree for in-memory campaign logic; rows for API/paper queries.
-- **Assessment/tradeoff:** two sources of truth with no reconciliation is a data-integrity bug. Either derive one from the other or write both from one decision point.
-- **Action:** **C1 phase (in progress)** — orchestrator is the single writer; DB mirrors the tree's effective verdict.
+- **Assessment/tradeoff:** two sources of truth with no reconciliation was a data-integrity bug.
+- **Action:** ✅ **C1 landed (commit 094dfb5, 39 tests):** `_apply_result_diagnostics` returns a `DiagnosticsOutcome`; `_persist_effective_verdict` mirrors the tree's effective verdict/confidence to the DB row only on divergence. DB now mirrors the tree (single source of truth). Remaining: still two *stores* (acceptable) — full unification deferred; consistency is now guaranteed.
 
 ### C2. Two migration systems: `alembic/` (11 versions) + `migrations/*.sql` (3 files) — REMOVE(one)
 - **What:** alembic is the live system (redeploy asserts alembic-at-head); raw `migrations/*.sql` also present.
@@ -127,7 +127,7 @@ Each entry: **What** · **Why (rationale)** · **Assessment + tradeoff** · **Ac
 - **What:** `verdict_pipeline.run_verdict_pipeline`, `significance.classify_verdict`, each `DomainPlugin.classify_verdict`, mandrake/materials adapters; `_compute_confidence` vs `_compute_pipeline_confidence`.
 - **Why:** grew organically per subsystem.
 - **Assessment/tradeoff:** multiple honesty gates = no single audit point; the most dangerous kind of duplication for a credibility engine.
-- **Action:** collapse to one core verdict+confidence impl the orchestrator invokes (C1 does confidence; C2/C3 the rest).
+- **Action:** collapse to one core verdict+confidence impl the orchestrator invokes. ✅ **Confidence consolidated (C1, 094dfb5):** one canonical `compute_confidence` in core; worker `_compute_confidence` is a thin adapter (verified no behavior delta at the live call site). Remaining: the ≥4 verdict *classifiers* collapse in C2/C3.
 
 ### E3. `objective_spec(is_ml=False)` deterministic-frame + artifact/ood/scope honesty gates — KEEP
 - **What:** evidence-type classification → artifact_gate → ood_gate → scope_integrity; deterministic domains run against baseline≈0.
