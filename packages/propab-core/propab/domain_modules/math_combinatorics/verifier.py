@@ -39,7 +39,8 @@ MAX_SIDON_N = 100_000
 # Sidon set found so far, tagged partial — a real lower-bound witness beats a bare
 # timeout that yields no signal.
 SIDON_TIME_BUDGET = 8.0
-# Wall budget (seconds) for the randomized-restart greedy cap search (n == 5).
+# Wall budget (seconds) for the randomized-restart greedy cap search (large-param
+# best-so-far path; the reproducible n==5 report runs all restarts uncut — see N1).
 CAP_GREEDY_TIME_BUDGET = 6.0
 
 # --- Real cap-set computation in F_3^n ---------------------------------------
@@ -49,9 +50,21 @@ CAP_GREEDY_TIME_BUDGET = 6.0
 # over the whole (huge) set.
 MAX_FULL_CAP_DIM = 10
 # Time budget for the near-exhaustive branch-and-bound used to seed small base
-# caps. The DFS is deterministic, so a fixed budget yields a reproducible cap.
-# 4.0s comfortably clears the ~2.4s at which n=4 reaches its optimum (size 20).
-CAP_BB_TIME_BUDGET = 4.0
+# caps (n<=4). The DFS is deterministic and reaches the proven optimum in ~2.4s on
+# an idle core — but a TIGHT wall-clock budget makes the result NONDETERMINISTIC
+# under heavy CPU load (the search gets cut at a different point), which flaked the
+# "deterministic under fixed seed" guarantee (N1). A generous budget lets n<=4
+# reach its true optimum even under load, so the reported cap is reproducible; it
+# is a safety net, not the intended cutoff (n<=4 always completes well within it).
+CAP_BB_TIME_BUDGET = 30.0
+# Deterministic PRIMARY cutoff for the B&B: the DFS visits nodes in a fixed order,
+# so cutting at a fixed node count yields a byte-identical best cap on every run,
+# independent of CPU speed/load. Measured: n<=4 reach their proven optima quickly
+# (n=3 at node ~23, n=4 at node ~7678); the search then never terminates (it can't
+# prove optimality), which is why a wall-clock cut flaked 18-vs-20 under load. This
+# budget sits comfortably above the n=4 optimum-reaching node and keeps the compute
+# fast and reproducible.
+CAP_BB_MAX_NODES = 12_000
 # Above this cap size we validate every base factor fully and spot-check a random
 # sample of product points rather than running the O(|S|^2) sweep over the whole
 # (large) product set.
@@ -879,16 +892,22 @@ def _random_restart_cap(
     return best, complete
 
 
-def max_cap_exhaustive(n: int, time_limit: float = CAP_BB_TIME_BUDGET) -> tuple[list[CapPoint], bool]:
+def max_cap_exhaustive(
+    n: int, time_limit: float = CAP_BB_TIME_BUDGET, max_nodes: int = CAP_BB_MAX_NODES
+) -> tuple[list[CapPoint], bool]:
     """
     Near-exhaustive branch-and-bound for the maximum cap in F_3^n.
 
     Deterministic depth-first search with origin-fixing (every cap can be
     translated to contain 0) and a candidate-set bound. Returns (best_cap,
-    complete): `complete` is True only if the whole tree was searched within the
-    budget (i.e. the returned size is provably optimal). For small n (<=4) this
-    reliably reaches the true maximum well inside a few seconds; for larger n it
-    returns the best cap found before the budget expires.
+    complete): `complete` is True only if the whole tree was searched (the returned
+    size is provably optimal).
+
+    The PRIMARY cutoff is a deterministic ``max_nodes`` count — the DFS visits nodes
+    in a fixed order, so cutting at a node count yields a BYTE-IDENTICAL best cap on
+    every run, independent of machine speed or CPU load (fixes N1: a wall-clock cut
+    returned 18 vs 20 for n=4 under load). ``max_nodes`` is sized so n<=4 reaches its
+    proven optimum. ``time_limit`` remains only as a loose safety against a runaway.
     """
     elements = list(itertools.product(range(3), repeat=n))
     origin: CapPoint = tuple([0] * n)
@@ -896,10 +915,14 @@ def max_cap_exhaustive(n: int, time_limit: float = CAP_BB_TIME_BUDGET) -> tuple[
     best_size = [1]
     best_cap: list[list[CapPoint]] = [[origin]]
     complete = [True]
+    nodes = [0]
     start = time.time()
 
     def rec(cap: list[CapPoint], chosen: set[CapPoint], cand: list[CapPoint]) -> None:
-        if time.time() - start > time_limit:
+        nodes[0] += 1
+        # Deterministic primary cutoff (reproducible across runs); wall-clock is a
+        # loose safety only.
+        if nodes[0] > max_nodes or (nodes[0] & 0x3FFF) == 0 and time.time() - start > time_limit:
             complete[0] = False
             return
         # Upper bound: nothing left can beat the incumbent.
@@ -1005,9 +1028,13 @@ def compute_cap_set(n: int) -> dict[str, Any]:
         method = "exhaustive_branch_and_bound"
         seed_desc = f"deterministic DFS, origin-fixed, budget={CAP_BB_TIME_BUDGET}s"
     elif n == 5:
-        cap, cap_complete = _random_restart_cap(
-            n, CAP_GREEDY_RESTARTS, seed=CAP_GREEDY_SEED + n, time_budget=CAP_GREEDY_TIME_BUDGET
-        )
+        # Run ALL restarts (no wall-clock cut) so the reported cap is REPRODUCIBLE:
+        # the restart order is seeded/deterministic, so a byte-identical cap results
+        # regardless of machine speed or CPU load. n=5 (243 points, fixed restart
+        # count) completes in well under a second; wall-clock budgeting here made a
+        # "deterministic under fixed seed" result flake under heavy load (N1). The
+        # best-so-far-on-budget path is retained for genuinely large params elsewhere.
+        cap, cap_complete = _random_restart_cap(n, CAP_GREEDY_RESTARTS, seed=CAP_GREEDY_SEED + n)
         budget_partial = not cap_complete
         parts = [n]
         method = "random_restart_greedy"
