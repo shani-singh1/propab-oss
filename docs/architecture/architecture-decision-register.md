@@ -33,7 +33,7 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 | services/orchestrator/campaign_loop.py | 2.9k | 🟡 (verdict/dispatch/apply read; full ⬜) |
 | services/orchestrator (literature/research_loop/hypotheses/paper/retrieval/lifetime/policy_analyst/seed_validation/ranking/anomaly/ledger/prior/quality/diagnostics/budget/answer_gate/question_domain) | ~6k | ⬜ |
 | services/worker/sub_agent_loop.py | 3.0k | 🟡 (verdict/confidence/routing/return read; full ⬜) |
-| services/worker (think_act/permutation_null/sandbox/domain_router/failure_classify/sandbox_code_rewrite/peer_findings) | ~1.5k | 🟡 (domain_router/peer_findings/significance read; rest ⬜) |
+| services/worker (think_act/permutation_null/sandbox/domain_router/failure_classify/sandbox_code_rewrite/peer_findings) | ~1.5k | 🟡 (think_act/sandbox/domain_router/peer_findings/significance read → §L; permutation_null/failure_classify/sandbox_code_rewrite ⬜) |
 | services/literature (65 files) | 9.2k | ⬜ |
 | core: hypothesis_tree | 0.9k | 🟡 |
 | core: verdict_pipeline/significance | 0.4k | ✅ (§E, §K) |
@@ -325,6 +325,48 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 - **Why:** keep Celery boundary thin; single significance impl in core.
 - **Assessment/tradeoff:** clean. Clears part of the first audit's E2 worry: significance is NOT duplicated in the worker — it's a re-export. (Open: does `propab.significance.classify_verdict` differ from `verdict_pipeline.classify_verdict`? — verify during the verdict-consolidation of C2.)
 - **Action:** KEEP; resolve the significance-vs-verdict_pipeline classifier question in C2.
+
+---
+
+## L. Worker execution layer (grounded — code read 2026-07-09)
+
+### L1. Worker think-act loop (`think_act.decide_next_action`) — KEEP (worker's core job)
+- **What:** the worker's LLM observes accumulated results + extracted numeric values + peer findings + tool failures, and chooses ONE action: `tool` | `code` | `stop`. Bounded by max_steps + a monotonic wall deadline.
+- **Why:** per-hypothesis autonomous experimentation — design + run + iterate.
+- **How:** a single big think prompt → JSON action → execute → repeat; value-extraction feeds real measurements back into the next prompt (good — prevents placeholder drift).
+- **Needed?** Yes — this IS the experimenter. Survives the redesign (worker keeps its design LLM; it just stops *judging*).
+- **Better way?** Split the mega-prompt by task shape; see L3.
+- **Scalable:** ok (per-hypothesis, parallel). **Maintainable:** ⚠ one 300-line prompt template mixing concerns. **Testable:** decision logic is unit-testable; prompt quality isn't.
+- **Assessment/tradeoff:** correct role, but the loop currently also owns the significance gate (L5) which blurs into the verdict.
+- **Action:** KEEP; in the redesign the worker returns raw evidence, orchestrator judges (E1).
+
+### L2. Anti-cheat: `_is_spec_example_params` — KEEP (genuinely good honesty design)
+- **What:** rejects significance-tool calls whose numeric params equal (or are a trivial scale/offset/reorder of) ANY tool's spec-example values; value-based + cross-tool; legacy hardcoded floor as backstop.
+- **Why:** an agent copying `[0.9,0.88,0.91]` from a tool's doc into a real significance test would fabricate a result.
+- **Assessment/tradeoff:** exactly the right kind of adversarial guard for a credibility engine; generalizes to new tools without edits. **Action:** KEEP; move alongside the central honesty gate so it applies wherever significance is judged.
+
+### L3. Think prompt is ML-hardcoded — FIX (domain-independence violation)
+- **What:** the "generic" think prompt is saturated with ML specifics: `val_losses`, `build_mlp`, `train_model`, `run_experiment_grid`, MNIST, `n_steps`, classification defaults.
+- **Why:** the first domains were ML; the prompt grew around them.
+- **Needed?/Better way?** The worker must be domain-general (core rule D1). The prompt should be assembled from the resolved domain plugin's vocabulary/tools, not hardcode ML. For a combinatorics hypothesis ~half the prompt is misleading noise.
+- **Maintainable:** ⚠ every new non-ML domain fights the ML framing.
+- **Assessment/tradeoff:** a latent domain-independence violation in the hottest worker path.
+- **Action:** FIX — parameterize the think prompt by domain (inject the plugin's tool cluster + guidance; drop ML specifics into an ML-domain fragment). Fold into C2/C3.
+
+### L4. Docker sandbox (`run_sandboxed_python`, `network_mode="none"`) — KEEP-WATCH (+ consolidate)
+- **What:** model-written code runs in an isolated no-network Docker container, mem-capped, wall-clock enforced via `container.wait(timeout)+kill`; one Docker client reused per worker; base64+exec; JSON-last-line output contract.
+- **Why:** untrusted codegen must be sandboxed; no-network prevents data exfiltration / cheating by download.
+- **Needed?** Yes — non-negotiable for running LLM-written code.
+- **Deployable:** ⚠ requires the worker to reach a Docker daemon (socket mount / DinD) — a real infra coupling and attack surface; document it.
+- **Maintainable:** ⚠ a **second** sandbox exists in `math_combinatorics/discovery/sandbox_exec.py` (AST screen + restricted builtins + subprocess). Two security models = two things to keep correct.
+- **Assessment/tradeoff:** the Docker approach is the stronger boundary; the AST/subprocess one is lighter but weaker.
+- **Action:** KEEP the Docker sandbox; INVESTIGATE consolidating the math_combinatorics subprocess sandbox onto it (one security model).
+
+### L5. Significance gate lives in the worker think-loop — FIX(clarify split)
+- **What:** the worker forbids `stop` until a significance tool ran (correction prompts + a forced fallback significance call).
+- **Why:** ensure evidence exists before a verdict.
+- **Assessment/tradeoff:** conflates two things — (a) "did the worker GATHER significance evidence" (an experiment-completeness concern → legitimately the worker's) and (b) "is that evidence CONFIRMATORY" (the verdict → orchestrator's, E1). Keeping (a) in the worker is fine; (b) must move.
+- **Action:** FIX — worker keeps "must produce significance evidence before returning"; the *judgment* of that evidence moves to the orchestrator (C2/C3).
 
 ---
 
