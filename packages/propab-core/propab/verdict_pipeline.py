@@ -89,10 +89,17 @@ def _sig_result_from_context(
     return check_significance([evidence])
 
 
-def _compute_pipeline_confidence(
+def compute_confidence(
     evidence: dict[str, Any],
     verdict: str,
 ) -> float:
+    """Canonical confidence score for a hypothesis verdict.
+
+    Single source of truth shared by the core verdict pipeline and the worker
+    (``services.worker.sub_agent_loop._compute_confidence`` is a thin adapter that
+    maps its ``HypothesisEvidence`` TypedDict onto this). Domain-general: keyed only
+    on evidence shape, never on a domain id.
+    """
     if int(evidence.get("verified_true_steps") or 0) > 0 and verdict == "confirmed":
         return 0.95
     if int(evidence.get("verified_false_steps") or 0) > 0 and verdict == "refuted":
@@ -116,6 +123,11 @@ def _compute_pipeline_confidence(
     return min(max(score, 0.0), 0.95)
 
 
+# Backwards-compatible alias — this was the private name before the C1
+# consolidation collapsed the worker's duplicate into this single implementation.
+_compute_pipeline_confidence = compute_confidence
+
+
 def classify_verdict_stage(
     evidence: dict[str, Any],
     campaign_context: dict[str, Any] | None = None,
@@ -128,7 +140,7 @@ def classify_verdict_stage(
         sig,
         min_metric_steps_for_confirm=min_metric_steps,
     )
-    confidence = _compute_pipeline_confidence(evidence, verdict)
+    confidence = compute_confidence(evidence, verdict)
     return verdict, confidence, reason
 
 

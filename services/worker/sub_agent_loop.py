@@ -804,7 +804,16 @@ def attach_scope_integrity(
     return out
 
 
-def _compute_confidence(evidence: HypothesisEvidence) -> float:
+def _compute_confidence(evidence: HypothesisEvidence, verdict: str = "") -> float:
+    """Thin adapter → the canonical confidence function in core.
+
+    C1 consolidation: the score body used to be duplicated here. It now delegates to
+    ``propab.verdict_pipeline.compute_confidence`` so the worker and the core verdict
+    pipeline can never numerically diverge. ``evidence`` is a ``HypothesisEvidence``
+    TypedDict (a plain dict at runtime); the core reads it via ``.get()``.
+    """
+    from propab.verdict_pipeline import compute_confidence
+
     logger.info(
         "compute_confidence called: n_metric_steps=%s, p_value=%s, effect_size=%s, delta_pct=%s",
         evidence.get("n_metric_steps"),
@@ -812,22 +821,7 @@ def _compute_confidence(evidence: HypothesisEvidence) -> float:
         evidence.get("effect_size"),
         evidence.get("delta_pct"),
     )
-    score = 0.0
-    if evidence["metric_value"] is not None:
-        score += 0.20
-    if evidence["baseline_value"] is not None:
-        score += 0.20
-    p = evidence["p_value"]
-    if p is not None and p < 0.05:
-        score += 0.25
-    es = evidence["effect_size"]
-    if es is not None and abs(es) > 0.2:
-        score += 0.15
-    if evidence["n_metric_steps"] >= 3:
-        score += 0.10
-    if evidence["relevance_score"] > 0.30:
-        score += 0.10
-    return min(max(score, 0.0), 0.95)
+    return compute_confidence(dict(evidence), verdict)
 
 
 def _hypothesis_relevance_score(hypothesis_text: str, successful_outputs: list[dict]) -> float:
@@ -2859,7 +2853,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
         elif int(evidence_obj.get("verified_false_steps") or 0) > 0 and verdict == "refuted":
             confidence = max(confidence, 0.95)
         elif confidence == 0.0 and evidence_obj.get("n_metric_steps", 0) > 0:
-            confidence = _compute_confidence(evidence_obj)
+            confidence = _compute_confidence(evidence_obj, verdict)
 
         sig_summary = {
             "gate_passed": sig_result.gate_passed,

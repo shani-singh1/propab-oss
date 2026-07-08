@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any
 import json
 import logging
@@ -123,6 +124,7 @@ from services.orchestrator.literature_client import build_prior_via_service
 from services.orchestrator.paper import _session_experiment_step_count, write_paper_minimal
 from services.orchestrator.schemas import Prior
 from services.worker.peer_findings import build_peer_finding_payload, publish_peer_finding
+from services.worker.sub_agent_loop import _update_hypothesis
 from services.worker.tasks import run_sub_agent_task
 
 logger = logging.getLogger(__name__)
@@ -315,6 +317,23 @@ async def _build_campaign_prior(
     )
 
 
+@dataclass
+class DiagnosticsOutcome:
+    """The effective verdict after tree-side diagnostics/downgrades.
+
+    ``_apply_result_diagnostics`` can DOWNGRADE the tree node's verdict (control
+    calibration, missing metric, duplicate evidence). The worker already wrote its
+    OWN verdict/confidence to the DB, so the async caller uses this to detect a
+    divergence and mirror the corrected values back — keeping the tree the single
+    source of truth (C1 split-brain fix). ``inconclusive_reason`` is a tree-only
+    annotation (no DB column) and is returned for logging/tests only.
+    """
+
+    verdict: str
+    confidence: float
+    inconclusive_reason: str | None = None
+
+
 def _apply_result_diagnostics(
     tree: HypothesisTree,
     node_id: str,
@@ -323,11 +342,15 @@ def _apply_result_diagnostics(
     evidence: str,
     *,
     failure_reason: str | None = None,
-) -> None:
-    """Persist quality metadata on tree nodes (fixes.md P0–P4 post-contagion)."""
+) -> DiagnosticsOutcome:
+    """Persist quality metadata on tree nodes (fixes.md P0–P4 post-contagion).
+
+    Pure/sync: mutates ONLY the in-memory tree, never the DB. Returns the effective
+    verdict/confidence so the async caller can mirror any downgrade to the DB.
+    """
     node = tree.nodes.get(node_id)
     if node is None:
-        return
+        return DiagnosticsOutcome(verdict=verdict, confidence=confidence)
     node.node_role = infer_node_role(node.text)
     node.lineage_length = tree.lineage_length(node_id)
 
@@ -373,6 +396,7 @@ def _apply_result_diagnostics(
         node.failure_signature = failure_signature_from_reason(node.inconclusive_reason, verdict_reason=vr)
 
     effective_verdict = verdict
+    effective_confidence = confidence
     if node.node_role == NODE_ROLE_CONTROL and verdict == "confirmed":
         effective_verdict = "inconclusive"
         node.verdict = "inconclusive"
@@ -393,6 +417,7 @@ def _apply_result_diagnostics(
             node.verdict = "inconclusive"
             node.inconclusive_reason = "duplicate_evidence"
             node.confidence = min(confidence, 0.4)
+            effective_confidence = node.confidence
             if node_id in tree.confirmed:
                 tree.confirmed.remove(node_id)
 
@@ -437,6 +462,53 @@ def _apply_result_diagnostics(
             failure_signature=node.failure_signature,
         )
         tree.finding_ledger.append(node.finding)
+
+    return DiagnosticsOutcome(
+        verdict=effective_verdict,
+        confidence=effective_confidence,
+        inconclusive_reason=(
+            node.inconclusive_reason if effective_verdict == "inconclusive" else None
+        ),
+    )
+
+
+async def _persist_effective_verdict(
+    session_factory: async_sessionmaker,
+    hypothesis_id: str,
+    *,
+    worker_verdict: str,
+    worker_confidence: float,
+    diagnostics: DiagnosticsOutcome,
+) -> bool:
+    """Mirror the tree's effective verdict to the DB ``hypotheses`` row (C1).
+
+    The worker persists its OWN (verdict, confidence) when it completes. The
+    orchestrator's ``_apply_result_diagnostics`` can then DOWNGRADE the effective
+    verdict on the in-memory tree (control_calibration / metric_missing /
+    duplicate_evidence). That downgrade was never written back, so the DB verdict —
+    which the paper and API read — could permanently disagree with the tree. When
+    the effective verdict/confidence differs from what the worker wrote, persist the
+    corrected values via the shared ``_update_hypothesis`` helper so the DB mirrors
+    the tree (the single source of truth). Returns True iff a write happened.
+
+    A downgrade only ever fires on a worker "confirmed" result, which always left
+    the row ``status='completed'``; we therefore keep that status.
+    """
+    if not hypothesis_id:
+        return False
+    if (
+        diagnostics.verdict == worker_verdict
+        and diagnostics.confidence == worker_confidence
+    ):
+        return False
+    await _update_hypothesis(
+        session_factory,
+        hypothesis_id,
+        status="completed",
+        verdict=diagnostics.verdict,
+        confidence=diagnostics.confidence,
+    )
+    return True
 
 
 def build_campaign_synthesis_payload(campaign: ResearchCampaign) -> dict[str, Any]:
@@ -2368,13 +2440,25 @@ async def run_campaign_loop(
                     )
                     continue
 
-                _apply_result_diagnostics(
+                diagnostics = _apply_result_diagnostics(
                     campaign.hypothesis_tree,
                     node_id,
                     verdict,
                     confidence,
                     evidence,
                     failure_reason=str(result.get("failure_reason") or result.get("error") or ""),
+                )
+
+                # C1 split-brain fix: the tree is the single source of truth. If the
+                # diagnostics downgraded the effective verdict/confidence from what the
+                # worker already persisted, mirror the correction to the DB row so the
+                # paper/API can never read a stale "confirmed".
+                await _persist_effective_verdict(
+                    session_factory,
+                    str(result.get("hypothesis_id") or ""),
+                    worker_verdict=verdict,
+                    worker_confidence=confidence,
+                    diagnostics=diagnostics,
                 )
 
                 if verdict == "confirmed":
