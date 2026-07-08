@@ -92,3 +92,111 @@ textarea::placeholder,
 input::placeholder {
   color: var(--text3);
 }
+
+/* ── Global craft: overlays, command palette, keyboard chips ────────────────── */
+
+/* Dimmed, softly-blurred backdrop shared by the palette + shortcuts overlays. */
+.pp-overlay {
+  background: color-mix(in srgb, var(--desk) 62%, transparent);
+  -webkit-backdrop-filter: blur(3px) saturate(1.1);
+  backdrop-filter: blur(3px) saturate(1.1);
+  animation: pp-fade 0.14s ease both;
+}
+
+/* The floating modal card itself — a small lift + fade on enter. */
+.pp-modal {
+  animation: pp-pop 0.16s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes pp-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes pp-pop {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* A subtle row/item enter used by list entrances (Navigator, palette). */
+.pp-enter {
+  animation: pp-enter 0.22s ease both;
+}
+
+@keyframes pp-enter {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Skeleton shimmer for loading states. */
+.pp-skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--chip) 0%,
+    var(--rowHover) 50%,
+    var(--chip) 100%
+  );
+  background-size: 200% 100%;
+  animation: pp-shimmer 1.3s ease-in-out infinite;
+  border-radius: 6px;
+}
+
+@keyframes pp-shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* Keyboard-key chip used in the palette footer, shortcuts sheet, and hints. */
+.pp-kbd {
+  display: inline-flex;
+  min-width: 16px;
+  align-items: center;
+  justify-content: center;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--chip);
+  color: var(--text3);
+  font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+/* Clear, consistent keyboard-focus ring (mouse focus stays quiet). */
+[data-pp] :focus-visible,
+.pp-overlay :focus-visible {
+  outline: 2px solid var(--text3);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Honor reduced-motion for every animation introduced above. */
+@media (prefers-reduced-motion: reduce) {
+  .pp-overlay,
+  .pp-modal,
+  .pp-enter,
+  .pp-skeleton {
+    animation: none !important;
+  }
+}

@@ -250,7 +250,7 @@ function PaperCard({
 
   return (
     <div
-      className="mb-[14px] overflow-hidden rounded-[10px] border border-edge"
+      className="mb-[14px] animate-ptick overflow-hidden rounded-[10px] border border-edge motion-reduce:animate-none"
       style={{ background: "var(--railBg)" }}
     >
       <div className="flex items-center gap-[10px] px-[15px] pb-[8px] pt-[12px]">
@@ -299,7 +299,7 @@ function BaselineCard({ e, start }: { e: PropabEvent; start: string | null }) {
   const metric = num(p.baseline_metric);
   const metricName = typeof p.metric_name === "string" ? p.metric_name : null;
   return (
-    <div className="mb-[14px] flex items-center gap-[11px] rounded-[10px] border border-edge px-[15px] py-[11px]">
+    <div className="mb-[14px] flex animate-ptick items-center gap-[11px] rounded-[10px] border border-edge px-[15px] py-[11px] motion-reduce:animate-none">
       <StatusDot color="var(--text3)" size={8} />
       <div className="min-w-0 flex-1">
         <span className="text-[12px] font-semibold text-ink">Baseline measured</span>
@@ -327,7 +327,7 @@ function FallbackMilestone({ e, start }: { e: PropabEvent; start: string | null 
   const m = milestoneMeta(e);
   return (
     <div
-      className="mb-[14px] flex items-center gap-[11px] rounded-[10px] px-[15px] py-[12px]"
+      className="mb-[14px] flex animate-ptick items-center gap-[11px] rounded-[10px] px-[15px] py-[12px] motion-reduce:animate-none"
       style={{
         border: `1px solid ${m.emphatic ? m.color : "var(--border)"}`,
         background: m.emphatic ? "var(--chip)" : "transparent",

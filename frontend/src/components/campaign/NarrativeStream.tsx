@@ -1,17 +1,20 @@
-import { useState } from "react";
-import type { DiscoverySummary, NarrativeItem, RoundView, Worker } from "../../lib/model";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { DiscoverySummary, NarrativeItem, RoundStat, RoundView, Worker } from "../../lib/model";
+import { roundPhaseNotes, roundStats } from "../../lib/model";
 import type { PropabEvent } from "../../types";
 import { eventLabel } from "../../lib/events";
-import { fmtElapsed, fmtOffset } from "../../lib/format";
+import { fmtElapsed, fmtMetric, fmtOffset } from "../../lib/format";
 import { StatusDot, WorkerStatusMeta } from "./bits";
+import { usePrefersReducedMotion } from "./followEdge";
 import WorkerDetail from "./WorkerDetail";
 import EventCard from "./EventCards";
 
 // ── Round group card ─────────────────────────────────────────────────────────
-// A completed round collapses to a one-line summary with a verdict tally; the
-// live round is expanded by default. Expanding reveals the per-hypothesis
-// verdicts (each openable into full worker detail), a compute stat line, and a
-// lazy "raw events" reveal — progressive disclosure over hundreds of events.
+// A completed round collapses to a one-line summary — now enriched with a
+// proportional verdict bar, an activity sparkline, and a best-metric delta — and
+// the live round is expanded by default. Expanding reveals the orchestrator's
+// phase voice for the round, the per-hypothesis verdicts (each openable into full
+// worker detail), a compute stat line, and a lazy "raw events" reveal.
 
 function tally(r: RoundView) {
   return [
@@ -32,6 +35,88 @@ function VerdictChips({ r }: { r: RoundView }) {
           {x.n} {x.label}
         </span>
       ))}
+    </span>
+  );
+}
+
+// A stacked, proportional verdict bar. Running (not-yet-decided) hypotheses show
+// as a faint segment so the live round reads as "in progress", not empty.
+function VerdictBar({ r }: { r: RoundView }) {
+  const running = r.workers.filter((w) => w.status === "running").length;
+  const failed = r.workers.filter((w) => w.status === "failed").length;
+  const segs = [
+    { n: r.confirmed, color: "var(--green)", label: "confirmed" },
+    { n: r.refuted, color: "var(--red)", label: "refuted" },
+    { n: r.inconclusive, color: "var(--text3)", label: "inconclusive" },
+    { n: failed, color: "var(--red)", label: "failed" },
+    { n: running, color: "var(--text4)", label: "running", live: true },
+  ].filter((s) => s.n > 0);
+  const total = segs.reduce((a, s) => a + s.n, 0);
+  if (!total) return null;
+  return (
+    <div
+      className="mt-[8px] flex h-[5px] w-full overflow-hidden rounded-full bg-chip"
+      role="img"
+      aria-label={segs.map((s) => `${s.n} ${s.label}`).join(", ")}
+    >
+      {segs.map((s) => (
+        <span
+          key={s.label}
+          className={s.live ? "animate-ppulse motion-reduce:animate-none" : ""}
+          style={{ width: `${(s.n / total) * 100}%`, background: s.color }}
+        />
+      ))}
+    </div>
+  );
+}
+
+// A compact activity sparkline (event volume across the round's own time span).
+function Sparkline({ data, live }: { data: number[]; live: boolean }) {
+  const max = Math.max(1, ...data);
+  if (data.every((d) => d === 0)) return null;
+  return (
+    <span
+      className="flex h-[18px] w-[62px] items-end gap-[1px] text-ink-3"
+      aria-hidden
+      title="activity over the round"
+    >
+      {data.map((d, i) => {
+        const last = live && i === data.length - 1 && d > 0;
+        return (
+          <span
+            key={i}
+            className={`flex-1 rounded-[1px] ${last ? "animate-ppulse motion-reduce:animate-none" : ""}`}
+            style={{
+              height: `${d === 0 ? 0 : Math.max(11, (d / max) * 100)}%`,
+              minHeight: d > 0 ? 1 : 0,
+              background: last ? "var(--text)" : "currentColor",
+            }}
+          />
+        );
+      })}
+    </span>
+  );
+}
+
+// The per-round best-metric delta — calm, never an alarm. Improvement in the
+// campaign's optimization direction reads green; a non-improving round is muted.
+function BestDelta({ stat, discovery }: { stat: RoundStat; discovery: DiscoverySummary | null }) {
+  if (stat.delta == null || Math.abs(stat.delta) < 1e-9) return null;
+  const higher = discovery?.direction !== "lower_is_better";
+  const improving = higher ? stat.delta > 0 : stat.delta < 0;
+  const name = discovery?.metricName ?? "metric";
+  return (
+    <span
+      className="flex items-center gap-[4px] font-mono text-[10.5px] leading-none"
+      style={{ color: improving ? "var(--green)" : "var(--text3)" }}
+      title={`best ${name} moved by ${stat.delta > 0 ? "+" : ""}${fmtMetric(stat.delta)} this round`}
+    >
+      <span aria-hidden>{improving ? "▲" : "▼"}</span>
+      <span className="tabular-nums">
+        {stat.delta > 0 ? "+" : "−"}
+        {fmtMetric(Math.abs(stat.delta))}
+      </span>
+      <span className="text-ink-4">{name}</span>
     </span>
   );
 }
@@ -58,6 +143,21 @@ function WorkerVerdictRow({ w, now }: { w: Worker; now: number }) {
         <span className="mt-[1px] shrink-0 text-[10px] text-ink-4">{open ? "▾" : "▸"}</span>
       </button>
       {open && <WorkerDetail w={w} now={now} />}
+    </div>
+  );
+}
+
+// The orchestrator's phase voice for a round — folded into the story as calm,
+// muted lines rather than loud rows.
+function PhaseNotes({ notes }: { notes: string[] }) {
+  if (!notes.length) return null;
+  return (
+    <div className="mb-[12px] flex flex-col gap-[5px] border-l-2 border-edge pl-[11px]">
+      {notes.map((n, i) => (
+        <div key={i} className="text-[11.5px] leading-[1.45] text-ink-3">
+          {n}
+        </div>
+      ))}
     </div>
   );
 }
@@ -101,30 +201,37 @@ function RawEvents({ events, start }: { events: PropabEvent[]; start: string | n
 
 function RoundGroup({
   round,
+  stat,
   start,
   now,
+  discovery,
   defaultOpen,
 }: {
   round: RoundView;
+  stat: RoundStat | undefined;
   start: string | null;
   now: number;
+  discovery: DiscoverySummary | null;
   defaultOpen: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const running = round.status === "running";
   const title = round.isSetup ? "Setup" : `Round ${round.number}`;
   const dur = fmtElapsed(round.startedAt, running ? now : round.endedAt);
+  const notes = useMemo(() => roundPhaseNotes(round), [round]);
 
   return (
-    <div className="mb-[14px] overflow-hidden rounded-[10px] border border-edge bg-rail/40">
+    <div className="mb-[14px] animate-ptick overflow-hidden rounded-[10px] border border-edge bg-rail/40 motion-reduce:animate-none">
       <button
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
-        className="pp-row flex w-full items-center gap-[11px] px-[15px] py-[12px] text-left"
+        className="pp-row flex w-full items-start gap-[11px] px-[15px] py-[12px] text-left"
       >
-        <StatusDot color={running ? "var(--text)" : "var(--text3)"} live={running} size={9} />
+        <span className="mt-[3px]">
+          <StatusDot color={running ? "var(--text)" : "var(--text3)"} live={running} size={9} />
+        </span>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-[9px]">
+          <div className="flex flex-wrap items-center gap-x-[9px] gap-y-[4px]">
             <span className="text-[13px] font-semibold leading-none text-ink">{title}</span>
             {running && (
               <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-3">
@@ -137,16 +244,21 @@ function RoundGroup({
               </span>
             )}
           </div>
-          <div className="mt-[6px] flex items-center gap-[10px]">
+          <div className="mt-[6px] flex flex-wrap items-center gap-x-[12px] gap-y-[4px]">
             <VerdictChips r={round} />
+            {stat && <BestDelta stat={stat} discovery={discovery} />}
           </div>
+          <VerdictBar r={round} />
         </div>
-        <span className="shrink-0 font-mono text-[10.5px] text-ink-4">{dur}</span>
-        <span className="shrink-0 text-[11px] text-ink-4">{open ? "▾" : "▸"}</span>
+        {stat && <Sparkline data={stat.spark} live={running} />}
+        <span className="mt-[1px] shrink-0 font-mono text-[10.5px] text-ink-4">{dur}</span>
+        <span className="mt-[1px] shrink-0 text-[11px] text-ink-4">{open ? "▾" : "▸"}</span>
       </button>
 
       {open && (
         <div className="border-t border-line px-[15px] py-[13px]">
+          <PhaseNotes notes={notes} />
+
           {/* compute stat line */}
           <div className="mb-[12px] flex flex-wrap gap-[6px]">
             {[
@@ -192,6 +304,63 @@ function RoundGroup({
   );
 }
 
+// ── Streaming orchestrator voice ─────────────────────────────────────────────
+// The live "what it's doing right now" line at the active edge. A subtle
+// typewriter reveal on each new phase narration, with a caret while typing;
+// motion-reduce shows the full line immediately with no caret.
+
+function useTypewriter(text: string | undefined, enabled: boolean): { shown: string; typing: boolean } {
+  const [shown, setShown] = useState(text ?? "");
+  const [typing, setTyping] = useState(false);
+  const prev = useRef<string | undefined>(text);
+  useEffect(() => {
+    if (!enabled || !text) {
+      setShown(text ?? "");
+      setTyping(false);
+      prev.current = text;
+      return;
+    }
+    if (text === prev.current) return;
+    prev.current = text;
+    setShown("");
+    setTyping(true);
+    let i = 0;
+    const id = window.setInterval(() => {
+      i += 1;
+      setShown(text.slice(0, i));
+      if (i >= text.length) {
+        setTyping(false);
+        window.clearInterval(id);
+      }
+    }, 16);
+    return () => window.clearInterval(id);
+  }, [text, enabled]);
+  return { shown, typing };
+}
+
+function LiveEdge({ label }: { label?: string }) {
+  const reduced = usePrefersReducedMotion();
+  const { shown, typing } = useTypewriter(label, !reduced);
+  return (
+    <div className="flex items-center gap-[10px] px-[4px] py-[2px]" aria-live="polite">
+      <span className="h-[9px] w-[9px] animate-ppulse rounded-full bg-ink motion-reduce:animate-none" />
+      <span className="min-w-0 flex-1 text-[12.5px] leading-[1.4] text-ink-2">
+        {shown || "campaign is running"}
+        {typing && (
+          <span className="ml-[1px] inline-block h-[12px] w-[6px] translate-y-[1px] animate-ppulse bg-ink-3 align-middle motion-reduce:animate-none" />
+        )}
+      </span>
+      {!typing && (
+        <span className="flex shrink-0 gap-[3px]">
+          <span className="h-[3px] w-[3px] animate-pdots rounded-full bg-ink-2 motion-reduce:animate-none" />
+          <span className="h-[3px] w-[3px] animate-pdots rounded-full bg-ink-2 [animation-delay:0.2s] motion-reduce:animate-none" />
+          <span className="h-[3px] w-[3px] animate-pdots rounded-full bg-ink-2 [animation-delay:0.4s] motion-reduce:animate-none" />
+        </span>
+      )}
+    </div>
+  );
+}
+
 // ── The stream ───────────────────────────────────────────────────────────────
 // Standalone milestone events are dispatched through the special-event card
 // registry (EventCards) — a breakthrough, a confirmed finding, a paper, and the
@@ -213,7 +382,20 @@ export default function NarrativeStream({
   discovery?: DiscoverySummary | null;
   campaignId?: string;
 }) {
-  // Index of the last round item — that one is live-expanded by default.
+  // Per-round derived stats (verdict split feeds the bar; sparkline + best-metric
+  // delta threaded across rounds in narrative order).
+  const stats = useMemo(() => {
+    const rounds = narrative
+      .filter((it): it is Extract<NarrativeItem, { kind: "round" }> => it.kind === "round")
+      .map((it) => it.round);
+    return roundStats(rounds, {
+      baseline: discovery?.meter.hasMetric ? discovery.meter.baseline : null,
+      direction: discovery?.direction ?? "higher_is_better",
+      metricName: discovery?.metricName ?? null,
+    });
+  }, [narrative, discovery]);
+
+  // Index of the last running round — that one is live-expanded by default.
   let lastRoundIdx = -1;
   narrative.forEach((it, i) => {
     if (it.kind === "round" && it.round.status === "running") lastRoundIdx = i;
@@ -242,26 +424,16 @@ export default function NarrativeStream({
           <RoundGroup
             key={it.round.key}
             round={it.round}
+            stat={stats.get(it.round.key)}
             start={start}
             now={now}
+            discovery={discovery}
             defaultOpen={it.round.status === "running" ? i === lastRoundIdx : it.round.isSetup && narrative.length === 1}
           />
         ),
       )}
 
-      {live?.active && (
-        <div className="flex items-center gap-[10px] px-[4px] py-[2px]">
-          <span className="h-[9px] w-[9px] animate-ppulse rounded-full bg-ink motion-reduce:animate-none" />
-          <span className="text-[12.5px] leading-none text-ink-2">
-            {live.label || "campaign is running"}
-          </span>
-          <span className="flex gap-[3px]">
-            <span className="h-[3px] w-[3px] animate-pdots rounded-full bg-ink-2 motion-reduce:animate-none" />
-            <span className="h-[3px] w-[3px] animate-pdots rounded-full bg-ink-2 [animation-delay:0.2s] motion-reduce:animate-none" />
-            <span className="h-[3px] w-[3px] animate-pdots rounded-full bg-ink-2 [animation-delay:0.4s] motion-reduce:animate-none" />
-          </span>
-        </div>
-      )}
+      {live?.active && <LiveEdge label={live.label} />}
     </div>
   );
 }
