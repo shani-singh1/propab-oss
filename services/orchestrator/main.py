@@ -26,6 +26,7 @@ class InternalResearchBody(BaseModel):
     question: str = Field(min_length=8)
     max_hypotheses: int = Field(default=5, ge=1, le=20)
     paper_ttl_days: int = Field(default=30, ge=1, le=365)
+    llm_model: str | None = Field(default=None)
 
 
 class InternalCampaignBody(BaseModel):
@@ -80,6 +81,7 @@ async def internal_research(
         paper_ttl_days=body.paper_ttl_days,
         emitter=request.app.state.emitter,
         session_factory=request.app.state.session_factory,
+        llm_model=body.llm_model,
     )
     return {"status": "accepted", "session_id": body.session_id}
 

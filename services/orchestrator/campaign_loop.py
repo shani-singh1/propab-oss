@@ -234,6 +234,26 @@ def _prior_snippets(prior_dict: dict[str, Any]) -> list[str]:
     return snippets
 
 
+def _derive_prior_evidence_status(prior_dict: dict[str, Any]) -> str:
+    """Evidence status for an injected prior_dict that may omit ``evidence_status``.
+
+    A create-time ``literature_prior`` (campaign 2 A/B path) that leaves out
+    ``evidence_status`` must be judged by CONTENT, not stamped ``READY`` by default:
+    an empty prior (no facts/claims/gaps/dead-ends/papers) would otherwise feed
+    generation as if it were real evidence. This mirrors the resume-empty path,
+    which correctly forces ``INSUFFICIENT_EVIDENCE``. An explicitly declared status
+    is always honored.
+    """
+    declared = prior_dict.get("evidence_status")
+    if declared:
+        return str(declared)
+    has_content = any(
+        prior_dict.get(key)
+        for key in ("established_facts", "contested_claims", "open_gaps", "dead_ends", "key_papers")
+    )
+    return "READY" if has_content else "INSUFFICIENT_EVIDENCE"
+
+
 def _resolve_synthesis_domain_id(campaign: ResearchCampaign, parsed_domain: str = "") -> str:
     """Resolve domain plugin id from campaign tag/payload — not infer_session_domain()."""
     from propab.domain_modules.registry import resolve_domain_plugin
@@ -1968,7 +1988,9 @@ async def run_campaign_loop(
                 open_gaps=list(prior_dict.get("open_gaps") or []),
                 dead_ends=list(prior_dict.get("dead_ends") or []),
                 key_papers=list(prior_dict.get("key_papers") or []),
-                evidence_status=str(prior_dict.get("evidence_status") or "READY"),
+                # Derive from content when omitted so an EMPTY injected prior is
+                # labeled INSUFFICIENT_EVIDENCE rather than READY (see helper).
+                evidence_status=_derive_prior_evidence_status(prior_dict),
                 evidence_coverage=float(prior_dict.get("evidence_coverage") or 0.0),
                 retrieval_diagnostics=prior_dict.get("retrieval_diagnostics"),
             )
