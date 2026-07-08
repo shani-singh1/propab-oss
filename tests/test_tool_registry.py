@@ -1,4 +1,9 @@
-from propab.tools.registry import ToolRegistry
+from propab.tools.registry import (
+    ToolEntry,
+    ToolRegistry,
+    audience_matches,
+    normalize_audience,
+)
 
 
 def test_registry_discovers_core_tools() -> None:
@@ -25,3 +30,75 @@ def test_registry_discovers_core_tools() -> None:
     assert "convergence_analysis" in names
     assert "literature_baseline_compare" in names
     assert "load_curated_dataset" in names
+
+
+# ---- Audience scoping (orchestrator / worker / both) ----------------------------
+
+def _stub_entry(name: str, domain: str, audience: str = "both") -> ToolEntry:
+    return ToolEntry(
+        spec={"name": name, "domain": domain, "audience": audience},
+        fn=lambda **_kw: None,
+        domain=domain,
+        audience=audience,
+    )
+
+
+def test_normalize_and_match_audience() -> None:
+    # Absent / empty / unrecognised all degrade to "both" (never hidden).
+    assert normalize_audience(None) == "both"
+    assert normalize_audience("") == "both"
+    assert normalize_audience("ORCHESTRATOR") == "orchestrator"
+    assert normalize_audience("nonsense") == "both"
+    # "both" is visible to any requested audience; a scoped tool only to its own.
+    assert audience_matches("both", "orchestrator")
+    assert audience_matches("both", "worker")
+    assert audience_matches("orchestrator", "orchestrator")
+    assert not audience_matches("worker", "orchestrator")
+    assert not audience_matches("orchestrator", "worker")
+
+
+def test_existing_tools_default_to_both_audience() -> None:
+    reg = ToolRegistry()
+    all_names = {s["name"] for s in reg.get_all_specs()}
+    orch = {s["name"] for s in reg.get_for("orchestrator")}
+    worker = {s["name"] for s in reg.get_for("worker")}
+    # Nothing is restricted yet -> every tool defaults to "both" and is visible to all.
+    assert orch == all_names
+    assert worker == all_names
+    # The literature tool stays "both" (orchestrator literature stream is separate).
+    assert "literature_baseline_compare" in orch
+    assert "literature_baseline_compare" in worker
+
+
+def test_get_for_filters_by_audience() -> None:
+    reg = ToolRegistry()
+    reg._registry["_t_orch"] = _stub_entry("_t_orch", "unit_test", "orchestrator")
+    reg._registry["_t_worker"] = _stub_entry("_t_worker", "unit_test", "worker")
+    reg._registry["_t_both"] = _stub_entry("_t_both", "unit_test", "both")
+
+    orch = {s["name"] for s in reg.get_for("orchestrator")}
+    assert "_t_orch" in orch and "_t_both" in orch
+    assert "_t_worker" not in orch
+
+    worker = {s["name"] for s in reg.get_for("worker")}
+    assert "_t_worker" in worker and "_t_both" in worker
+    assert "_t_orch" not in worker
+
+
+def test_get_cluster_for_is_audience_filtered() -> None:
+    reg = ToolRegistry()
+    reg._registry["_c_orch"] = _stub_entry("_c_orch", "unit_test_cluster", "orchestrator")
+    reg._registry["_c_worker"] = _stub_entry("_c_worker", "unit_test_cluster", "worker")
+    reg._registry["_c_both"] = _stub_entry("_c_both", "unit_test_cluster", "both")
+
+    # Unfiltered cluster returns everything in the domain.
+    assert {s["name"] for s in reg.get_cluster("unit_test_cluster")} == {
+        "_c_orch", "_c_worker", "_c_both",
+    }
+    # Audience-filtered cluster returns own-audience + both.
+    assert {s["name"] for s in reg.get_cluster_for("unit_test_cluster", "orchestrator")} == {
+        "_c_orch", "_c_both",
+    }
+    assert {s["name"] for s in reg.get_cluster_for("unit_test_cluster", "worker")} == {
+        "_c_worker", "_c_both",
+    }

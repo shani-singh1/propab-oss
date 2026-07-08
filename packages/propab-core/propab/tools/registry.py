@@ -11,6 +11,32 @@ from propab.tools.types import ToolResult
 
 logger = logging.getLogger(__name__)
 
+# Audience scoping: a tool/skill may be usable by the orchestrator only, workers
+# only, or both. Absent/unknown values default to "both" so nothing is ever hidden
+# by accident (additive, non-breaking). Domain-general — no domain knowledge here.
+AUDIENCES = ("orchestrator", "worker", "both")
+_DEFAULT_AUDIENCE = "both"
+
+
+def normalize_audience(value: Any) -> str:
+    """Coerce a spec's ``audience`` value to a valid audience, defaulting to "both".
+
+    An absent, empty, or unrecognised value degrades to "both" (never hidden).
+    """
+    if value is None:
+        return _DEFAULT_AUDIENCE
+    v = str(value).strip().lower()
+    return v if v in AUDIENCES else _DEFAULT_AUDIENCE
+
+
+def audience_matches(entry_audience: str, requested: str) -> bool:
+    """True when a tool with ``entry_audience`` should be exposed to ``requested``.
+
+    A tool is visible to a requested audience when it is scoped to that audience
+    OR to "both".
+    """
+    return entry_audience == requested or entry_audience == _DEFAULT_AUDIENCE
+
 # Common LLM parameter name synonyms: (canonical_name → [aliases])
 _PARAM_SYNONYMS: dict[str, list[str]] = {
     "n_steps": ["epochs", "num_steps", "num_epochs", "steps", "n_epochs", "training_steps"],
@@ -39,6 +65,7 @@ class ToolEntry:
     spec: dict[str, Any]
     fn: Any
     domain: str
+    audience: str = _DEFAULT_AUDIENCE
 
 
 class ToolRegistry:
@@ -61,13 +88,40 @@ class ToolRegistry:
             fn = getattr(module, spec.get("name", ""), None)
             if fn is None:
                 continue
-            self._registry[spec["name"]] = ToolEntry(spec=spec, fn=fn, domain=spec["domain"])
+            self._registry[spec["name"]] = ToolEntry(
+                spec=spec,
+                fn=fn,
+                domain=spec["domain"],
+                audience=normalize_audience(spec.get("audience")),
+            )
 
     def get_all_specs(self) -> list[dict[str, Any]]:
         return [entry.spec for entry in self._registry.values()]
 
     def get_cluster(self, domain: str) -> list[dict[str, Any]]:
         return [entry.spec for entry in self._registry.values() if entry.domain == domain]
+
+    def get_for(self, audience: str) -> list[dict[str, Any]]:
+        """Specs visible to ``audience`` — those scoped to it OR to "both".
+
+        A tool without an explicit ``audience`` defaults to "both" and is therefore
+        returned for every requested audience (additive / non-breaking).
+        """
+        requested = normalize_audience(audience)
+        return [
+            entry.spec
+            for entry in self._registry.values()
+            if audience_matches(entry.audience, requested)
+        ]
+
+    def get_cluster_for(self, domain: str, audience: str) -> list[dict[str, Any]]:
+        """``get_cluster`` narrowed to tools visible to ``audience`` (scope OR "both")."""
+        requested = normalize_audience(audience)
+        return [
+            entry.spec
+            for entry in self._registry.values()
+            if entry.domain == domain and audience_matches(entry.audience, requested)
+        ]
 
     def get_significance_tools(self) -> list[dict[str, Any]]:
         """All tools that can produce p-values, effect sizes, or confidence intervals."""

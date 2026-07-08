@@ -43,7 +43,29 @@ _DOMAINS_DIR = _SKILLS_ROOT / "domains"
 # Recognised research phases. "any" matches every phase.
 PHASES = ("hypothesis", "experiment", "evidence", "iteration")
 
+# Audience scoping: a skill may be intended for the orchestrator only, workers only,
+# or both. Absent/unknown values default to "both" so a skill is never hidden by a
+# typo (consistent with the "malformed skill file is skipped, never fatal" rule).
+AUDIENCES = ("orchestrator", "worker", "both")
+_DEFAULT_AUDIENCE = "both"
+
 _DEFAULT_PRIORITY = 50
+
+
+def _normalize_audience(value: str | None) -> str:
+    """Coerce a front-matter ``audience`` value to a valid audience (default "both")."""
+    if value is None:
+        return _DEFAULT_AUDIENCE
+    v = str(value).strip().lower()
+    return v if v in AUDIENCES else _DEFAULT_AUDIENCE
+
+
+def _audience_matches(skill_audience: str, requested: str) -> bool:
+    """True when a skill scoped to ``skill_audience`` is visible to ``requested``.
+
+    Visible when scoped to the requested audience OR to "both".
+    """
+    return skill_audience == requested or skill_audience == _DEFAULT_AUDIENCE
 
 
 @dataclass(frozen=True)
@@ -54,6 +76,7 @@ class Skill:
     scope: str  # "core" or a domain_id
     body: str
     priority: int = _DEFAULT_PRIORITY
+    audience: str = _DEFAULT_AUDIENCE  # "orchestrator" | "worker" | "both"
     source_path: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -106,9 +129,10 @@ def _load_skill_file(path: pathlib.Path, expected_scope: str) -> Skill | None:
         scope=meta.get("scope", expected_scope) or expected_scope,
         body=body,
         priority=priority,
+        audience=_normalize_audience(meta.get("audience")),
         source_path=str(path),
         extra={k: v for k, v in meta.items()
-               if k not in ("name", "description", "phase", "scope", "priority")},
+               if k not in ("name", "description", "phase", "scope", "priority", "audience")},
     )
 
 
@@ -171,37 +195,55 @@ def skills_prompt_block(domain_id: str | None = None, phase: str = "hypothesis")
 # = the on-demand pull.
 # --------------------------------------------------------------------------------
 
-def skills_catalog(phase: str | None = None) -> list[Skill]:
+def skills_catalog(phase: str | None = None, audience: str | None = None) -> list[Skill]:
     """Every available skill (core + ALL domains), optionally narrowed to one phase.
 
     Does NOT pre-filter by domain or question — the agent self-selects from the whole
     catalog so it can infer its own domain and pull cross-cutting skills. Ordered
     core-first, then by domain, priority, name.
+
+    When ``audience`` is given, only skills visible to that audience are returned:
+    those scoped to it OR to "both" (the default for a skill without an explicit
+    ``audience``). ``audience=None`` (the default) applies no audience filter.
     """
+    requested = None if audience is None else _normalize_audience(audience)
+
+    def _keep(s: Skill) -> bool:
+        if phase is not None and not s.applies_to_phase(phase):
+            return False
+        if requested is not None and not _audience_matches(s.audience, requested):
+            return False
+        return True
+
     out: list[Skill] = []
     if _CORE_DIR.is_dir():
         for p in sorted(_CORE_DIR.glob("*.skill.md")):
             s = _load_skill_file(p, "core")
-            if s and (phase is None or s.applies_to_phase(phase)):
+            if s and _keep(s):
                 out.append(s)
     if _DOMAINS_DIR.is_dir():
         for dom in sorted(d for d in _DOMAINS_DIR.iterdir() if d.is_dir()):
             for p in sorted(dom.glob("*.skill.md")):
                 s = _load_skill_file(p, dom.name)
-                if s and (phase is None or s.applies_to_phase(phase)):
+                if s and _keep(s):
                     out.append(s)
     out.sort(key=lambda s: (0 if s.scope == "core" else 1, s.scope, s.priority, s.name))
     return out
 
 
-def render_catalog(entries: list[Skill] | None = None, phase: str | None = None) -> str:
+def render_catalog(
+    entries: list[Skill] | None = None,
+    phase: str | None = None,
+    audience: str | None = None,
+) -> str:
     """Compact, prompt-ready catalog — one line per skill (name, tag, phase, description).
 
     This is the AWARENESS layer the agent sees; full bodies are pulled on demand via
-    ``read_skills``. Empty string when there are no skills.
+    ``read_skills``. Empty string when there are no skills. ``audience`` narrows the
+    catalog the same way as ``skills_catalog`` (ignored when ``entries`` is passed in).
     """
     if entries is None:
-        entries = skills_catalog(phase)
+        entries = skills_catalog(phase, audience)
     if not entries:
         return ""
     lines = [
@@ -235,9 +277,12 @@ def read_skills(names: list[str]) -> str:
     return render_skills_block(found)
 
 
-def catalog_skill_names(phase: str | None = None) -> set[str]:
-    """The set of valid skill names the agent may request (for parsing/validation)."""
-    return {s.name for s in skills_catalog(phase)}
+def catalog_skill_names(phase: str | None = None, audience: str | None = None) -> set[str]:
+    """The set of valid skill names the agent may request (for parsing/validation).
+
+    ``audience`` narrows the set the same way as ``skills_catalog``.
+    """
+    return {s.name for s in skills_catalog(phase, audience)}
 
 
 def available_skill_index() -> dict[str, list[str]]:

@@ -131,3 +131,76 @@ def test_available_index_has_core_and_a_domain():
     idx = available_skill_index()
     assert idx.get("core"), "core skills should be indexed"
     assert "math_combinatorics" in idx
+
+
+# ---- Audience scoping (orchestrator / worker / both) ----------------------------
+
+def _write_skill(dirpath, fname, audience=None):
+    fm = ["---", f"name: {fname}", "description: test skill", "phase: any", "scope: core"]
+    if audience is not None:
+        fm.append(f"audience: {audience}")
+    fm.append("---")
+    fm.append("Body text for the skill so it is not skipped.")
+    (dirpath / f"{fname}.skill.md").write_text("\n".join(fm), encoding="utf-8")
+
+
+def test_skill_audience_parsed_and_defaults(tmp_path):
+    import propab.skills as sk
+
+    _write_skill(tmp_path, "with-aud", "ORCHESTRATOR")  # case-insensitive
+    _write_skill(tmp_path, "no-aud")                     # absent -> both
+    _write_skill(tmp_path, "bad-aud", "nonsense")        # invalid -> both
+
+    s1 = sk._load_skill_file(tmp_path / "with-aud.skill.md", "core")
+    s2 = sk._load_skill_file(tmp_path / "no-aud.skill.md", "core")
+    s3 = sk._load_skill_file(tmp_path / "bad-aud.skill.md", "core")
+
+    assert s1.audience == "orchestrator"
+    assert s2.audience == "both"   # default when absent
+    assert s3.audience == "both"   # invalid degrades to both
+    # audience is consumed, not left duplicated in extra
+    assert "audience" not in s1.extra
+
+
+def test_skills_catalog_audience_filter(tmp_path, monkeypatch):
+    import propab.skills as sk
+
+    core = tmp_path / "core"
+    core.mkdir()
+    _write_skill(core, "orch-only", "orchestrator")
+    _write_skill(core, "worker-only", "worker")
+    _write_skill(core, "shared-both", "both")
+    _write_skill(core, "default-absent")  # no audience -> both
+
+    monkeypatch.setattr(sk, "_CORE_DIR", core)
+    monkeypatch.setattr(sk, "_DOMAINS_DIR", tmp_path / "no_domains")
+
+    orch = {s.name for s in sk.skills_catalog(audience="orchestrator")}
+    assert "orch-only" in orch
+    assert "shared-both" in orch
+    assert "default-absent" in orch      # absent defaults to both -> visible
+    assert "worker-only" not in orch
+
+    worker = {s.name for s in sk.skills_catalog(audience="worker")}
+    assert "worker-only" in worker
+    assert "shared-both" in worker
+    assert "default-absent" in worker
+    assert "orch-only" not in worker
+
+    # No audience filter -> the whole catalog.
+    everyone = {s.name for s in sk.skills_catalog()}
+    assert {"orch-only", "worker-only", "shared-both", "default-absent"} <= everyone
+
+
+def test_catalog_skill_names_audience_filter(tmp_path, monkeypatch):
+    import propab.skills as sk
+
+    core = tmp_path / "core"
+    core.mkdir()
+    _write_skill(core, "orch-only", "orchestrator")
+    _write_skill(core, "shared-both", "both")
+    monkeypatch.setattr(sk, "_CORE_DIR", core)
+    monkeypatch.setattr(sk, "_DOMAINS_DIR", tmp_path / "no_domains")
+
+    assert sk.catalog_skill_names(audience="worker") == {"shared-both"}
+    assert sk.catalog_skill_names(audience="orchestrator") == {"orch-only", "shared-both"}
