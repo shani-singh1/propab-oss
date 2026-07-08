@@ -113,3 +113,23 @@ def test_is_discovery_default():
     n = HypothesisNode(id="d", text="Spectral gap predicts fragmentation", parent_id=None, depth=0)
     assert is_discovery_node(n)
     assert infer_node_role(n.text) == NODE_ROLE_DISCOVERY
+
+
+def test_metric_present_but_unaffirmed_is_claim_not_affirmed_not_metric_missing():
+    """Telemetry-driven fix: a construction that produced a real metric_value but did
+    not affirm its claim (verified_true_steps==0) must be labelled `claim_not_affirmed`,
+    NOT `metric_missing`. The old catch-all mislabelled these (they have a metric),
+    which misdirected diagnosis. `metric_missing` is reserved for genuinely no metric."""
+    from propab.research_quality import (
+        INCONCLUSIVE_CLAIM_NOT_AFFIRMED,
+        INCONCLUSIVE_METRIC_MISSING,
+        classify_inconclusive_reason,
+    )
+
+    # A computed cap/Sidon construction: has a metric_value, but 0 verified steps.
+    has_metric = {"verified_true_steps": 0, "verified_false_steps": 0, "metric_value": 0.26}
+    assert classify_inconclusive_reason(has_metric) == INCONCLUSIVE_CLAIM_NOT_AFFIRMED
+
+    # Genuinely no metric at all -> metric_missing is still correct.
+    no_metric = {"verified_true_steps": 0, "verified_false_steps": 0}
+    assert classify_inconclusive_reason(no_metric) == INCONCLUSIVE_METRIC_MISSING
