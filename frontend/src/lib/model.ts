@@ -725,3 +725,136 @@ export function discoverySummary(
     meter,
   };
 }
+
+// ── Center-narrative derivations (design.md §C round cards) ───────────────────
+// Additive helpers that layer richer per-round texture onto the existing
+// RoundView without reshaping it: a proportional verdict split, an activity
+// sparkline, a per-round best-metric delta, and the orchestrator's phase voice.
+// All pure, all defensive — each degrades to null/empty when the data is absent.
+
+// A metric key heuristic (domain-general): the backend does not emit an
+// authoritative per-round best metric, so we sniff it from event payloads —
+// preferring the campaign's own metric name, then standard keys, then a coarse
+// pattern (…_r2, score, auc, accuracy, rmse, mae, f1, mean_…). Booleans and
+// `confidence` are ignored so a verdict payload never masquerades as a metric.
+const METRIC_KEY_RE = /(^metric$|metric_value|best_metric|_r2$|^r2$|score|auc|accuracy|^acc$|rmse|mae|^f1$|^mean_)/i;
+
+function extractMetric(payload: unknown, metricName: string | null, depth = 0): number | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload) || depth > 2) return null;
+  const p = payload as Record<string, unknown>;
+  if (metricName) {
+    const direct = numOrNull(p[metricName]);
+    if (direct != null) return direct;
+    const mean = numOrNull(p["mean_" + metricName]);
+    if (mean != null) return mean;
+  }
+  for (const k of ["metric_value", "best_metric", "metric"]) {
+    const v = numOrNull(p[k]);
+    if (v != null) return v;
+  }
+  const nested = extractMetric(p.stdout_json, metricName, depth + 1);
+  if (nested != null) return nested;
+  for (const [k, v] of Object.entries(p)) {
+    if (k === "confidence" || typeof v === "boolean") continue;
+    if (METRIC_KEY_RE.test(k)) {
+      const n = numOrNull(v);
+      if (n != null) return n;
+    }
+  }
+  return null;
+}
+
+// Activity sparkline: bucket a round's events across their own time span into
+// `buckets` slots, counting events per slot. Uses event timestamps only (never
+// `now`) so completed rounds render a stable series and the live round grows.
+export function activitySpark(events: PropabEvent[], buckets = 28): number[] {
+  const out = new Array<number>(buckets).fill(0);
+  if (events.length < 2) {
+    if (events.length === 1) out[buckets - 1] = 1;
+    return out;
+  }
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const e of events) {
+    const t = new Date(e.timestamp).getTime();
+    if (!isFinite(t)) continue;
+    if (t < lo) lo = t;
+    if (t > hi) hi = t;
+  }
+  if (!isFinite(lo) || !isFinite(hi) || hi <= lo) return out;
+  const span = hi - lo;
+  for (const e of events) {
+    const t = new Date(e.timestamp).getTime();
+    if (!isFinite(t)) continue;
+    let idx = Math.floor(((t - lo) / span) * buckets);
+    if (idx >= buckets) idx = buckets - 1;
+    if (idx < 0) idx = 0;
+    out[idx] += 1;
+  }
+  return out;
+}
+
+// The orchestrator's voice within a round: the distinct phase-narration strings
+// (`campaign.phase` detail lines) it emitted while the round ran, in order.
+export function roundPhaseNotes(round: RoundView): string[] {
+  const out: string[] = [];
+  for (const e of round.events) {
+    if (e.event_type === "campaign.phase" || e.step === "campaign.phase") {
+      const p = e.payload || {};
+      const d =
+        typeof p.detail === "string" && p.detail.trim()
+          ? p.detail.trim()
+          : typeof p.phase === "string"
+            ? `Phase: ${String(p.phase).replace(/_/g, " ")}`
+            : null;
+      if (d && !out.includes(d)) out.push(d);
+    }
+  }
+  return out;
+}
+
+export interface RoundStat {
+  /** best metric attained by the end of this round (running max/min), if any. */
+  best: number | null;
+  /** best metric sampled within just this round, if any. */
+  roundBest: number | null;
+  /** signed change vs. the prior running best (or baseline for the first). */
+  delta: number | null;
+  /** per-round activity sparkline. */
+  spark: number[];
+}
+
+// Per-round stats keyed by `round.key`. Threads a running best across rounds in
+// narrative order so each card can show its best-metric delta; the sparkline is
+// independent per round. `baseline`/`direction`/`metricName` come from the
+// discovery summary. Everything is null when no metric is derivable.
+export function roundStats(
+  rounds: RoundView[],
+  opts: { baseline: number | null; direction: "higher_is_better" | "lower_is_better"; metricName: string | null },
+): Map<string, RoundStat> {
+  const higher = opts.direction !== "lower_is_better";
+  const out = new Map<string, RoundStat>();
+  let running: number | null = opts.baseline;
+  for (const r of rounds) {
+    let roundBest: number | null = null;
+    for (const e of r.events) {
+      const m = extractMetric(e.payload, opts.metricName);
+      if (m == null) continue;
+      roundBest = roundBest == null ? m : higher ? Math.max(roundBest, m) : Math.min(roundBest, m);
+    }
+    let delta: number | null = null;
+    let best = running;
+    if (roundBest != null) {
+      if (running == null) {
+        best = roundBest;
+      } else {
+        const improved = higher ? roundBest > running : roundBest < running;
+        best = improved ? roundBest : running;
+        delta = roundBest - running;
+      }
+      running = best;
+    }
+    out.set(r.key, { best, roundBest, delta, spark: activitySpark(r.events) });
+  }
+  return out;
+}

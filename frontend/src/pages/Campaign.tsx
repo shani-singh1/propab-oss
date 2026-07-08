@@ -6,6 +6,7 @@ import { useLiveStore } from "../store";
 import { statusView } from "../lib/status";
 import { breakthroughMeter, buildCampaignModel, discoverySummary } from "../lib/model";
 import NarrativeStream from "../components/campaign/NarrativeStream";
+import { useFollowEdge, JumpToLivePill } from "../components/campaign/followEdge";
 import CampaignHud from "../components/campaign/CampaignHud";
 import DiscoveryHero from "../components/campaign/DiscoveryHero";
 import Composer from "../components/campaign/Composer";
@@ -54,6 +55,10 @@ export default function Campaign() {
   const paperReady = useMemo(() => events.some((e) => e.event_type === "paper.ready"), [events]);
   const label = active ? liveLabel(events, model.counts.workersRunning) : undefined;
 
+  // Follow-the-live-edge: the center scroll container auto-scrolls while pinned to
+  // the bottom; scrolling up reveals a "jump to live (N new)" pill.
+  const edge = useFollowEdge(events.length, model.narrative.length);
+
   if (!campaign && error) {
     return (
       <main className="flex min-w-0 flex-1 items-center justify-center bg-center">
@@ -91,22 +96,29 @@ export default function Campaign() {
           </div>
         )}
 
-        {/* narrative */}
-        <div className="pp-scroll min-h-0 flex-1 overflow-y-auto px-[26px] pb-2 pt-5">
-          {/* §B — Discovery Hero pinned atop the center column */}
-          {campaign && (
-            <div className="mx-auto max-w-[720px]">
-              <DiscoveryHero discovery={discovery} />
-            </div>
-          )}
-          <NarrativeStream
-            narrative={model.narrative}
-            start={c?.started_at ?? null}
-            now={now}
-            live={{ active, label }}
-            discovery={discovery}
-            campaignId={id}
-          />
+        {/* narrative — center column owns the follow-the-live-edge scroll */}
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          <div
+            ref={edge.ref}
+            onScroll={edge.onScroll}
+            className="pp-scroll min-h-0 flex-1 overflow-y-auto px-[26px] pb-2 pt-5"
+          >
+            {/* §B — Discovery Hero pinned atop the center column */}
+            {campaign && (
+              <div className="mx-auto max-w-[720px]">
+                <DiscoveryHero discovery={discovery} />
+              </div>
+            )}
+            <NarrativeStream
+              narrative={model.narrative}
+              start={c?.started_at ?? null}
+              now={now}
+              live={{ active, label }}
+              discovery={discovery}
+              campaignId={id}
+            />
+          </div>
+          <JumpToLivePill show={!edge.pinned} newCount={edge.newCount} onClick={edge.jump} />
         </div>
 
         {/* composer */}
