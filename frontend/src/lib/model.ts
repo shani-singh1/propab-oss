@@ -725,3 +725,270 @@ export function discoverySummary(
     meter,
   };
 }
+
+// ── Worker-card derivations (§D workers) ─────────────────────────────────────
+// Pure helpers that read a *single* Worker's own events to surface a card-level
+// result line without reshaping the Worker type. Everything is read defensively
+// from whatever the terminal `agent.completed` payload carries (domain-general),
+// so a math/coding campaign that emits `metric_value`/`best_known`/`witness_size`
+// lights up the metric line while other domains simply omit it.
+
+export interface WorkerResult {
+  /** name of the objective metric, if the completion payload names one. */
+  metricName: string | null;
+  /** the worker's achieved metric value, if any. */
+  metricValue: number | null;
+  /** the value to beat (published/prior best), if the payload carries one. */
+  bestKnown: number | null;
+  /** worker's value strictly beats best-known (direction-aware). */
+  beatsBestKnown: boolean;
+  /** higher/lower-is-better; defaults to higher when unstated. */
+  direction: "higher_is_better" | "lower_is_better";
+  /** size of a combinatorial witness (set / certificate), when present. */
+  witnessSize: number | null;
+  /** significance gate / verification passed, if the payload reports it. */
+  sigGatePassed: boolean | null;
+  /** true when there is any metric/witness worth rendering. */
+  hasMetric: boolean;
+}
+
+const METRIC_KEYS = [
+  "metric_value",
+  "metric",
+  "best_metric",
+  "mean_r2",
+  "r2",
+  "lofo_r2",
+  "score",
+  "value",
+  "objective",
+];
+const BEST_KNOWN_KEYS = ["best_known", "published_best", "record", "prior_best", "baseline_metric"];
+
+function arrLen(v: unknown): number | null {
+  if (Array.isArray(v)) return v.length;
+  return null;
+}
+
+export function workerResult(w: Worker): WorkerResult {
+  const done = [...w.events].reverse().find((e) => e.event_type === "agent.completed");
+  const p = (done?.payload ?? {}) as Record<string, unknown>;
+
+  const metricName = firstStr(p.metric_name, p.objective_name);
+  let metricValue: number | null = null;
+  for (const k of METRIC_KEYS) {
+    const n = numOrNull(p[k]);
+    if (n != null) {
+      metricValue = n;
+      break;
+    }
+  }
+  const bestKnown = firstNum(...BEST_KNOWN_KEYS.map((k) => p[k]));
+  const direction =
+    p.direction === "lower_is_better" || p.objective_direction === "lower_is_better"
+      ? "lower_is_better"
+      : "higher_is_better";
+  const witnessSize =
+    firstNum(p.witness_size, p.set_size, p.size) ??
+    arrLen(p.witness) ??
+    arrLen(p.set) ??
+    arrLen(p.certificate);
+  let sigGatePassed: boolean | null = null;
+  if (typeof p.sig_gate_passed === "boolean") sigGatePassed = p.sig_gate_passed;
+  else if (typeof p.verified === "boolean") sigGatePassed = p.verified;
+  else if (typeof p.significant === "boolean") sigGatePassed = p.significant;
+
+  const beatsBestKnown =
+    metricValue != null && bestKnown != null
+      ? direction === "higher_is_better"
+        ? metricValue > bestKnown
+        : metricValue < bestKnown
+      : false;
+
+  return {
+    metricName,
+    metricValue,
+    bestKnown,
+    beatsBestKnown,
+    direction,
+    witnessSize,
+    sigGatePassed,
+    hasMetric: metricValue != null || witnessSize != null,
+  };
+}
+
+// ── Compute / cost derivations (§D Compute tab) ──────────────────────────────
+// Aggregate LLM/tool/code/error activity with a per-purpose and per-tool
+// breakdown, plus the compute-budget burn-down. Latency + tokens + cost are NOT
+// derived here: the stream does not yet carry them — see design.md §3 items 1–2
+// (`llm.response` needs `tokens_in`/`tokens_out`/`duration_ms` + a `call_id`).
+// The Compute panel renders those columns as "—/TODO" until the backend emits.
+
+export interface ComputeBreakdownRow {
+  label: string;
+  count: number;
+}
+
+export interface ComputeStats {
+  llm: number;
+  tool: number;
+  code: number;
+  errors: number;
+  /** llm.prompt calls grouped by `purpose`, most-frequent first. */
+  llmByPurpose: ComputeBreakdownRow[];
+  /** tool.called grouped by tool name, most-frequent first. */
+  toolByName: ComputeBreakdownRow[];
+  /** error/timeout/failed events grouped by event_type. */
+  errorsByType: ComputeBreakdownRow[];
+  budget: {
+    hasBudget: boolean;
+    usedSec: number;
+    totalSec: number;
+    remainingSec: number;
+    pct: number;
+  };
+  /** always false for now — flips true once §3 backend fields land. */
+  hasLatency: boolean;
+  hasTokens: boolean;
+}
+
+function topRows(counter: Map<string, number>, limit = 8): ComputeBreakdownRow[] {
+  return Array.from(counter.entries())
+    .map(([label, count]) => ({ label, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, limit);
+}
+
+export function computeStats(
+  events: PropabEvent[],
+  summary?: Pick<CampaignSummary, "elapsed_sec" | "remaining_sec"> | null,
+): ComputeStats {
+  let llm = 0,
+    tool = 0,
+    code = 0,
+    errors = 0;
+  const byPurpose = new Map<string, number>();
+  const byTool = new Map<string, number>();
+  const byError = new Map<string, number>();
+
+  for (const e of events) {
+    const t = e.event_type;
+    const p = e.payload || {};
+    if (t === "llm.prompt") {
+      llm += 1;
+      const purpose = String(p.purpose ?? "other").replace(/_/g, " ");
+      byPurpose.set(purpose, (byPurpose.get(purpose) ?? 0) + 1);
+    } else if (t === "tool.called") {
+      tool += 1;
+      const name = String(p.tool ?? "call");
+      byTool.set(name, (byTool.get(name) ?? 0) + 1);
+    } else if (t === "code.result") {
+      code += 1;
+    }
+    if (isErr(t)) {
+      errors += 1;
+      byError.set(t, (byError.get(t) ?? 0) + 1);
+    }
+  }
+
+  const usedSec = firstNum(summary?.elapsed_sec) ?? 0;
+  const remainingSec = firstNum(summary?.remaining_sec) ?? 0;
+  const totalSec = usedSec + remainingSec;
+  const hasBudget = totalSec > 0;
+
+  return {
+    llm,
+    tool,
+    code,
+    errors,
+    llmByPurpose: topRows(byPurpose),
+    toolByName: topRows(byTool),
+    errorsByType: topRows(byError),
+    budget: {
+      hasBudget,
+      usedSec,
+      totalSec,
+      remainingSec,
+      pct: hasBudget ? Math.max(0, Math.min(1, usedSec / totalSec)) : 0,
+    },
+    hasLatency: false,
+    hasTokens: false,
+  };
+}
+
+// ── Metric trajectory (§D Metrics tab) ───────────────────────────────────────
+// The best-metric-over-rounds series the Metrics chart plots against the
+// baseline and the breakthrough threshold. Derived from the round segmentation:
+// for each real round we take the best objective value any of its workers
+// achieved (direction-aware), carrying the running best forward so the line is
+// monotone-improving. Falls back to the summary's best_metric for the final
+// point when no per-worker metric is emitted.
+
+export interface MetricPoint {
+  round: number;
+  /** best value achieved *by the end of* this round (running best). */
+  best: number;
+  /** this round's own best (may equal running best), for the step marker. */
+  roundBest: number | null;
+}
+
+export interface MetricTrajectory {
+  hasData: boolean;
+  baseline: number | null;
+  thresholdValue: number | null;
+  direction: "higher_is_better" | "lower_is_better";
+  points: MetricPoint[];
+}
+
+export function metricTrajectory(
+  rounds: RoundView[],
+  summary?: Pick<
+    CampaignSummary,
+    "baseline_metric" | "best_metric" | "breakthrough_threshold_pct"
+  > | null,
+  direction: "higher_is_better" | "lower_is_better" = "higher_is_better",
+): MetricTrajectory {
+  const baseline = firstNum(summary?.baseline_metric);
+  const higher = direction === "higher_is_better";
+  const better = (a: number, b: number) => (higher ? a > b : a < b);
+
+  const realRounds = rounds.filter((r) => !r.isSetup);
+  const points: MetricPoint[] = [];
+  let running: number | null = baseline;
+
+  for (const r of realRounds) {
+    let roundBest: number | null = null;
+    for (const w of r.workers) {
+      const res = workerResult(w);
+      if (res.metricValue == null) continue;
+      if (roundBest == null || better(res.metricValue, roundBest)) roundBest = res.metricValue;
+    }
+    if (roundBest != null && (running == null || better(roundBest, running))) running = roundBest;
+    if (running != null) points.push({ round: r.number, best: running, roundBest });
+  }
+
+  // Ensure the final point reflects the authoritative summary best if higher.
+  const summaryBest = firstNum(summary?.best_metric);
+  if (summaryBest != null && points.length) {
+    const last = points[points.length - 1];
+    if (better(summaryBest, last.best)) last.best = summaryBest;
+  } else if (summaryBest != null && baseline != null && points.length === 0) {
+    points.push({ round: 1, best: summaryBest, roundBest: summaryBest });
+  }
+
+  const thresholdPct = firstNum(summary?.breakthrough_threshold_pct);
+  const thresholdValue =
+    baseline != null && thresholdPct != null
+      ? higher
+        ? baseline * (1 + thresholdPct / 100)
+        : baseline * (1 - thresholdPct / 100)
+      : null;
+
+  return {
+    hasData: points.length > 0 && baseline != null,
+    baseline,
+    thresholdValue,
+    direction,
+    points,
+  };
+}

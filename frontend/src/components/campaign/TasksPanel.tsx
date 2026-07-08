@@ -1,57 +1,22 @@
-import { useState } from "react";
-import type { InFlightTask, Worker } from "../../lib/model";
-import { fmtElapsed } from "../../lib/format";
-import { KindBadge, kindMeta } from "./bits";
-import WorkerDetail from "./WorkerDetail";
+import { useMemo, useState } from "react";
+import type { InFlightKind, InFlightTask, Worker } from "../../lib/model";
+import { useScrollRef, useVirtual } from "../../lib/useVirtual";
+import TaskCard from "./TaskCard";
 
-// The transparency-into-the-machine view: everything running RIGHT NOW —
-// worker experiments, sandbox code, LLM calls, tool calls — each openable.
-function TaskRow({
-  task,
-  worker,
-  now,
-}: {
-  task: InFlightTask;
-  worker: Worker | undefined;
-  now: number;
-}) {
-  const [open, setOpen] = useState(false);
-  const expandable = task.kind === "experiment" && !!worker;
-  const meta = kindMeta(task.kind);
+type Row =
+  | { type: "header"; key: string; label: string; count: number }
+  | { type: "task"; key: string; task: InFlightTask };
 
-  return (
-    <div className="border-b border-line last:border-0">
-      <button
-        onClick={() => expandable && setOpen((o) => !o)}
-        aria-expanded={expandable ? open : undefined}
-        className={`flex w-full items-start gap-[10px] px-[16px] py-[11px] text-left ${expandable ? "pp-row" : "cursor-default"}`}
-      >
-        <KindBadge kind={task.kind} />
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-[12.5px] font-medium leading-[1.35] text-ink">
-            {task.title}
-          </div>
-          <div className="mt-[4px] flex items-center gap-[7px] font-mono text-[10px] leading-none text-ink-3">
-            <span style={{ color: meta.color }}>{meta.label}</span>
-            <span className="text-ink-4">·</span>
-            <span className="animate-ppulse motion-reduce:animate-none">
-              {fmtElapsed(task.startedAt, now)}
-            </span>
-            {task.detail && (
-              <>
-                <span className="text-ink-4">·</span>
-                <span className="truncate text-ink-3">{task.detail}</span>
-              </>
-            )}
-          </div>
-        </div>
-        {expandable && <span className="mt-[2px] shrink-0 text-[11px] text-ink-4">{open ? "▾" : "▸"}</span>}
-      </button>
-      {open && worker && <WorkerDetail w={worker} now={now} />}
-    </div>
-  );
-}
+const GROUPS: { kind: InFlightKind; label: string }[] = [
+  { kind: "experiment", label: "Experiments" },
+  { kind: "code", label: "Sandbox code" },
+  { kind: "llm", label: "LLM calls" },
+  { kind: "tool", label: "Tool calls" },
+];
 
+// The "watch the machine think" tab: everything running RIGHT NOW as live cards,
+// grouped by kind, virtualized so a burst of hundreds of in-flight calls stays
+// smooth. An empty state that reads as "idle, healthy," not "nothing here."
 export default function TasksPanel({
   tasks,
   workers,
@@ -63,40 +28,82 @@ export default function TasksPanel({
   now: number;
   active: boolean;
 }) {
-  const byHyp = new Map(workers.map((w) => [w.hypothesisId, w]));
+  const [openIds, setOpenIds] = useState<Set<string>>(new Set());
+  const [scrollRef, getScroll] = useScrollRef<HTMLDivElement>();
+  const byHyp = useMemo(() => new Map(workers.map((w) => [w.hypothesisId, w])), [workers]);
+
+  const rows = useMemo<Row[]>(() => {
+    const out: Row[] = [];
+    for (const g of GROUPS) {
+      const items = tasks.filter((t) => t.kind === g.kind);
+      if (!items.length) continue;
+      out.push({ type: "header", key: `h-${g.kind}`, label: g.label, count: items.length });
+      for (const t of items) out.push({ type: "task", key: t.id, task: t });
+    }
+    return out;
+  }, [tasks]);
+
+  const { virtualItems, totalSize } = useVirtual({
+    count: rows.length,
+    getScrollElement: getScroll,
+    estimateHeight: 82,
+    resetKey: rows.length,
+  });
 
   if (!tasks.length) {
     return (
-      <div className="px-[16px] py-6 text-[12px] leading-relaxed text-ink-3">
-        {active
-          ? "Nothing executing this instant. Background tasks appear here the moment a worker, sandbox run, or LLM call is in flight."
-          : "No active tasks — the campaign has concluded."}
+      <div className="flex h-full flex-col items-center justify-center gap-[10px] px-[24px] py-10 text-center">
+        <span
+          className={`h-[10px] w-[10px] rounded-full ${active ? "animate-ppulse motion-reduce:animate-none" : ""}`}
+          style={{ background: active ? "var(--green)" : "var(--text4)" }}
+        />
+        <div className="text-[12px] leading-relaxed text-ink-3">
+          {active
+            ? "Idle and healthy — no work in flight this instant. Experiments, sandbox runs, and LLM calls surface here the moment they start."
+            : "No active tasks — the campaign has concluded."}
+        </div>
       </div>
     );
   }
 
-  const groups: { kind: string; label: string; items: InFlightTask[] }[] = [
-    { kind: "experiment", label: "Experiments", items: tasks.filter((t) => t.kind === "experiment") },
-    { kind: "code", label: "Sandbox code", items: tasks.filter((t) => t.kind === "code") },
-    { kind: "llm", label: "LLM calls", items: tasks.filter((t) => t.kind === "llm") },
-    { kind: "tool", label: "Tool calls", items: tasks.filter((t) => t.kind === "tool") },
-  ].filter((g) => g.items.length);
+  const toggleOpen = (id: string) =>
+    setOpenIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
 
   return (
-    <div>
-      {groups.map((g) => (
-        <div key={g.kind}>
-          <div className="flex items-center gap-[8px] border-b border-line bg-chip/20 px-[16px] py-[7px]">
-            <span className="font-mono text-[9.5px] font-semibold uppercase tracking-[0.12em] text-ink-3">
-              {g.label}
-            </span>
-            <span className="font-mono text-[9.5px] text-ink-4">{g.items.length}</span>
-          </div>
-          {g.items.map((t) => (
-            <TaskRow key={t.id} task={t} worker={t.hypothesisId ? byHyp.get(t.hypothesisId) : undefined} now={now} />
-          ))}
-        </div>
-      ))}
+    <div ref={scrollRef} className="pp-scroll relative h-full min-h-0 overflow-auto">
+      <div style={{ height: totalSize, position: "relative" }}>
+        {virtualItems.map((vi) => {
+          const row = rows[vi.index];
+          return (
+            <div
+              key={row.key}
+              ref={vi.measureRef}
+              style={{ position: "absolute", top: vi.start, left: 0, right: 0 }}
+            >
+              {row.type === "header" ? (
+                <div className="flex items-center gap-[8px] px-[16px] pb-[4px] pt-[12px]">
+                  <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-3">
+                    {row.label}
+                  </span>
+                  <span className="font-mono text-[10px] text-ink-4">{row.count}</span>
+                </div>
+              ) : (
+                <TaskCard
+                  task={row.task}
+                  worker={row.task.hypothesisId ? byHyp.get(row.task.hypothesisId) : undefined}
+                  now={now}
+                  open={openIds.has(row.task.id)}
+                  onToggle={() => toggleOpen(row.task.id)}
+                />
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

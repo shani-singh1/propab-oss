@@ -1,14 +1,17 @@
 import { useEffect, useState } from "react";
 import type { BeliefObject, HypothesisTree, PropabEvent } from "../../types";
 import type { CampaignModel } from "../../lib/model";
+import { useLiveStore } from "../../store";
 import HypothesisTreeView from "./HypothesisTreeView";
 import BeliefsView from "./BeliefsView";
 import WorkersPanel from "./WorkersPanel";
 import TasksPanel from "./TasksPanel";
+import ComputePanel from "./ComputePanel";
+import MetricsPanel from "./MetricsPanel";
 import Ticker from "./Ticker";
 import { StatusDot } from "./bits";
 
-type Tab = "workers" | "tasks" | "tree" | "beliefs";
+type Tab = "workers" | "tasks" | "tree" | "beliefs" | "compute" | "metrics";
 
 function TabButton({
   active,
@@ -66,6 +69,18 @@ export default function RightPanel({
   const nodeCount = tree ? Object.keys(tree.nodes || {}).length : 0;
   const runningTasks = model.inFlight.length;
 
+  // Read the campaign snapshot directly from the store (Campaign.tsx is owned by
+  // another workstream and must not gain new props): the Compute + Metrics tabs
+  // need the summary (budget, baseline/best/threshold) and objective direction.
+  const campaign = useLiveStore((s) => s.campaign);
+  const summary = campaign?.summary;
+  const direction =
+    (campaign?.campaign?.breakthrough_criteria?.direction as string | undefined) ===
+    "lower_is_better"
+      ? "lower_is_better"
+      : "higher_is_better";
+  const realRounds = model.rounds.filter((r) => !r.isSetup).length;
+
   // Default to the most relevant tab: while live, show what's running.
   useEffect(() => {
     if (!active && model.workers.length === 0 && nodeCount > 0) setTab("tree");
@@ -101,6 +116,8 @@ export default function RightPanel({
           <TabButton active={tab === "tasks"} onClick={() => setTab("tasks")} label="Tasks" count={runningTasks} live={active && runningTasks > 0} />
           <TabButton active={tab === "tree"} onClick={() => setTab("tree")} label="Tree" count={nodeCount} />
           <TabButton active={tab === "beliefs"} onClick={() => setTab("beliefs")} label="Beliefs" count={beliefs.length} />
+          <TabButton active={tab === "compute"} onClick={() => setTab("compute")} label="Compute" count={model.counts.llm} />
+          <TabButton active={tab === "metrics"} onClick={() => setTab("metrics")} label="Metrics" count={realRounds} />
         </div>
         <button
           onClick={onToggle}
@@ -112,13 +129,23 @@ export default function RightPanel({
         </button>
       </div>
 
-      <div className="pp-scroll min-h-0 flex-1 overflow-auto">
+      <div className="min-h-0 flex-1">
         {tab === "workers" && <WorkersPanel workers={model.workers} now={now} />}
         {tab === "tasks" && (
           <TasksPanel tasks={model.inFlight} workers={model.workers} now={now} active={active} />
         )}
         {tab === "tree" && <HypothesisTreeView tree={tree} question={question} />}
-        {tab === "beliefs" && <BeliefsView beliefs={beliefs} />}
+        {tab === "beliefs" && (
+          <div className="pp-scroll h-full overflow-auto">
+            <BeliefsView beliefs={beliefs} />
+          </div>
+        )}
+        {tab === "compute" && <ComputePanel events={events} summary={summary} />}
+        {tab === "metrics" && (
+          <div className="pp-scroll h-full overflow-auto">
+            <MetricsPanel rounds={model.rounds} summary={summary} direction={direction} />
+          </div>
+        )}
       </div>
 
       <Ticker events={events} />
