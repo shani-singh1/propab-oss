@@ -188,8 +188,19 @@ def map_prior_response(payload: dict[str, Any]) -> Prior:
         "novelty_bar": payload.get("novelty_bar") or {},
     }
 
-    # An empty corpus should not masquerade as READY evidence.
-    has_content = bool(established or contested or open_gaps or dead_ends or key_papers)
+    # An empty corpus must not masquerade as READY evidence. Only ACTUAL extracted
+    # evidence counts here — NOT ``key_papers``: those are derived purely from
+    # ``sources_consulted`` (the names/ids of sources that were *searched*), so a
+    # retrieval that consulted sources but extracted nothing would otherwise flip
+    # to READY on the strength of source names alone and be fed to generation as
+    # real evidence. Tabulated numerical seeds ARE real evidence, so they count.
+    has_content = bool(
+        established
+        or contested
+        or open_gaps
+        or dead_ends
+        or diagnostics["tabulated_values"]
+    )
     evidence_status = "READY" if has_content else "INSUFFICIENT_EVIDENCE"
 
     return Prior(
