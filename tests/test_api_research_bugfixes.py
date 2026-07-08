@@ -3,8 +3,6 @@
 Covered:
 - Bug 1: a plain resume (empty body) rebases the budget clock so the resumed run
   actually executes instead of no-opping as ``budget_exhausted``.
-- Bug 2: ``ResearchRequest.config.llm_model`` is threaded through to the run
-  (``run_research_loop`` -> ``LLMClient(model=...)``) instead of being ignored.
 - Bug 3: an EMPTY injected literature prior is labeled ``INSUFFICIENT_EVIDENCE``,
   not stamped ``READY``.
 """
@@ -159,68 +157,6 @@ def test_resume_with_new_budget_also_rebases_clock(monkeypatch):
     assert dispatched["should_stop"] is False
 
 
-# ── Bug 2: config.llm_model is honored by run_research_loop ───────────────────
-
-class _StopEarly(Exception):
-    pass
-
-
-def test_run_research_loop_honors_llm_model(monkeypatch):
-    """run_research_loop must pass the caller-supplied model to LLMClient."""
-    import services.orchestrator.research_loop as research_loop
-
-    captured: dict = {}
-
-    class _FakeLLM:
-        def __init__(self, **kwargs):
-            captured["model"] = kwargs.get("model")
-            raise _StopEarly()
-
-    monkeypatch.setattr(research_loop, "LLMClient", _FakeLLM)
-
-    with pytest.raises(_StopEarly):
-        asyncio.run(
-            research_loop.run_research_loop(
-                session_id="sess-1234",
-                question="a valid research question about descriptors?",
-                max_hypotheses=3,
-                paper_ttl_days=30,
-                emitter=_FakeEmitter(),
-                session_factory=_fake_session_factory,
-                llm_model="claude-sonnet-4-5",
-            )
-        )
-    assert captured["model"] == "claude-sonnet-4-5"
-
-
-def test_run_research_loop_falls_back_to_settings_model(monkeypatch):
-    """When no llm_model is supplied, run_research_loop uses the configured default."""
-    import services.orchestrator.research_loop as research_loop
-    from propab.config import settings
-
-    captured: dict = {}
-
-    class _FakeLLM:
-        def __init__(self, **kwargs):
-            captured["model"] = kwargs.get("model")
-            raise _StopEarly()
-
-    monkeypatch.setattr(research_loop, "LLMClient", _FakeLLM)
-
-    with pytest.raises(_StopEarly):
-        asyncio.run(
-            research_loop.run_research_loop(
-                session_id="sess-5678",
-                question="a valid research question about descriptors?",
-                max_hypotheses=3,
-                paper_ttl_days=30,
-                emitter=_FakeEmitter(),
-                session_factory=_fake_session_factory,
-            )
-        )
-    assert captured["model"] == settings.llm_model
-
-
 # ── Bug 3: empty injected prior is INSUFFICIENT_EVIDENCE, not READY ──────────
 
 def test_empty_injected_prior_is_insufficient_evidence():
@@ -255,48 +191,6 @@ def test_explicit_evidence_status_is_honored():
         )
         == "PARTIAL"
     )
-
-
-# ── Bug 5: default ResearchConfig.llm_model must NOT shadow settings.llm_model ──
-
-def test_default_research_config_defers_to_settings_model(monkeypatch):
-    """A default (no-model) /research request must use the operator's LLM_MODEL.
-
-    Pre-fix ``ResearchConfig.llm_model`` defaulted to the literal ``"gpt-4o"``, so
-    every default request shipped that hardcoded id to ``run_research_loop`` and the
-    ``llm_model or settings.llm_model`` fallback was dead. On a deployment configured
-    for a different model — or a non-OpenAI provider (Gemini/Ollama) — this silently
-    overrode the operator's setting and 404'd every generation call.
-
-    The API hands ``request.config.llm_model`` to the loop, which resolves it against
-    ``settings.llm_model``. With settings pinned to a distinct value, the effective
-    model must equal the operator's setting, never the old ``"gpt-4o"`` literal.
-    """
-    monkeypatch.setattr(research.settings, "orchestrator_url", "", raising=False)
-    monkeypatch.setattr(research.settings, "llm_model", "operator-configured-model", raising=False)
-
-    req = research.ResearchRequest(question="a valid research question about descriptors?")
-    # The default config no longer pins a model.
-    assert req.config.llm_model is None
-
-    bg = BackgroundTasks()
-    resp = asyncio.run(
-        research.create_research_session(
-            request=req,
-            background_tasks=bg,
-            emitter=_FakeEmitter(),
-            session_factory=_fake_session_factory,
-        )
-    )
-    assert resp.status == "started"
-    # The in-process fallback registered the loop as a background task; inspect the
-    # model it will run with (resolved the same way run_research_loop resolves it).
-    assert bg.tasks, "expected an in-process research task to be scheduled"
-    scheduled_model = bg.tasks[0].kwargs["llm_model"]
-    effective_model = scheduled_model or research.settings.llm_model
-    assert effective_model == "operator-configured-model"
-    # And specifically NOT the old hardcoded default.
-    assert effective_model != "gpt-4o"
 
 
 # ── Bug 6: an invalid breakthrough direction is rejected, not silently mis-scored ──

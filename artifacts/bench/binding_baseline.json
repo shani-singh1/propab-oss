@@ -1,0 +1,68 @@
+{
+  "metrics": {
+    "binding_precision": 1.0,
+    "binding_recall": 1.0,
+    "non_biology_mean_recall": 1.0,
+    "n_cases": 20,
+    "n_genuine": 5,
+    "false_accepts": 0.0,
+    "per_domain": {
+      "biology": {
+        "precision": 1.0,
+        "recall": 1.0
+      },
+      "econometrics": {
+        "precision": 1.0,
+        "recall": 1.0
+      },
+      "generic": {
+        "precision": 1.0,
+        "recall": 1.0
+      },
+      "math": {
+        "precision": 1.0,
+        "recall": 1.0
+      },
+      "physics": {
+        "precision": 1.0,
+        "recall": 1.0
+      }
+    }
+  },
+  "n_seeds": 5,
+  "config": {
+    "seeds": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "domains": [
+      "biology",
+      "econometrics",
+      "generic",
+      "math",
+      "physics"
+    ],
+    "classes_per_domain": [
+      "genuine",
+      "irrelevant",
+      "fabricated",
+      "cross_domain"
+    ],
+    "driver": "propab.evidence_binding.filter_node_citations",
+    "evidence_binding_module": "C:\\Users\\cyber\\OneDrive\\Documents\\propab-oss\\packages\\propab-core\\propab\\evidence_binding.py",
+    "binder_source_git_sha": "9bde4107d977322c794636972c32d35352457e15",
+    "a4_structured_overlap_present": true,
+    "labels": "ground-truth by construction; bind/reject decision measured by the real binder"
+  },
+  "sanity_metric_moves": {
+    "real_precision": 1.0,
+    "forced_accept_precision": 0.25,
+    "precision_dropped": true,
+    "forced_false_accepts": 15
+  },
+  "git_sha": "9bde4107d977322c794636972c32d35352457e15",
+  "timestamp": "2026-07-07T00:06:25.700346+00:00"
+}

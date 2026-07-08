@@ -257,7 +257,8 @@ def _derive_prior_evidence_status(prior_dict: dict[str, Any]) -> str:
 
 
 def _resolve_synthesis_domain_id(campaign: ResearchCampaign, parsed_domain: str = "") -> str:
-    """Resolve domain plugin id from campaign tag/payload — not infer_session_domain()."""
+    """Resolve domain plugin id from the campaign's tag/payload + plugin self-detection
+    (registry.resolve_domain_plugin), never from a central keyword taxonomy."""
     from propab.domain_modules.registry import resolve_domain_plugin
 
     plugin = resolve_domain_plugin(

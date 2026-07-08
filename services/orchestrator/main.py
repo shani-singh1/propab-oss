@@ -1,4 +1,6 @@
-"""HTTP entrypoint for running ``run_research_loop`` out-of-process (API delegates when configured)."""
+"""Orchestrator HTTP entrypoint. Runs the campaign loop out-of-process (the API
+delegates to ``/internal/campaign`` when ``ORCHESTRATOR_URL`` is configured), so
+an API restart cannot kill an in-flight campaign."""
 
 from __future__ import annotations
 
@@ -19,14 +21,6 @@ def _verify_internal(authorization: Annotated[str | None, Header(alias="Authoriz
         return
     if (authorization or "").strip() != f"Bearer {tok}":
         raise HTTPException(status_code=401, detail="Invalid orchestrator internal token.")
-
-
-class InternalResearchBody(BaseModel):
-    session_id: str = Field(min_length=8)
-    question: str = Field(min_length=8)
-    max_hypotheses: int = Field(default=5, ge=1, le=20)
-    paper_ttl_days: int = Field(default=30, ge=1, le=365)
-    llm_model: str | None = Field(default=None)
 
 
 class InternalCampaignBody(BaseModel):
@@ -61,29 +55,6 @@ app = FastAPI(title="Propab Orchestrator", version="0.2.0", lifespan=lifespan)
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "orchestrator"}
-
-
-@app.post("/internal/research")
-async def internal_research(
-    request: Request,
-    body: InternalResearchBody,
-    background_tasks: BackgroundTasks,
-    _: None = Depends(_verify_internal),
-) -> dict[str, str]:
-    """Accept a session created by the API and run the full research loop in this process."""
-    from services.orchestrator.research_loop import run_research_loop
-
-    background_tasks.add_task(
-        run_research_loop,
-        session_id=body.session_id,
-        question=body.question,
-        max_hypotheses=body.max_hypotheses,
-        paper_ttl_days=body.paper_ttl_days,
-        emitter=request.app.state.emitter,
-        session_factory=request.app.state.session_factory,
-        llm_model=body.llm_model,
-    )
-    return {"status": "accepted", "session_id": body.session_id}
 
 
 @app.post("/internal/campaign")
