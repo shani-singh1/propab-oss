@@ -38,10 +38,31 @@ export function useCampaignLive(id: string | undefined) {
       };
     }
 
-    const loadSnapshot = async () => {
+    // Retry a transient failure with linear backoff. The dev proxy (and a real
+    // API during a restart / network blip) can briefly refuse the very first
+    // request; without a retry the campaign is stuck in the error state forever
+    // because a *terminal* campaign has no snapshot poll to recover it.
+    const withRetry = async <T>(fn: () => Promise<T>, attempts = 5): Promise<T> => {
+      let last: unknown;
+      for (let i = 0; i < attempts; i++) {
+        if (cancelled) throw new Error("cancelled");
+        try {
+          return await fn();
+        } catch (e) {
+          last = e;
+          await new Promise((r) => setTimeout(r, 350 * (i + 1)));
+        }
+      }
+      throw last;
+    };
+
+    const loadSnapshot = async (retries = 0) => {
       try {
-        const c = await api.getCampaign(id);
-        if (!cancelled) setCampaign(c);
+        const c = retries > 0 ? await withRetry(() => api.getCampaign(id), retries) : await api.getCampaign(id);
+        if (!cancelled) {
+          setCampaign(c);
+          setError(null); // recovered — clear any stale error
+        }
         return c;
       } catch (e: any) {
         if (!cancelled) setError(e?.message ?? String(e));
@@ -51,12 +72,12 @@ export function useCampaignLive(id: string | undefined) {
 
     (async () => {
       try {
-        const events = await api.getEvents(id, 1500);
+        const events = await withRetry(() => api.getEvents(id, 1500));
         if (!cancelled) setEvents(events);
       } catch {
         /* events backfill is best-effort */
       }
-      const c = await loadSnapshot();
+      const c = await loadSnapshot(5);
       if (cancelled) return;
 
       // SSE for live events.
