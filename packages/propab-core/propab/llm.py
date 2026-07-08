@@ -96,26 +96,42 @@ class LLMClient:
         session_id: str,
         hypothesis_id: str | None = None,
     ) -> str:
+        # A per-call uuid lets the UI pair each llm.prompt with its exact
+        # llm.response instead of relying on fragile FIFO ordering.
+        call_id = str(uuid4())
         started = time.perf_counter()
         await self.emitter.emit(
             session_id=session_id,
             event_type=EventType.LLM_PROMPT,
             step=f"llm.{purpose}",
-            payload={"prompt": prompt, "purpose": purpose, "model": self.model},
+            payload={"prompt": prompt, "purpose": purpose, "model": self.model, "call_id": call_id},
             hypothesis_id=hypothesis_id,
         )
 
-        response_text = await self._call_provider(prompt)
+        # Providers fill ``usage`` in-place with tokens_in / tokens_out when they
+        # report them; it stays a per-call dict so concurrent calls never race.
+        usage: dict[str, Any] = {}
+        response_text = await self._call_provider(prompt, usage_out=usage)
 
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        tokens_in = usage.get("tokens_in")
+        tokens_out = usage.get("tokens_out")
         await self.emitter.emit(
             session_id=session_id,
             event_type=EventType.LLM_RESPONSE,
             step=f"llm.{purpose}",
-            payload={"response": response_text, "purpose": purpose, "model": self.model},
+            payload={
+                "response": response_text,
+                "purpose": purpose,
+                "model": self.model,
+                "call_id": call_id,
+                "duration_ms": duration_ms,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+            },
             hypothesis_id=hypothesis_id,
         )
 
-        duration_ms = int((time.perf_counter() - started) * 1000)
         await self._persist_call(
             session_id=session_id,
             hypothesis_id=hypothesis_id,
@@ -123,10 +139,12 @@ class LLMClient:
             prompt=prompt,
             response=response_text,
             duration_ms=duration_ms,
+            input_tokens=tokens_in,
+            output_tokens=tokens_out,
         )
         return response_text
 
-    async def _call_provider(self, prompt: str) -> str:
+    async def _call_provider(self, prompt: str, *, usage_out: dict[str, Any] | None = None) -> str:
         """Dispatch to the provider with bounded exponential backoff on transient errors.
 
         A single LLM timeout used to crash entire campaigns; retrying transient
@@ -137,6 +155,10 @@ class LLMClient:
         last_exc: Exception | None = None
         for attempt in range(max_retries + 1):
             try:
+                # Only thread usage_out through when a caller asked for it, so a
+                # test that monkeypatches _call_provider_once(prompt) still works.
+                if usage_out is not None:
+                    return await self._call_provider_once(prompt, usage_out=usage_out)
                 return await self._call_provider_once(prompt)
             except Exception as exc:  # noqa: BLE001 — classify then re-raise non-transient
                 if not _is_transient_llm_error(exc) or attempt >= max_retries:
@@ -151,14 +173,22 @@ class LLMClient:
         # Unreachable: loop either returns or raises, but keep type-checkers happy.
         raise last_exc if last_exc else RuntimeError("LLM call failed without an exception")
 
-    async def _call_provider_once(self, prompt: str) -> str:
+    @staticmethod
+    def _record_usage(usage_out: dict[str, Any] | None, tokens_in: Any, tokens_out: Any) -> None:
+        """Stash token counts into the caller's per-call usage dict (best-effort)."""
+        if usage_out is None:
+            return
+        usage_out["tokens_in"] = int(tokens_in) if isinstance(tokens_in, (int, float)) and not isinstance(tokens_in, bool) else None
+        usage_out["tokens_out"] = int(tokens_out) if isinstance(tokens_out, (int, float)) and not isinstance(tokens_out, bool) else None
+
+    async def _call_provider_once(self, prompt: str, *, usage_out: dict[str, Any] | None = None) -> str:
         # Provider/key are validated in __init__; re-validate defensively so a
         # mutated client (or a subclass) can never fall through to a placeholder.
         prov = _validate_llm_config(self.provider, self.api_key)
         if prov == "ollama":
-            return await self._ollama_chat(prompt)
+            return await self._ollama_chat(prompt, usage_out=usage_out)
         if prov == "gemini":
-            return await self._gemini_generate_content(prompt)
+            return await self._gemini_generate_content(prompt, usage_out=usage_out)
 
         url = "https://api.openai.com/v1/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
@@ -173,9 +203,11 @@ class LLMClient:
             response = await client.post(url, headers=headers, json=payload)
         response.raise_for_status()
         body = response.json()
+        u = body.get("usage") or {}
+        self._record_usage(usage_out, u.get("prompt_tokens"), u.get("completion_tokens"))
         return body["choices"][0]["message"]["content"]
 
-    async def _ollama_chat(self, prompt: str) -> str:
+    async def _ollama_chat(self, prompt: str, *, usage_out: dict[str, Any] | None = None) -> str:
         base = (getattr(settings, "ollama_base_url", None) or "http://127.0.0.1:11434").rstrip("/")
         url = f"{base}/api/chat"
         payload: dict[str, Any] = {
@@ -188,13 +220,14 @@ class LLMClient:
             response = await client.post(url, json=payload)
         response.raise_for_status()
         body = response.json()
+        self._record_usage(usage_out, body.get("prompt_eval_count"), body.get("eval_count"))
         msg = body.get("message") or {}
         content = msg.get("content")
         if isinstance(content, str) and content.strip():
             return content
         return json.dumps(body)[:8000]
 
-    async def _gemini_generate_content(self, prompt: str) -> str:
+    async def _gemini_generate_content(self, prompt: str, *, usage_out: dict[str, Any] | None = None) -> str:
         if not (self.api_key or "").strip():
             raise LLMConfigError("missing API key for provider 'gemini'")
         mid = (self.model or "gemini-2.0-flash").strip()
@@ -212,6 +245,8 @@ class LLMClient:
             response = await client.post(url, params=params, json=payload)
         response.raise_for_status()
         body = response.json()
+        um = body.get("usageMetadata") or {}
+        self._record_usage(usage_out, um.get("promptTokenCount"), um.get("candidatesTokenCount"))
         cands = body.get("candidates") or []
         if not cands:
             return json.dumps(body)[:8000]
@@ -232,6 +267,8 @@ class LLMClient:
         prompt: str,
         response: str,
         duration_ms: int,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
     ) -> None:
         async with self.session_factory() as session:
             await session.execute(
@@ -253,8 +290,8 @@ class LLMClient:
                     "model": self.model,
                     "prompt_text": prompt,
                     "response_text": response,
-                    "input_tokens": None,
-                    "output_tokens": None,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
                     "duration_ms": duration_ms,
                 },
             )

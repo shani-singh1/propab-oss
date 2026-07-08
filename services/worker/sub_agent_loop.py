@@ -50,6 +50,60 @@ from services.worker.think_act import (
 
 logger = logging.getLogger(__name__)
 
+# How often a running sub-agent emits an agent.progress heartbeat. The UI treats
+# "running" as "seen a heartbeat recently" rather than merely "no terminal event
+# yet", so a stuck worker is distinguishable from a live one.
+_AGENT_HEARTBEAT_INTERVAL_SEC = 15.0
+
+
+def _round_of(payload: dict[str, Any]) -> int | None:
+    """Authoritative round number the orchestrator stamped at dispatch, or None."""
+    r = payload.get("round")
+    if isinstance(r, bool) or not isinstance(r, int):
+        return None
+    return r
+
+
+async def _agent_heartbeat(
+    emitter: EventEmitter,
+    *,
+    session_id: str,
+    hypothesis_id: str,
+    started: float,
+    round_no: int | None,
+    interval: float = _AGENT_HEARTBEAT_INTERVAL_SEC,
+) -> None:
+    """Emit a periodic ``agent.progress`` while the sub-agent runs.
+
+    Cancelled by the caller when the agent terminates. Emit failures are swallowed
+    so a transient redis/DB blip never kills a live experiment.
+    """
+    seq = 0
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            seq += 1
+            payload: dict[str, Any] = {
+                "hypothesis_id": hypothesis_id,
+                "heartbeat_seq": seq,
+                "elapsed_sec": round(time.perf_counter() - started, 3),
+                "alive": True,
+            }
+            if round_no is not None:
+                payload["round"] = round_no
+            try:
+                await emitter.emit(
+                    session_id=session_id,
+                    event_type=EventType.AGENT_PROGRESS,
+                    step=f"experiment.{hypothesis_id}.progress",
+                    payload=payload,
+                    hypothesis_id=hypothesis_id,
+                )
+            except Exception:  # noqa: BLE001 — heartbeat is best-effort
+                logger.debug("agent heartbeat emit failed for %s", hypothesis_id, exc_info=True)
+    except asyncio.CancelledError:
+        return
+
 
 def _sandbox_diag_tails(sandbox_out: dict[str, Any], *, maxlen: int = 1500) -> dict[str, Any]:
     """Short tails for code.timeout / code.error payloads (container stderr is the main signal)."""
@@ -1105,6 +1159,7 @@ async def _mandrake_verification_path(
             "sig_gate_passed": verdict in {"confirmed", "refuted"},
             "mandrake": True,
             "mean_r2": output.get("mean_r2"),
+            "round": _round_of(payload),
         },
         hypothesis_id=hypothesis_id,
     )
@@ -1197,6 +1252,7 @@ async def _plugin_verification_path(
                     "domain": domain_id,
                     "off_topic": True,
                     "reason": reason,
+                    "round": _round_of(payload),
                 },
                 hypothesis_id=hypothesis_id,
             )
@@ -1284,6 +1340,36 @@ async def _plugin_verification_path(
         payload={"tool": f"{domain_id}_verification", "output": output, "deterministic": output.get("deterministic")},
         hypothesis_id=hypothesis_id,
     )
+
+    # First-class certification event: when a domain verifier independently
+    # certifies a record-candidate witness (e.g. the B_3 certify_b3_record path),
+    # surface the witness + the certification booleans + metric-vs-best-known so the
+    # UI's Discovery Hero / breakthrough card renders from real data, not inference.
+    _cert = output.get("certification")
+    _witness = output.get("record_witness_json") or output.get("witness")
+    if isinstance(_cert, dict) or _witness is not None:
+        checks = _cert.get("checks") if isinstance(_cert, dict) else None
+        await emitter.emit(
+            session_id=session_id,
+            event_type=EventType.FINDING_CERTIFIED,
+            step=f"experiment.{hypothesis_id}.certification",
+            payload={
+                "domain": domain_id,
+                "hypothesis_id": hypothesis_id,
+                "round": _round_of(payload),
+                "certified": bool(_cert.get("certified")) if isinstance(_cert, dict) else None,
+                "checks": checks if isinstance(checks, dict) else None,
+                "witness": _witness,
+                "metric_value": output.get("metric_value"),
+                "metric_name": output.get("metric_name"),
+                "best_known_size": output.get("best_known_size"),
+                "vs_best_known": output.get("vs_best_known"),
+                "margin": _cert.get("margin") if isinstance(_cert, dict) else None,
+                "discovery_worthy": bool(output.get("discovery_worthy")),
+                "record_status": output.get("record_status"),
+            },
+            hypothesis_id=hypothesis_id,
+        )
 
     criteria = domain_plugin.confirmation_criteria()
     min_steps = int(criteria.get("min_metric_steps_for_confirm") or 1)
@@ -1418,6 +1504,7 @@ async def _plugin_verification_path(
             "domain": domain_id,
             "deterministic": output.get("deterministic"),
             "metric_value": output.get("metric_value"),
+            "round": _round_of(payload),
         },
         hypothesis_id=hypothesis_id,
     )
@@ -1595,6 +1682,7 @@ async def _materials_verification_path(
             "sig_gate_passed": verdict in {"confirmed", "refuted"},
             "materials": True,
             "lofo_r2": output.get("lofo_r2"),
+            "round": _round_of(payload),
         },
         hypothesis_id=hypothesis_id,
     )
@@ -1663,6 +1751,26 @@ async def run_sub_agent_async(payload: dict) -> dict:
     last_tool_name: str | None = None
     last_tool_step_index: int | None = None
 
+    # Authoritative round/generation number the orchestrator stamped at dispatch.
+    # Threaded onto agent.* events so the UI can attribute a worker to a round
+    # without positional guessing.
+    round_no = payload.get("round")
+    if isinstance(round_no, bool) or not isinstance(round_no, int):
+        round_no = None
+
+    _hb_task: asyncio.Task | None = None
+
+    async def _cleanup() -> None:
+        """Stop the heartbeat and release the per-task redis/engine handles."""
+        if _hb_task is not None:
+            _hb_task.cancel()
+            try:
+                await _hb_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        await redis.close()
+        await engine.dispose()
+
     try:
         await _update_hypothesis(session_factory, hypothesis_id, status="running")
 
@@ -1670,8 +1778,18 @@ async def run_sub_agent_async(payload: dict) -> dict:
             session_id=session_id,
             event_type=EventType.AGENT_STARTED,
             step=f"experiment.{hypothesis_id}",
-            payload={"hypothesis_id": hypothesis_id, "text": hypothesis.get("text")},
+            payload={"hypothesis_id": hypothesis_id, "text": hypothesis.get("text"), "round": round_no},
             hypothesis_id=hypothesis_id,
+        )
+
+        _hb_task = asyncio.create_task(
+            _agent_heartbeat(
+                emitter,
+                session_id=session_id,
+                hypothesis_id=hypothesis_id,
+                started=started,
+                round_no=round_no,
+            )
         )
 
         hypothesis = await _hydrate_hypothesis_from_campaign(
@@ -1732,8 +1850,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
                     started=started,
                     baseline=baseline,
                 )
-            await redis.close()
-            await engine.dispose()
+            await _cleanup()
             return result
 
         logger.info(
@@ -1800,11 +1917,10 @@ async def run_sub_agent_async(payload: dict) -> dict:
                     session_id=session_id,
                     event_type=EventType.AGENT_COMPLETED,
                     step=f"experiment.{hypothesis_id}.complete",
-                    payload={"verdict": "inconclusive", "confidence": 0.0, "fast_path": fast_path},
+                    payload={"verdict": "inconclusive", "confidence": 0.0, "fast_path": fast_path, "round": round_no},
                     hypothesis_id=hypothesis_id,
                 )
-                await redis.close()
-                await engine.dispose()
+                await _cleanup()
                 out = {
                     "hypothesis_id": hypothesis_id,
                     "campaign_node_id": campaign_node_id,
@@ -2784,7 +2900,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
             session_id=session_id,
             event_type=EventType.AGENT_COMPLETED,
             step=f"experiment.{hypothesis_id}.complete",
-            payload={"verdict": verdict, "confidence": confidence, "sig_gate_passed": sig_result.gate_passed},
+            payload={"verdict": verdict, "confidence": confidence, "sig_gate_passed": sig_result.gate_passed, "round": round_no},
             hypothesis_id=hypothesis_id,
         )
 
@@ -2813,8 +2929,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
         if metric_key and metric_out is not None:
             result_dict[metric_key] = metric_out
 
-        await redis.close()
-        await engine.dispose()
+        await _cleanup()
         return result_dict
 
     except Exception as exc:
@@ -2836,6 +2951,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
         fail_payload = {
             **detail,
             "error": str(exc)[:1500],
+            "round": round_no,
         }
         await emitter.emit(
             session_id=session_id,
@@ -2844,8 +2960,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
             payload=fail_payload,
             hypothesis_id=hypothesis_id,
         )
-        await redis.close()
-        await engine.dispose()
+        await _cleanup()
         return {
             "hypothesis_id": hypothesis_id,
             "campaign_node_id": campaign_node_id,

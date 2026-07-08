@@ -1008,6 +1008,7 @@ Return JSON only:
             "max_tool_calls": int(getattr(settings, "campaign_baseline_agent_max_tool_calls", 14)),
         },
         # Worker: if the LLM/tool trace omits val_accuracy, run train_model once deterministically.
+        "round": 0,
         "baseline_measurement": {
             "dataset": dataset_name,
             "n_steps": max(
@@ -1366,6 +1367,9 @@ async def _campaign_dispatch_sub_agent(
         "seed_source": campaign.seed_source,
         "verification_escalation": verification_escalation,
         "agent_limits": agent_limits or None,
+        # Authoritative round number (the node's generation) so the worker can
+        # stamp round onto its agent.* events instead of the UI guessing.
+        "round": int(node.generation or 0),
     })
     return {"ar": ar, "nid": node.id, "db_hid": db_hid, "enq_mono": time.monotonic()}
 
@@ -2389,7 +2393,36 @@ async def run_campaign_loop(
                             write_campaign_snapshot, "post_first_confirmed", campaign, prior_dict
                         )
 
-                    campaign.update_best_metric(result)
+                    _prev_best = campaign.best_metric
+                    if campaign.update_best_metric(result):
+                        # First-class discovery event: a new best-so-far. Carries the
+                        # metric-vs-baseline and (when present) the certified witness so
+                        # the Discovery Hero renders from real data, not inference.
+                        _cert = None
+                        _ev = parse_evidence_obj(evidence)
+                        if isinstance(_ev, dict):
+                            _cert = _ev.get("certification")
+                        await emitter.emit(
+                            session_id=campaign.id,
+                            event_type=EventType.FINDING_BEST_UPDATED,
+                            step="campaign.best_updated",
+                            payload={
+                                "node_id": node_id,
+                                "metric_name": campaign.breakthrough_criteria.metric_name,
+                                "best_metric": campaign.best_metric,
+                                "previous_best": _prev_best,
+                                "baseline_metric": campaign.baseline_metric,
+                                "improvement_pct": campaign.improvement_pct,
+                                "metric_value": result.get("metric_value"),
+                                "direction": campaign.breakthrough_criteria.direction,
+                                "witness": result.get("record_witness_json")
+                                or (_ev.get("record_witness_json") if isinstance(_ev, dict) else None),
+                                "certification": _cert if isinstance(_cert, dict) else None,
+                                "verdict": verdict,
+                                "generation": generation,
+                            },
+                            hypothesis_id=_node_row_id(campaign.id, node_id),
+                        )
 
                     # recount_from_tree() ran just above, so total_confirmed (injected as
                     # confirmed_nodes) is the distinct-confirmed-node count that the

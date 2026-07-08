@@ -34,6 +34,7 @@ class EventType(str, Enum):
     AGENT_STEP_FAILED = "agent.step_failed"
     AGENT_COMPLETED = "agent.completed"
     AGENT_FAILED = "agent.failed"
+    AGENT_PROGRESS = "agent.progress"
     AGENT_TIME_BUDGET_EXCEEDED = "agent.time_budget_exceeded"
     TOOL_SELECTED = "tool.selected"
     TOOL_CALLED = "tool.called"
@@ -96,6 +97,9 @@ class EventType(str, Enum):
     # Baseline measurement
     BASELINE_MEASURED = "campaign.baseline_measured"
     CAMPAIGN_SUB_AGENT_EVICTED = "campaign.sub_agent_evicted"
+    # Discovery (best-so-far + certified record witnesses)
+    FINDING_BEST_UPDATED = "finding.best_updated"
+    FINDING_CERTIFIED = "finding.certified"
     # Hypothesis tree
     HYPO_TREE_EXPANDED = "hypothesis.tree_expanded"
     HYPO_TREE_PRUNED = "hypothesis.tree_pruned"

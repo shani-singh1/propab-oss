@@ -29,6 +29,63 @@ async def get_session(session_factory: async_sessionmaker[AsyncSession]) -> Asyn
         yield session
 
 
+async def load_events_after(
+    session_factory: async_sessionmaker[AsyncSession],
+    session_id: str,
+    after_event_id: str,
+    *,
+    limit: int = 2000,
+) -> list[dict]:
+    """Replay events recorded AFTER ``after_event_id`` for SSE reconnection.
+
+    Returns dicts in the same shape as ``PropabEvent.to_dict()`` (so a reconnecting
+    client can consume them identically to live frames). If ``after_event_id`` is
+    unknown, returns ``[]`` — the caller then simply streams live events.
+    """
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                text(
+                    """
+                    SELECT id, session_id, event_type, source, step,
+                           hypothesis_id, parent_event_id, payload_json, created_at
+                    FROM events
+                    WHERE session_id = CAST(:sid AS uuid)
+                      AND created_at > (
+                          SELECT created_at FROM events WHERE id = CAST(:after AS uuid)
+                      )
+                    ORDER BY created_at ASC
+                    LIMIT :lim
+                    """
+                ),
+                {"sid": session_id, "after": after_event_id, "lim": limit},
+            )
+        ).mappings().all()
+    out: list[dict] = []
+    for r in rows:
+        payload = r["payload_json"]
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                payload = {}
+        created = r["created_at"]
+        out.append(
+            {
+                "event_id": str(r["id"]),
+                "session_id": str(r["session_id"]),
+                "timestamp": created.isoformat() if hasattr(created, "isoformat") else str(created),
+                "source": r["source"],
+                "event_type": r["event_type"],
+                "step": r["step"],
+                "payload": payload if isinstance(payload, dict) else {},
+                "parent_event_id": str(r["parent_event_id"]) if r["parent_event_id"] else None,
+                "hypothesis_id": str(r["hypothesis_id"]) if r["hypothesis_id"] else None,
+            }
+        )
+    return out
+
+
 async def insert_event(session: AsyncSession, event: PropabEvent) -> None:
     payload_json = json.dumps(event.payload)
     await session.execute(
