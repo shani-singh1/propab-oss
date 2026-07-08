@@ -17,7 +17,39 @@
 - **REMOVE** — dead / redundant / cruft; delete.
 - **INVESTIGATE** — not yet deep-audited; decision pending (do NOT act yet).
 
-Each entry: **What** · **Why (rationale)** · **Assessment + tradeoff** · **Action**.
+Each entry interrogates the decision like an elite reviewer would:
+**What** · **Why (rationale)** · **How (mechanism)** · **Needed?** · **Better way?** ·
+**Scalable / Deployable / Maintainable / Testable** · **Assessment + tradeoff** ·
+**Status** · **Action**. (Early sections A–J use a condensed form; grounded
+code-read sections K+ use the full form.)
+
+## Coverage tracker (drives the audit loop until 100%)
+Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
+
+| Subsystem | LOC | Status |
+|---|---|---|
+| Backbone: db/events/llm/celery/api-entry/config | ~1.5k | ✅ (§K) |
+| services/api routes (research/sessions/stream/tools) | 1.1k | 🟡 (research.py read; rest ⬜) |
+| services/orchestrator/campaign_loop.py | 2.9k | 🟡 (verdict/dispatch/apply read; full ⬜) |
+| services/orchestrator (literature/research_loop/hypotheses/paper/retrieval/lifetime/policy_analyst/seed_validation/ranking/anomaly/ledger/prior/quality/diagnostics/budget/answer_gate/question_domain) | ~6k | ⬜ |
+| services/worker/sub_agent_loop.py | 3.0k | 🟡 (verdict/confidence/routing/return read; full ⬜) |
+| services/worker (think_act/permutation_null/sandbox/domain_router/failure_classify/sandbox_code_rewrite/peer_findings) | ~1.5k | 🟡 (domain_router/peer_findings/significance read; rest ⬜) |
+| services/literature (65 files) | 9.2k | ⬜ |
+| core: hypothesis_tree | 0.9k | 🟡 |
+| core: verdict_pipeline/significance | 0.4k | ✅ (§E, §K) |
+| core: artifact_verification | 0.8k | ⬜ |
+| core: campaign_synthesis | 1.0k | 🟡 |
+| core: campaign / campaign_db / campaign_snapshot | ~1k | ⬜ |
+| core: research_quality / evidence_binding / scoped_claim / claim_grounding | ~2k | ⬜ |
+| core: paper_compiler / paper_narrative / paper_sections / paper_gate | ~1.9k | ⬜ |
+| core: telemetry / telemetry_db / health_metrics / knowledge_graph / numerical_seeds | ~1.5k | ⬜ |
+| domain_modules (12 domains) | 14.7k | 🟡 (genomics ✅; pattern known; rest ⬜) |
+| domain_adapters / domain_profiles | ~2.1k | ⬜ |
+| anomaly_engine | 1.9k | ⬜ |
+| tools (registry ✅; tool impls ⬜) | 4.3k | 🟡 |
+| skills | 0.3k | ✅ |
+| operator_credit / layer05 | ~8.4k | ✅ (traced → SHELVED §I) |
+| frontend/src | — | 🟡 (model/events/panels known from rebuild) |
 
 ---
 
@@ -237,6 +269,62 @@ Each entry: **What** · **Why (rationale)** · **Assessment + tradeoff** · **Ac
 ### J2. `artifacts/`, `logs/`, `bench/`, tracked into repo — REMOVE/gitignore
 - **Assessment:** build/run outputs shouldn't be tracked (standing rule: artifacts/logs never pushed).
 - **Action:** gitignore + purge from tracking.
+
+---
+
+## K. Backbone (grounded — code read 2026-07-09)
+
+### K1. Persistence = raw SQL (`sqlalchemy.text`) + asyncpg + `jsonb`, no ORM models — KEEP-WATCH
+- **What:** `db.py` exposes `create_engine`/`create_session_factory`; all table access is hand-written SQL strings (`events`, `llm_calls`, `hypotheses`, `campaigns`, …); JSON columns stored as `jsonb`.
+- **Why:** full control over queries; avoids ORM overhead/magic; async-native via asyncpg.
+- **How:** each module writes its own `text("INSERT/SELECT …")`; schema defined only in `alembic/` + `migrations/*.sql`.
+- **Needed?** A data layer, yes. Raw SQL specifically — defensible but not required.
+- **Better way?** A thin typed query module (or lightweight table-metadata) would centralize the ~dozen scattered SQL strings and give one place to see the schema. Full ORM is probably overkill for this workload.
+- **Scalable:** fine (asyncpg + pool_pre_ping). **Deployable:** fine. **Maintainable:** ⚠ weak — schema knowledge is smeared across many `text()` literals + two migration systems (C2); a column rename is a global grep. **Testable:** needs a live PG (no model-level unit tests).
+- **Assessment/tradeoff:** works and is fast, but the schema has no single source of truth in code. Risk: silent drift between SQL literals and actual schema (exactly the `inconclusive_reason`-has-no-column gotcha C1 hit).
+- **Action:** FIX-later — introduce a single `schema.py`/typed-row module enumerating tables+columns; keep raw SQL but import column names from it. Low priority, high maintainability payoff.
+
+### K2. Event log: `events` table append-only + per-event commit, then redis publish — KEEP-WATCH
+- **What:** `EventEmitter.emit` writes one row to `events` (with its own commit) then `redis.publish` to `propab:{session_id}`; SSE clients replay via `load_events_after`.
+- **Why:** durable audit/replay + live streaming from one call; reconnecting UI can catch up.
+- **How:** `insert_event` commits per event; redis is the live bus; DB is the replay store.
+- **Needed?** Yes — the campaign transcript IS the product surface (frontend) and the audit trail.
+- **Better way?** Batch inserts / a single transaction per step would cut commit overhead; or an append-only stream (redis stream) with periodic DB flush.
+- **Scalable:** ⚠ one INSERT+COMMIT per event; a busy campaign emits thousands (llm.prompt/response, tool.*, progress). At scale this is a write-amplification + fsync hotspot. **Maintainable:** simple, good. **Testable:** good.
+- **Assessment/tradeoff:** simplicity now vs write throughput later. Fine at current volume; will bite under many parallel campaigns.
+- **Action:** KEEP-WATCH; revisit batching if event volume becomes a bottleneck. No orchestrator-reasoning events exist yet (G2 — add in C3).
+
+### K3. `LLMClient` — multi-provider, fail-loud, retrying; single model per instance — FIX(wire role-split)
+- **What:** one client for openai/gemini/ollama; validates provider+key at construction (raises `LLMConfigError`, never fabricates a placeholder); bounded exponential backoff on transient (timeout/429/5xx); emits `llm.prompt`/`llm.response` with a `call_id`, duration, tokens; persists to `llm_calls`.
+- **Why:** provider-agnostic; honesty (a misconfig must fail loud, not silently "research" a canned answer across domains); resilience (one timeout used to kill a campaign).
+- **How:** `_call_provider_once` dispatches per provider; `usage_out` dict threads tokens without racing concurrent calls.
+- **Needed?** Yes — central, correct LLM boundary.
+- **Better way?** Minor: streaming responses; a shared httpx client (currently one per call — connection churn). Not architectural.
+- **Scalable:** ok (per-call client is a tiny inefficiency). **Deployable:** ok. **Maintainable:** good, single boundary. **Testable:** good (provider methods monkeypatchable).
+- **Assessment/tradeoff:** genuinely well-built and honesty-aligned — one of the better modules. Its one redesign gap: it takes a single `model`, so the **orchestrator/worker model split** (config added in Wave 1) is **not wired** — every `LLMClient(...)` construction currently passes `settings.llm_model`.
+- **Action:** FIX in C3 — construct the orchestrator's client with `effective_orchestrator_model` and workers' with `effective_worker_model`. Consider a shared httpx client (minor).
+
+### K4. Celery config — `acks_late` + `reject_on_worker_lost` + `visibility_timeout` — KEEP
+- **What:** JSON serializer; `task_acks_late=True`, `task_reject_on_worker_lost=True`, `visibility_timeout = hard_limit+60`; soft/hard time limits (env-tunable, default 3600/3900s).
+- **Why:** a hypothesis task is only acked after completion → a killed worker's task is redelivered, not dropped.
+- **Needed? / Better way?** Yes; correct pattern. Tradeoff: at-least-once delivery ⇒ a task may run twice (crash after side effects) — verify idempotency of `_update_hypothesis`/event writes.
+- **Scalable/Deployable/Maintainable:** all good.
+- **Assessment/tradeoff:** correct, thoughtful resilience. **Action:** KEEP; add an idempotency note/guard for redelivered tasks (INVESTIGATE: are event/DB writes idempotent on redelivery?).
+
+### K5. API entry — FastAPI `lifespan` holds engine/session/redis/emitter; CORS `allow_origins=["*"]` — FIX(prod CORS)
+- **What:** shared engine/session_factory/redis/emitter on `app.state`; 5 routers; CORS wide-open, `allow_credentials=False`.
+- **Why:** local dev simplicity; single place for shared resources.
+- **Needed?** Shared-resource lifespan — yes. Wildcard CORS — only for local.
+- **Better way?** Env-driven allowed origins for prod.
+- **Scalable/Deployable:** fine. **Maintainable:** fine. **Security:** ⚠ `*` CORS is acceptable only because there are no credentials/cookies; still tighten for a real deployment.
+- **Assessment/tradeoff:** fine for now; a prod checklist item.
+- **Action:** FIX-later — origins from config in prod.
+
+### K6. Worker plumbing: `tasks → runner → asyncio.run(run_sub_agent_async)`; `worker/significance.py` re-exports `propab.significance` — KEEP
+- **What:** the Celery task is a 3-line shim to a sync runner that drives the async loop; `worker/significance.py` is `from propab.significance import *`.
+- **Why:** keep Celery boundary thin; single significance impl in core.
+- **Assessment/tradeoff:** clean. Clears part of the first audit's E2 worry: significance is NOT duplicated in the worker — it's a re-export. (Open: does `propab.significance.classify_verdict` differ from `verdict_pipeline.classify_verdict`? — verify during the verdict-consolidation of C2.)
+- **Action:** KEEP; resolve the significance-vs-verdict_pipeline classifier question in C2.
 
 ---
 
