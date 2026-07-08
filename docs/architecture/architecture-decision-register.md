@@ -34,7 +34,7 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 | services/orchestrator (hypotheses/prior_builder/answer_gate/question_domain/lifetime/policy_analyst/ranking/seed_validation/research_loop/diagnostics/budget/ledger) | ~4k | 🟡 (design surface mapped → §M; literature.py/literature_client/retrieval/literature_cache/literature_quality full ⬜) |
 | services/worker/sub_agent_loop.py | 3.0k | 🟡 (verdict/confidence/routing/return read; full ⬜) |
 | services/worker (think_act/permutation_null/sandbox/domain_router/failure_classify/sandbox_code_rewrite/peer_findings) | ~1.5k | 🟡 (think_act/sandbox/domain_router/peer_findings/significance read → §L; permutation_null/failure_classify/sandbox_code_rewrite ⬜) |
-| services/literature (65 files) | 9.2k | ⬜ |
+| services/literature (65 files) | 9.2k | ✅ design surface → §P (KEEP; own Gemini egress §P2) |
 | core: hypothesis_tree | 0.9k | 🟡 |
 | core: verdict_pipeline/significance | 0.4k | ✅ (§E, §K) |
 | core: artifact_verification | 0.8k | ✅ (§O1) |
@@ -68,11 +68,11 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 - **Assessment/tradeoff:** **violated** — `campaign_synthesis.py`, `replay_support.py`, `cli.py` in core lazily import `services.*` (deferred imports to dodge a cycle). This is dependency inversion; it means "core" isn't actually a lower layer. Tradeoff of fixing: must move the imported helpers (e.g. `hypothesis_ranking`) down into core or invert via injection.
 - **Action:** move shared helpers into core or pass them in; forbid `from services` inside `propab-core` (add a lint/test guard).
 
-### A3. Separate literature microservice (9.2k LOC, own FastAPI + tests) — INVESTIGATE
-- **What:** a full standalone service for papers/embeddings/gaps/contradictions, called over HTTP.
-- **Why:** literature/RAG is heavy (embeddings, external APIs, caching) and benefits from isolation + independent scaling/caching.
-- **Assessment/tradeoff:** plausibly justified by weight, but 9.2k LOC + 65 files is large; needs a scan for dead endpoints and whether the orchestrator/worker actually use more than a thin slice. Two prior-builders already compete (E-adjacent). In the redesign it must be exposed as a **tool**, not a pre-fetch.
-- **Action:** audit its public surface vs actual callers; confirm it earns its separateness; wire as a tool.
+### A3. Separate literature microservice (9.2k LOC, own FastAPI + tests) — KEEP (earns separateness; see §P)
+- **What:** standalone service for papers/embeddings/gaps/contradictions over HTTP.
+- **Why:** literature/RAG is heavy and benefits from isolation + independent scaling.
+- **Assessment/tradeoff (RESOLVED — read 2026-07-09, §P):** genuinely substantial and cleanly isolated (does NOT import propab-core): 7 sources, dual-store (PG+qdrant) RAG, extractors, novelty/gap mappers, thin main.py over a `LiteraturePipeline`. The separateness is justified. Caveat: it has its OWN Gemini LLM client (§P2) → a second egress point.
+- **Action:** KEEP the service; still expose it to the orchestrator as a **tool** (not pre-fetch, M3); unify/govern the second LLM egress for security (N2).
 
 ### A4. Celery (redis broker) for orchestrator→worker dispatch — KEEP
 - **What:** `run_sub_agent_task.delay(payload)`, pipelined pool up to N.
@@ -508,6 +508,28 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 ### O6. Honest-output controls (`claim_grounding`, `paper_gate`) — KEEP
 - **What:** `claim_grounding` matches paper prose sentences to actual trace evidence (flags ungrounded prose); `paper_gate.session_merits_paper` decides full-paper vs trace-only so a nothing-campaign doesn't get a fabricated paper.
 - **Assessment:** directly addresses the "writes a paper even with zero findings" worry — a merit gate exists. **Action:** KEEP; audit that the gate + the zero-findings honest-signal (campaign_loop O3-log) are consistent.
+
+---
+
+## P. Literature service (grounded — design surface read 2026-07-09)
+
+### P1. Standalone, isolated RAG service — KEEP
+- **What:** `config.py` explicitly does not import propab-core; `sources/` (arxiv, pubmed, semantic_scholar, crossref, europepmc, oeis, mathoverflow), `indexer/` (postgres_store + qdrant_store + embeddings — dual store), `retriever/` (query, chunk_rag, novelty_check, gap_mapper), `extractors/` (claims, llm_claim_locator, tables), `pipeline.py` orchestration, thin `main.py` HTTP wrappers.
+- **Why:** heavy multi-source RAG deserves isolation + independent scaling/caching.
+- **Scalable:** good (separately scalable; qdrant for vectors). **Maintainable:** good (clean internal layering: main→pipeline→sources/indexer/retriever). **Deployable:** own Dockerfile/service.
+- **Assessment/tradeoff:** the cleanest-bounded service in the system. **Action:** KEEP.
+
+### P2. Its own Gemini LLM client (separate from core `LLMClient`) — FIX-later
+- **What:** `services/literature/app/llm_client.py` is a "shared Gemini text-generation client," independent of propab-core's multi-provider `LLMClient`.
+- **Assessment/tradeoff:** two LLM clients = two egress points, two retry/observability behaviours, two places to enforce a "no data leaves perimeter" policy (security N2). Justifiable for strict service isolation, but the **security egress policy must cover both**.
+- **Action:** FIX-later — at minimum, govern both egress points under the same data-egress policy (N2); consider a shared client interface. Not urgent for the brain redesign.
+
+### P3. `evaluator/` (litqa2_live, astabench, metrics) — KEEP (offline eval tooling)
+- **What:** LitQA2 / AstaBench benchmark harnesses + metrics.
+- **Assessment:** offline evaluation, not the live campaign path (like `seed_validation`, M8). Valuable for measuring literature quality. **Action:** KEEP as eval tooling; confirm it's not imported by the live request path.
+
+### P4. Public surface = thin `main.py` over `LiteraturePipeline` — KEEP
+- **Assessment:** no business logic in routes; clean. **Action:** KEEP; this is the surface the orchestrator's `literature_search` tool (M3) wraps.
 
 ---
 
