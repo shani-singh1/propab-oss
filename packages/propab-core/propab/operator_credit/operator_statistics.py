@@ -66,18 +66,22 @@ class OperatorStatistics:
                     state_bucket=bucket,
                 )
                 cell.n += 1
-                if trace.outcome == "confirmed":
-                    cell.p_success = round(
-                        (cell.p_success * (cell.n - 1) + 1.0) / cell.n, 4
-                    )
-                elif trace.outcome == "refuted":
-                    cell.p_refute = round(
-                        (cell.p_refute * (cell.n - 1) + 1.0) / cell.n, 4
-                    )
-                elif trace.outcome == "inconclusive":
-                    cell.p_timeout = round(
-                        (cell.p_timeout * (cell.n - 1) + 1.0) / cell.n, 4
-                    )
+                # Every outcome is a Bernoulli trial for ALL three probabilities:
+                # the matching outcome contributes 1, the others contribute 0. We
+                # must dilute the non-matching probabilities with that implicit 0,
+                # otherwise p_success/p_refute/p_timeout are all overestimated (they
+                # would sum to >1) — corrupting the lifetime statistics that feed
+                # best_operator / operator priors into future campaigns.
+                prev = cell.n - 1
+                cell.p_success = round(
+                    (cell.p_success * prev + (1.0 if trace.outcome == "confirmed" else 0.0)) / cell.n, 4
+                )
+                cell.p_refute = round(
+                    (cell.p_refute * prev + (1.0 if trace.outcome == "refuted" else 0.0)) / cell.n, 4
+                )
+                cell.p_timeout = round(
+                    (cell.p_timeout * prev + (1.0 if trace.outcome == "inconclusive" else 0.0)) / cell.n, 4
+                )
                 contribs = credit_map.get((step.family, step.operator, bucket), [])
                 if contribs:
                     cell.mean_contribution = round(sum(contribs) / len(contribs), 4)

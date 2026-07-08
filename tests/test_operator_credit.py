@@ -75,6 +75,43 @@ def test_operator_statistics_and_priors():
     assert op in OPERATOR_FAMILIES[OperatorFamily.BRANCHING]
 
 
+def test_operator_statistics_probabilities_are_true_fractions():
+    """Mixed outcomes for the same operator+state must yield honest empirical
+    fractions. Regression: the running update used to bump only the matching
+    outcome's probability and never dilute the others, so p_success/p_refute/
+    p_timeout were all overestimated and could sum to >1 — corrupting the
+    lifetime statistics that feed best_operator into future campaigns."""
+    from propab.operator_credit.operator_trace import OperatorTraceLedger
+
+    def _trace(node_id: str, outcome: str) -> NodeOperatorTrace:
+        return NodeOperatorTrace(
+            campaign_id="c1",
+            node_id=node_id,
+            operators_used=[OperatorStep("branching", "closure_aware", 0)],
+            order=0,
+            cost=1.0,
+            outcome=outcome,
+            branching="closure_aware",
+            state_vector=[0.1, 0.2, 0.3, 0.4, 0.5],  # same bucket for all
+        )
+
+    ledger = OperatorTraceLedger()
+    # 2 confirmed, 1 refuted, 1 inconclusive → 4 trials in one cell.
+    for i, oc in enumerate(["confirmed", "confirmed", "refuted", "inconclusive"]):
+        ledger.add(_trace(f"n{i}", oc))
+
+    stats = OperatorStatistics()
+    stats.update_from_traces(ledger)
+
+    (cell,) = list(stats.cells.values())
+    assert cell.n == 4
+    assert cell.p_success == 0.5   # 2/4
+    assert cell.p_refute == 0.25   # 1/4
+    assert cell.p_timeout == 0.25  # 1/4
+    # The three are mutually-exclusive fractions and must never sum above 1.
+    assert cell.p_success + cell.p_refute + cell.p_timeout <= 1.0 + 1e-9
+
+
 def test_bandit_ucb_and_thompson():
     bandit = OperatorBandit()
     bandit.ensure_arms("branching", ("breadth_first", "closure_aware"))
