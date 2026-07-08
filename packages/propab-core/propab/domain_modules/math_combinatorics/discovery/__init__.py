@@ -39,6 +39,12 @@ from propab.domain_modules.math_combinatorics.discovery.finder import (
     find_max_b3,
     max_b3_branch_and_bound,
 )
+from propab.domain_modules.math_combinatorics.discovery.cp_sat_finder import (
+    attempt_a7_size17,
+    decide_b3_cpsat,
+    max_b3_cpsat,
+    ortools_available,
+)
 
 __all__ = [
     "is_B3",
@@ -55,4 +61,9 @@ __all__ = [
     "find_b3_set",
     "find_max_b3",
     "max_b3_branch_and_bound",
+    # Exact CP-SAT backend (OR-tools): sound sat/unsat decisions + optimization.
+    "decide_b3_cpsat",
+    "max_b3_cpsat",
+    "attempt_a7_size17",
+    "ortools_available",
 ]

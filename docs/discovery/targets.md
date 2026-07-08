@@ -239,3 +239,23 @@ not-cheaply-verifiable half — a slower, surer, less headline-clean path.
 - Powers-of-2 pair sums: OEIS A352178 — https://oeis.org/A352178 ; Alekseyev — https://arxiv.org/abs/2303.02872
 - Mian-Chowla (non-target, greedy): OEIS A005282 — https://oeis.org/A005282
 - Engine verifier referenced: `packages/propab-core/propab/domain_modules/math_combinatorics/verifier.py` (`is_valid_cap`, `is_sidon_set`, `is_B3`-style checks)
+
+---
+
+## CP-SAT attempt result (2026-07-08) — honest
+
+An exact OR-tools CP-SAT B_3 finder was built and validated against the proven values:
+- **a(4)=6** and **a(5)=8** solved as **proven-optimal** in seconds; size+1 proven **UNSAT**
+  (sound infeasibility proofs) — the encoding is correct and complete.
+- **a(6)=11**: the correct value is *found*, but CP-SAT does **not close the optimality gap
+  within 5 minutes** (proven_optimal=False), and "no size-12" does not resolve in that budget.
+- **a(7), size-17 decision**: **timeout (unknown) after 10 minutes** — neither a 17-witness
+  found nor 16 proven optimal. No claim.
+
+**Finding:** exact CP-SAT is trustworthy but does not scale past n=5 for full closure at modest
+budgets; n=7/size-17 is well beyond reach here. Reaching a(7) would need substantially longer
+runs (hours/days, uncertain), a much tighter encoding (stronger symmetry breaking / better
+constraints), or a pivot to a more search-friendly reachable target (e.g. the uncontested
+modular Golomb rulers A004135/A004136, whose open next terms may be more CP-SAT-tractable).
+The finder (`discovery/cp_sat_finder.py`) is retained as a verified exact backend; the ILS
+finder remains for larger instances. Nothing here is a record.

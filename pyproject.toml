@@ -31,6 +31,7 @@ dependencies = [
   "scipy>=1.11.0",
   "matplotlib>=3.5.0",
   "networkx>=3.0",
+  "ortools>=9.10",
 ]
 
 [project.scripts]
