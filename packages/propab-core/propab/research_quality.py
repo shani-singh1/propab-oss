@@ -49,6 +49,12 @@ INCONCLUSIVE_SAMPLE_BUDGET = "sample_budget_exhausted"
 INCONCLUSIVE_EXPERIMENT_CONFLICT = "experiment_conflict"
 INCONCLUSIVE_DUPLICATE = "duplicate_evidence"
 INCONCLUSIVE_CONTROL = "control_calibration"
+# A construction/experiment that DID produce a metric_value but did not affirm its
+# claim (verified_true_steps==0 — e.g. it computed a real ratio/size but did not beat
+# the bound). Distinct from metric_missing (genuinely no metric): the earlier catch-all
+# mislabelled these as metric_missing, which misdirects diagnosis ("fix metric emission"
+# vs the real "constructions aren't beating bounds").
+INCONCLUSIVE_CLAIM_NOT_AFFIRMED = "claim_not_affirmed"
 
 INCONCLUSIVE_SUBTYPES = frozenset({
     INCONCLUSIVE_METRIC_MISSING,
@@ -59,6 +65,7 @@ INCONCLUSIVE_SUBTYPES = frozenset({
     INCONCLUSIVE_EXPERIMENT_CONFLICT,
     INCONCLUSIVE_DUPLICATE,
     INCONCLUSIVE_CONTROL,
+    INCONCLUSIVE_CLAIM_NOT_AFFIRMED,
 })
 
 # P1.3 — retry policy keys
@@ -68,6 +75,7 @@ FAILURE_REPLICATION = "replication_conflict"
 FAILURE_CONFLICT = "experiment_conflict"
 FAILURE_NO_METRIC = "no_metric"
 FAILURE_BUDGET = "budget_exhausted"
+FAILURE_UNAFFIRMED = "claim_not_affirmed"
 
 _CONTROL_MARKERS = (
     "null hypothesis",
@@ -267,6 +275,11 @@ def classify_inconclusive_reason(
         return INCONCLUSIVE_METRIC_MISSING
 
     if not is_valid_evidence_for_hash(evidence):
+        # Only "metric_missing" when there is genuinely NO metric. A construction that
+        # computed a real metric_value but didn't affirm its claim (no verified steps)
+        # is "claim_not_affirmed" — accurate diagnosis for the moat.
+        if evidence.get("metric_value") is not None:
+            return INCONCLUSIVE_CLAIM_NOT_AFFIRMED
         return INCONCLUSIVE_METRIC_MISSING
     return INCONCLUSIVE_METRIC_AMBIGUOUS
 
@@ -285,6 +298,8 @@ def failure_signature_from_reason(inconclusive_reason: str | None, *, verdict_re
         return FAILURE_CONFLICT
     if r == INCONCLUSIVE_METRIC_MISSING:
         return FAILURE_NO_METRIC
+    if r == INCONCLUSIVE_CLAIM_NOT_AFFIRMED:
+        return FAILURE_UNAFFIRMED
     if r == INCONCLUSIVE_SAMPLE_BUDGET:
         return FAILURE_BUDGET
     return None
