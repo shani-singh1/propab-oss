@@ -864,6 +864,23 @@ class HypothesisTree:
         for f in tree.finding_ledger:
             for eh in f.get("evidence_hashes") or []:
                 tree._used_evidence_hashes.add(str(eh))
+        # Rehydrate the confirmed-claim dedup set (parallel to the evidence-hash set
+        # above). Without this, a resumed campaign forgets every claim it already
+        # confirmed, so ``register_confirmed_claim`` no-ops on reload and a re-confirmed
+        # duplicate claim slips past the dedup gate in ``_apply_result_diagnostics`` —
+        # inflating the confirmed count and replication proxy with the same finding.
+        # ``tree.confirmed`` holds exactly the surviving confirmed *discovery* nodes
+        # (controls excluded, duplicates already downgraded), which mirrors what the
+        # live path registered.
+        from propab.research_quality import compute_claim_dedup_key
+
+        for nid in tree.confirmed:
+            node = tree.nodes.get(nid)
+            if node is None:
+                continue
+            key = compute_claim_dedup_key(node.text)
+            if key:
+                tree._used_confirmed_claim_keys.add(key)
         return tree
 
     # ── Summary helpers ──────────────────────────────────────────────────────
