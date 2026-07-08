@@ -50,6 +50,7 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 | skills | 0.3k | ✅ |
 | operator_credit / layer05 | ~8.4k | ✅ (traced → SHELVED §I) |
 | frontend/src | — | 🟡 (model/events/panels known from rebuild) |
+| Security & data governance (auth/egress/tenancy/at-rest) | — | ✅ posture grounded → §N (build deferred) |
 
 ---
 
@@ -418,6 +419,57 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 - **What:** `run_seed_pipeline_for_question` + `evaluate_suite` — a no-sandbox validation harness for seed generation (fixes.md Phase 1), with a `_NullEmitter`.
 - **Assessment/tradeoff:** appears to be an offline eval/CI harness, not the live path.
 - **Action:** confirm it's not on the live path; if so KEEP as dev tooling (or move under `tests/`/`scripts/`).
+
+---
+
+## N. Security & data governance (grounded — code read 2026-07-09)
+
+> Framing: **building** this is a deliberately-deferred separate track (user's
+> call). This section only *captures* the current posture as first-class HLD, so
+> the gap is visible and not rediscovered late. Lab onboarding (clinical/PII data,
+> GDPR/HIPAA) makes several of these **hard blockers**, not nice-to-haves.
+
+### N1. No authN/authZ on the public API — BLOCKER (build before any external user)
+- **What:** `deps.py` injects only infra handles; no auth dependency on create/get/list/resume campaigns or `/sessions/*` reads. Only the internal orchestrator endpoint has `orchestrator_internal_token`.
+- **Why (as built):** single-user local dev.
+- **Needed?** Absolutely, before any shared/hosted use. **Better way?** Per-tenant API keys or OAuth/OIDC + per-request authz scoped to the caller's org.
+- **Secure:** ❌ open read/write to all data incl. stored prompts. **Assessment:** hard blocker for onboarding.
+- **Action:** BUILD (deferred) — authn (keys/OIDC) + authz + rate limits.
+
+### N2. Data egress to third-party LLMs (OpenAI/Gemini) — BLOCKER for clinical/PII data
+- **What:** `LLMClient` sends prompts (hypothesis text, extracted numeric values, result summaries, possibly raw data snippets) to external provider APIs; `ollama` is the only in-perimeter option and nothing enforces it.
+- **Why:** access to frontier models.
+- **Needed?/Better way?** For clinical/PII data, egress must be controllable: a **local-only mode** (ollama / self-hosted), per-tenant model policy, PII detection/redaction before egress, and an explicit data-classification → allowed-provider mapping.
+- **Secure:** ❌ the core GDPR/HIPAA violation risk. **Assessment:** hard blocker for regulated data; the single biggest thing labs will ask about.
+- **Action:** BUILD (deferred) — enforce a per-tenant "no data leaves perimeter" mode (local models), egress guard, redaction. Highest-priority security item.
+
+### N3. No tenant isolation — BLOCKER (multi-lab)
+- **What:** one Postgres DB + one flat schema (campaigns/sessions/events/llm_calls); no org/tenant column or boundary; minio/qdrant single-namespace.
+- **Needed?** Yes for multi-lab. **Better way?** Tenant id on every row + row-level security (or DB-per-tenant); per-tenant minio buckets / qdrant collections.
+- **Secure/Scalable:** ❌ cross-tenant data mixing risk. **Action:** BUILD (deferred) — tenancy model end-to-end.
+
+### N4. Data stores published to host; no encryption at rest — FIX (prod hardening)
+- **What:** compose publishes postgres:5432, redis:6379, qdrant:6333, minio:9000/9001 to the host; no at-rest encryption configured.
+- **Assessment:** fine for local dev, unacceptable for prod/hosted. **Deployable:** ⚠.
+- **Action:** FIX (deferred) — don't publish data-store ports in prod compose/k8s; enable encryption at rest (PG TDE/volume encryption, minio SSE); network-segment the stores.
+
+### N5. Sensitive data at rest: `llm_calls` stores full prompt+response text — FIX
+- **What:** every LLM call persists `prompt_text`/`response_text` (may contain sensitive inputs) with no access control, retention limit, or encryption.
+- **Assessment:** combined with N1 this is sensitive-data-at-rest wide open.
+- **Action:** FIX (deferred) — retention/TTL, field-level encryption or redaction, access-scoped reads; GDPR right-to-erasure hook.
+
+### N6. Secrets via plain env vars — KEEP-WATCH
+- **What:** `openai_api_key`/`google_api_key`/`minio_secret_key`/`orchestrator_internal_token` from env.
+- **Assessment:** standard-ish; upgrade to a secrets manager for prod (rotation, no plaintext in compose).
+- **Action:** KEEP-WATCH → secrets manager at prod.
+
+### N7. Sandbox is no-network — KEEP (the one strong control)
+- **What:** LLM-written code runs `network_mode="none"` (§L4) → cannot exfiltrate data or phone home.
+- **Assessment:** exactly right; keep and never regress. **Action:** KEEP; add a test that asserts the sandbox has no network.
+
+### N8. No audit/retention/erasure (GDPR Art. 17/30) controls — BUILD
+- **What:** the `events` table audits *actions*, but there's no data-access audit, retention policy, or subject-erasure path.
+- **Action:** BUILD (deferred) — data-access audit log, retention policy, erasure API.
 
 ---
 
