@@ -40,23 +40,31 @@ def classify_evidence_type(evidence: dict[str, Any]) -> str:
         "combinatorial_verification",
         "combinatorial_computation",
         "counterexample",
+        "exhaustive_enumeration",
     }
     method = evidence.get("verification_method")
     # V3: a "deterministic" (gate-bypassing) classification requires an EXPLICIT
-    # proof method or an explicit `deterministic` flag. The former "any
-    # non-significance method name + a verified_true counter" clause was a
-    # gate-bypass hole — a domain emitting e.g. verification_method=
-    # "cross_network_lofo" with verified_true_steps=1 earned a free "confirmed"
-    # with NO adversarial null. A genuine statistical/lofo result that carries real
-    # null statistics is already classified as "lofo" above (has_lofo) or
-    # "statistical" below (has_stats); anything left with only a step counter and
-    # an unrecognized method must go THROUGH the artifact gate, not around it, so
-    # it falls to "unknown" and is gated. Domain-general: keyed on evidence shape,
-    # never on domain id.
-    is_deterministic = (
-        evidence.get("deterministic") is True
-        or method in _PROOF_METHODS
-    )
+    # proof method. The former "any non-significance method name + a verified_true
+    # counter" clause was a gate-bypass hole — a domain emitting e.g.
+    # verification_method="cross_network_lofo" with verified_true_steps=1 earned a
+    # free "confirmed" with NO adversarial null.
+    #
+    # V4: a bare ``deterministic: True`` flag is NO LONGER a standalone gate
+    # bypass. Previously ``deterministic is True`` alone forced this branch, so any
+    # future/refactored plugin that stamped ``deterministic: True`` on a
+    # thresholded/statistical result earned an automatic artifact-gate bypass with
+    # no shape cross-check. The flag is now honored ONLY when it co-occurs with a
+    # recognized proof ``verification_method`` — and a proof method already
+    # suffices on its own, so the condition reduces to ``method in _PROOF_METHODS``.
+    # A genuine statistical/lofo result that carries real null statistics is already
+    # classified as "lofo" above (has_lofo) or "statistical" below (has_stats);
+    # anything left with only a ``deterministic`` flag / step counter and an
+    # unrecognized (or absent) method must go THROUGH the artifact gate, not around
+    # it, so it falls to "unknown" and is gated. Domain-general: keyed on evidence
+    # shape, never on domain id. (math_combinatorics/coding_theory still classify as
+    # deterministic — they set verification_method to "combinatorial_computation" /
+    # "exhaustive_enumeration", both recognized proof methods.)
+    is_deterministic = method in _PROOF_METHODS
     if is_deterministic:
         return "deterministic"
 

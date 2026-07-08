@@ -1150,7 +1150,13 @@ async def _plugin_verification_path(
     import asyncio
     import json
 
-    from propab.verdict_pipeline import artifact_gate_stage, run_verdict_pipeline
+    from propab.verdict_pipeline import (
+        artifact_gate_stage,
+        classify_evidence_type,
+        ood_gate_stage,
+        run_verdict_pipeline,
+        scope_integrity_stage,
+    )
 
     domain_id = domain_plugin.domain_id
     hypothesis_text = str(hypothesis.get("text") or "")
@@ -1302,33 +1308,79 @@ async def _plugin_verification_path(
     # classify_evidence_type, never on domain id — a deterministic proof passes
     # through untouched, a lofo/statistical confirm must survive a real adversarial
     # null (label-shuffle / permutation), and shapeless "unknown" evidence cannot
-    # confirm. Downgrade-only; no-ops unless verdict == "confirmed". We deliberately
-    # do NOT chain the OOD/scope stages here: OOD is defined for distributional
-    # (lofo/statistical) evidence and wrongly collapses a deterministic proof to
-    # inconclusive, and scope integrity is a no-op on this path (no scope_gate_result
-    # is attached). Wrapped so a gate failure can never break a run.
+    # confirm. Downgrade-only; no-ops unless verdict == "confirmed".
+    #
+    # For DISTRIBUTIONAL (lofo/statistical) plugin evidence we ALSO chain the OOD
+    # gate + scope-integrity stage that the generic/mandrake/materials paths run —
+    # the artifact gate alone does not catch a scope-inflated confirm. A
+    # deterministic proof (math/coding_theory) is left untouched: OOD wrongly
+    # collapses a proof to inconclusive. Keyed on evidence SHAPE via
+    # classify_evidence_type, never on domain id.
+    #
+    # FAIL-CLOSED contract (matches the generic run_verdict_pipeline path, which has
+    # no try/except): the gated verdict is applied to (verdict, confidence, reason)
+    # BEFORE the best-effort downgrade notification is emitted, and ANY exception in
+    # the gate downgrades to "inconclusive". Previously the emit fired first and the
+    # assignment second, both inside one broad ``try/except: pass`` — so a transient
+    # redis/DB failure during the emit (which fires ONLY when a confirm is being
+    # REJECTED) swallowed the error and left the rejected verdict standing as
+    # "confirmed". A gate error, or a failing emit, must never leave a confirm.
     if verdict == "confirmed":
+        _orig_verdict = verdict
         try:
             _gv, _gc, _gr = artifact_gate_stage(
                 output, verdict, confidence, reason,
                 campaign_context={"min_metric_steps": min_steps},
             )
-            if _gv != verdict:
+            if _gv == "confirmed" and classify_evidence_type(output) in ("lofo", "statistical"):
+                _gv, _gc, _gr = ood_gate_stage(
+                    output, _gv, _gc, _gr,
+                    hypothesis=hypothesis,
+                    campaign_context={
+                        "hyp_text": hypothesis_text,
+                        "test_methodology": test_methodology,
+                    },
+                )
+                if _gv == "confirmed":
+                    _scoped = attach_scope_integrity(
+                        output,
+                        hypothesis_text=hypothesis_text,
+                        test_methodology=test_methodology,
+                        experiment_output=output,
+                        question=question,
+                        code=str(output.get("executed_code") or ""),
+                    )
+                    output["scope_integrity"] = _scoped.get("scope_integrity")
+                    output["scope_gate_result"] = _scoped.get("scope_gate_result")
+                    _gv, _gc, _gr = scope_integrity_stage(
+                        output, _gv, _gc, _gr, hypothesis=hypothesis,
+                    )
+        except Exception:  # noqa: BLE001 — FAIL CLOSED: never leave a confirm standing on gate error
+            _gv, _gc, _gr = (
+                "inconclusive",
+                0.0,
+                "artifact/scope gate raised; failing closed (verdict downgraded to inconclusive)",
+            )
+        # Apply the (possibly downgraded) verdict BEFORE any I/O so a failing emit
+        # can never resurrect a rejected "confirmed".
+        _downgraded = _gv != _orig_verdict
+        verdict, confidence, reason = _gv, _gc, _gr
+        if _downgraded:
+            try:
                 await emitter.emit(
                     session_id=session_id,
                     event_type=EventType.TOOL_RESULT,
                     step=f"experiment.{hypothesis_id}.artifact_gate",
                     payload={
                         "domain": domain_id,
-                        "gated_from": verdict,
+                        "gated_from": _orig_verdict,
                         "gated_to": _gv,
                         "reason": str(_gr)[:300],
                     },
                     hypothesis_id=hypothesis_id,
                 )
-            verdict, confidence, reason = _gv, _gc, _gr
-        except Exception:  # noqa: BLE001 — a gate failure must never break a run
-            pass
+            except Exception:  # noqa: BLE001 — emit failure must not undo the downgrade already applied
+                pass
 
     evidence = json.dumps(output, default=str)
     key_finding = str(output.get("notes") or reason or "")[:500] if verdict == "confirmed" else None
