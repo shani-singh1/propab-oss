@@ -59,12 +59,13 @@ MAX_FULL_CAP_DIM = 10
 CAP_BB_TIME_BUDGET = 30.0
 # Deterministic PRIMARY cutoff for the B&B: the DFS visits nodes in a fixed order,
 # so cutting at a fixed node count yields a byte-identical best cap on every run,
-# independent of CPU speed/load. Measured: n<=4 reach their proven optima quickly
-# (n=3 at node ~23, n=4 at node ~7678); the search then never terminates (it can't
-# prove optimality), which is why a wall-clock cut flaked 18-vs-20 under load. This
-# budget sits comfortably above the n=4 optimum-reaching node and keeps the compute
-# fast and reproducible.
-CAP_BB_MAX_NODES = 12_000
+# independent of CPU speed/load (a wall-clock cut flaked 18-vs-20 for n=4 under load).
+# Measured node counts: n<=2 EXHAUST at <=49; n=3 EXHAUSTS (proves optimality) at
+# 21,007; n=4 first REACHES its optimum (size 20) at node ~7,678 but never exhausts.
+# The budget must therefore exceed n=3's exhaustion count (so n<=3 stay provably
+# optimal) while capping the non-terminating n=4 search deterministically; 25,000
+# clears n=3 with margin and keeps n=4 fast (~6s) and reproducible.
+CAP_BB_MAX_NODES = 25_000
 # Above this cap size we validate every base factor fully and spot-check a random
 # sample of product points rather than running the O(|S|^2) sweep over the whole
 # (large) product set.
