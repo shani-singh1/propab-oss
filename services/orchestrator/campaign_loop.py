@@ -1076,7 +1076,16 @@ Return JSON only:
         _bl_to = max(15, int(getattr(settings, "campaign_baseline_worker_timeout_sec", 600)))
         result = await asyncio.to_thread(lambda: ar.get(timeout=_bl_to))
         metric_val = _extract_primary_metric_from_worker_result(result, metric_name)
-        if metric_val is None and metric_name != "val_accuracy":
+        # Do NOT fall back to val_accuracy for a non-accuracy metric. Substituting an
+        # accuracy number as, say, a val_loss baseline silently corrupts every downstream
+        # improvement comparison: a lower_is_better campaign would read an accuracy (~0.9)
+        # as its "baseline loss" and then treat any real (small) loss as a massive win,
+        # handing out false breakthroughs. Accuracy-family metrics are already resolved
+        # via val_accuracy INSIDE _extract_primary_metric_from_worker_result, so no
+        # caller-side fallback is needed; any other declared metric must fail closed
+        # (returning None → baseline_failed) rather than borrow a differently-named value
+        # (the O1 domain-general extraction contract).
+        if metric_val is None and metric_name != "val_accuracy" and _is_accuracy_metric(metric_name):
             metric_val = _extract_primary_metric_from_worker_result(result, "val_accuracy")
         if metric_val is None:
             logger.warning(
