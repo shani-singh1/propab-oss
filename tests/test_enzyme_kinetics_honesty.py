@@ -63,6 +63,79 @@ def _grouped_signal_frame(seed: int = 0, n_per: int = 120) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _noise_frame(seed: int = 0, n_per: int = 120) -> pd.DataFrame:
+    """Frame whose target is independent of every feature and of the EC group,
+    so the observed LOFO R2 cannot beat the EC-shuffle null."""
+    rng = np.random.default_rng(seed)
+    rows: list[dict] = []
+    for i in range(6 * n_per):
+        rows.append({
+            "ec_class": f"EC{i % 6 + 1}",
+            "log_kcat": float(rng.normal()),
+            "molecular_weight": float(rng.normal()),
+            "sequence_length": float(rng.normal()),
+            "frac_charged": float(rng.normal()),
+            "frac_aromatic": float(rng.normal()),
+        })
+    return pd.DataFrame(rows)
+
+
+def _scripted_lofo(observed: float, nulls: list[float]):
+    """Drop-in for ``_lofo_r2`` returning observed on its first call and the
+    scripted null values thereafter."""
+    seq = [observed, *nulls]
+    box = {"i": 0}
+
+    def fn(X, y, groups):  # noqa: ANN001, ARG001
+        i = box["i"]
+        box["i"] += 1
+        return seq[i] if i < len(seq) else 0.0
+
+    return fn
+
+
+# --- the permutation p-value is the FRACTION of nulls >= observed ------------
+# The pre-fix formula ``np.mean([1 for n in nulls if n >= observed])`` is the mean
+# of an all-ones list (== 1.0 when any null ties/exceeds observed, nan when none
+# do), so a real cross-EC signal was reported "refuted" and could NEVER confirm.
+# Both tests below FAIL against that old formula and PASS only with the fix.
+
+def test_planted_signal_yields_small_p_and_confirms(monkeypatch):
+    """Observed LOFO R2 beats the EC-shuffle null on all but 1/40 perms ->
+    p = 0.025 (small) -> *confirmed*. Old formula pins p to 1.0 and INVERTS the
+    identical evidence to 'refuted'."""
+    df = _grouped_signal_frame(seed=3)
+    monkeypatch.setattr(EnzymeKineticsAdapter, "load_frame", lambda self: df)
+    # observed=0.30; only 1 of 40 EC-shuffle perms ties/exceeds it.
+    monkeypatch.setattr(EV, "_lofo_r2", _scripted_lofo(0.30, [0.34] + [0.0] * 39))
+    result = run_enzyme_experiment(
+        EnzymeExperimentSpec(feature_subset=["molecular_weight", "sequence_length"])
+    )
+    assert result["lofo_r2"] == pytest.approx(0.30)
+    assert result["label_shuffle_null_p"] == pytest.approx(1 / 40)  # 0.025 — NOT 1.0
+    assert result["verified_true_steps"] == 1
+    verdict, _, conf = classify_enzyme_verdict("planted cross-EC signal", result)
+    assert verdict == "confirmed", result
+    assert conf > 0.8
+
+
+def test_pure_noise_yields_large_p_and_is_not_confirmed(monkeypatch):
+    """Real end-to-end run: target independent of every feature -> observed
+    cannot beat the null -> p is a genuine (large) fraction and the verdict is
+    never 'confirmed'."""
+    df = _noise_frame(seed=1)
+    monkeypatch.setattr(EnzymeKineticsAdapter, "load_frame", lambda self: df)
+    result = run_enzyme_experiment(
+        EnzymeExperimentSpec(feature_subset=["molecular_weight", "sequence_length"])
+    )
+    p = result["label_shuffle_null_p"]
+    assert not np.isnan(p) and 0.0 <= p <= 1.0
+    assert p >= 0.05, result
+    assert result["verified_true_steps"] == 0
+    verdict, _, _ = classify_enzyme_verdict("pure noise", result)
+    assert verdict != "confirmed"
+
+
 # --- 1 & 2: the null must reject a broken / shuffled group signal -------------
 
 def test_shuffled_labels_are_not_confirmed(monkeypatch):

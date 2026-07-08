@@ -35,7 +35,7 @@ def _label_shuffle_null(X: np.ndarray, y: np.ndarray, groups: np.ndarray, *, n_p
     for _ in range(n_perm):
         rng.shuffle(shuffled)
         nulls.append(_lofo_r2(X, y, shuffled))
-    p = float(np.mean([1 for n in nulls if n >= observed]))
+    p = float(np.mean(np.asarray(nulls) >= observed)) if nulls else 1.0
     return observed, nulls, p
 
 
