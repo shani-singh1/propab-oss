@@ -96,6 +96,27 @@ class MaterialsPlugin(DomainPlugin):
 
         return classify_materials_verdict(hypothesis_text, result)
 
+    def objective_spec(self) -> dict[str, Any]:
+        """Materials is scored by a held-out *statistic*, not a trained ML metric.
+
+        ``materials_adapter.py`` emits ``metric="lofo_r2"``: a
+        leave-one-crystal-system-out holdout R² gated by a label-shuffle null —
+        the same statistical-holdout shape as genomics/enzyme/graph_invariants/
+        network_diffusion, not MLP training. ``is_ml=False`` is load-bearing:
+        without it core would see the default ``val_accuracy`` breakthrough metric
+        and measure a meaningless trained baseline, exactly the 1ae74abd
+        mis-scoring. The metric label matches the adapter's emitted key and carries
+        no ML token; there is no external best-known table for these LOFO R²'s, so
+        ``baseline_kind`` is ``"measured"`` (established from the domain's own
+        holdout), not ``"best_known"``.
+        """
+        return {
+            "metric_name": "lofo_r2",
+            "direction": "higher_is_better",
+            "is_ml": False,
+            "baseline_kind": "measured",
+        }
+
     def confirmation_criteria(self) -> dict[str, Any]:
         return super().confirmation_criteria()
 
