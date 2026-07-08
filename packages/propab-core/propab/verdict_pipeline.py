@@ -250,6 +250,19 @@ def ood_gate_stage(
     if verdict != "confirmed":
         return verdict, confidence, reason
 
+    # A deterministic proof (symbolic_proof / exact_check / exhaustive_enumeration
+    # / counterexample_search) is NOT a distributional claim: an OOD/transfer gate
+    # has no meaning for it and wrongly collapses a genuine proof to "inconclusive"
+    # the moment a hypothesis text is present (parse_scope finds no scope, so
+    # check_ood_evidence returns "no OOD evidence" and downgrades). The OOD gate must
+    # apply ONLY to distributional (lofo/statistical) evidence — this mirrors the
+    # plugin verdict path's F1 block, which already restricts OOD to
+    # classify_evidence_type in ("lofo", "statistical"). Keyed on evidence SHAPE,
+    # never on domain id; the deterministic (math/coding_theory) confirm path stays
+    # confirmable through the full pipeline regardless of whether a hyp text is set.
+    if classify_evidence_type(evidence) == "deterministic":
+        return verdict, confidence, reason
+
     ctx = campaign_context or {}
     hyp_text = str(
         (hypothesis or {}).get("text")
@@ -296,6 +309,13 @@ def scope_integrity_stage(
     hypothesis: dict[str, Any] | None = None,
 ) -> tuple[str, float, str]:
     if verdict != "confirmed":
+        return verdict, confidence, reason
+    # Same shape contract as ood_gate_stage: a scope-integrity FAIL (declared vs
+    # executed OOD mismatch) is meaningless for a deterministic proof, which has no
+    # OOD/transfer surface. Never let a pre-attached scope FAIL collapse a proof —
+    # the deterministic confirm path must survive the full pipeline. Distributional
+    # (lofo/statistical) evidence is still fully scope-gated below.
+    if classify_evidence_type(evidence) == "deterministic":
         return verdict, confidence, reason
     if evidence.get("scope_gate_result") == "FAIL":
         scope_reason = evidence.get("scope_integrity", {}).get("reason", "?")
