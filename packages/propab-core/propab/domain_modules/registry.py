@@ -62,6 +62,10 @@ def _ensure_loaded() -> None:
     from propab.domain_modules.math_combinatorics.plugin import MathCombinatoricsPlugin
     from propab.domain_modules.coding_theory.plugin import CodingTheoryPlugin
     from propab.domain_modules.genomics.plugin import GenomicsPlugin
+    from propab.domain_modules.qsar.plugin import QSARPlugin
+    from propab.domain_modules.epitope.plugin import EpitopePlugin
+    from propab.domain_modules.proteomics.plugin import ProteomicsPlugin
+    from propab.domain_modules.transcriptomics.plugin import TranscriptomicsPlugin
 
     for plugin_cls in (
         MaterialsPlugin,
@@ -72,6 +76,10 @@ def _ensure_loaded() -> None:
         MathCombinatoricsPlugin,
         CodingTheoryPlugin,
         GenomicsPlugin,
+        QSARPlugin,
+        EpitopePlugin,
+        ProteomicsPlugin,
+        TranscriptomicsPlugin,
     ):
         try:
             register_plugin(plugin_cls())
