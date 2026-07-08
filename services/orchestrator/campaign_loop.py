@@ -739,6 +739,27 @@ def _node_row_id(campaign_id: str, node_id: str) -> str:
 # worker, and orchestrator share one persistence path with no cross-service imports.
 
 
+async def _persist_hypothesis_trajectories(
+    campaign: ResearchCampaign,
+    session_factory: async_sessionmaker,
+) -> None:
+    """Derive + upsert per-hypothesis research-trajectory records (telemetry).
+
+    ADDITIVE and failure-isolated: any exception is swallowed and logged so a
+    telemetry problem can never break a campaign's finalize path.
+    """
+    try:
+        from propab.telemetry import build_trajectories
+        from propab.telemetry_db import db_load_campaign_events, save_trajectories
+
+        events = await db_load_campaign_events(campaign.id, session_factory)
+        trajectories = build_trajectories(campaign, events)
+        n = await save_trajectories(trajectories, session_factory)
+        logger.info("[campaign %s] persisted %d hypothesis trajectories", campaign.id, n)
+    except Exception:  # noqa: BLE001 — telemetry must never break a campaign
+        logger.exception("[campaign %s] hypothesis-trajectory telemetry persistence failed", campaign.id)
+
+
 async def db_set_research_session_prior(
     session_id: str,
     session_factory: async_sessionmaker,
@@ -2531,6 +2552,13 @@ async def run_campaign_loop(
         loaded = await db_load_campaign(campaign.id, session_factory)
         if loaded is not None:
             campaign = loaded
+
+        # ── Telemetry substrate (ADDITIVE, failure-isolated) ────────────────
+        # Persist one research-trajectory record per hypothesis so the accumulated
+        # corpus can later answer meta-questions across campaigns. This never
+        # alters verdict/breakthrough/honesty logic; a failure here must never
+        # break a campaign, so it is fully wrapped in try/except.
+        await _persist_hypothesis_trajectories(campaign, session_factory)
 
         # Ownership-contracts per-campaign health metrics: worker experiment
         # success rate + worker utilization onto research_campaigns, and the
