@@ -29,10 +29,24 @@ multiset of points sums to t and is fully contained in S**. So:
 
 Symmetry
 --------
-Every nonempty B_3 set can be translated by coordinate complementations (XOR by a
-fixed mask -- a hyperoctahedral symmetry) so that the origin is a member. We fix
-``x_origin = 1``. This is *sound* (removes no optimum) and divides the space by 2^n,
-which both accelerates search and keeps the UNSAT proof valid.
+The B_3 property is invariant under the full hyperoctahedral group B_n (bit
+permutations x coordinate complementations, |B_n| = n! * 2^n). Two reductions are
+applied, both *sound* (they retain at least one maximum B_3 set per symmetry orbit,
+so they never remove an optimum and keep every UNSAT proof valid):
+
+  * **origin fixing** -- every nonempty B_3 set can be complemented (XOR by a fixed
+    mask) so the origin is a member; we fix ``x_origin = 1``. Divides by 2^n.
+  * **lex-leader symmetry breaking** (``lex_leader=True``, default) -- for each
+    *generator* g of B_n (adjacent bit transpositions + single-coordinate
+    complementations) we constrain the selected set's indicator vector, read in
+    point-index order, to be lexicographically **>=** its image under g. The global
+    lex-largest set in each orbit satisfies *all* such constraints simultaneously
+    (hence any subset of them), so keeping only the generator constraints is sound;
+    it forces CP-SAT to explore essentially one canonical representative per orbit.
+    Lex-max also *implies* the origin is selected (position 0 is the origin and 1 > 0
+    lexicographically), so the two reductions compose cleanly. Posting only the
+    ``2n-1`` generator constraints (partial lex-leader) keeps the model small while
+    cutting the hyperoctahedral symmetry that dominates the n=6/7 search.
 
 Honesty
 -------
@@ -85,11 +99,92 @@ def _sum_buckets(pts: Sequence[Vector], n: int) -> dict[Vector, list[tuple[int, 
     return buckets
 
 
+def _hyperoctahedral_generators(pts: Sequence[Vector], n: int) -> list[list[int]]:
+    """
+    Index-permutations of the cube points for a lex-leader breaking set of B_n.
+
+    Returns one list ``perm`` per group element with ``perm[i]`` = index of
+    ``g(pts[i])``. The set is deliberately *richer* than a minimal generating set --
+    posting a lex-leader constraint for more elements directly forbids more symmetric
+    images, which is what actually shrinks the CP-SAT search (a minimal 2n-1 generator
+    set proved too weak to close n=6). Any subset of B_n is sound for lex-leader (the
+    orbit's global lex-max satisfies them all), so we include:
+
+      * every coordinate transposition  ``tau_{a,b}``  (C(n,2) of them),
+      * every single-coordinate complementation  ``c_a``  (n of them), and
+      * every product  ``c_a . tau_{a,b}``  (complement one swapped coordinate).
+
+    ``perm[i] = idx[g(pts[i])]`` makes ``x[perm[i]]`` the indicator of ``g^{-1}(S)``,
+    so ``x >=_lex [x[perm[i]]]`` is the lex-leader constraint for the element
+    ``g^{-1}`` -- still a member of B_n, so the whole set is a sound lex-leader subset
+    (transpositions and complementations are involutions, the products supply their
+    remaining inverses; either way each posted constraint is genuine lex-leader).
+    """
+    import itertools as _it
+
+    idx = {p: i for i, p in enumerate(pts)}
+
+    def _perm(fn) -> list[int]:
+        return [idx[fn(p)] for p in pts]
+
+    gens: list[list[int]] = []
+
+    def _swap(p, a, b):
+        q = list(p)
+        q[a], q[b] = q[b], q[a]
+        return tuple(q)
+
+    def _flip(p, a):
+        q = list(p)
+        q[a] ^= 1
+        return tuple(q)
+
+    for a, b in _it.combinations(range(n), 2):  # all coordinate transpositions
+        gens.append(_perm(lambda p, a=a, b=b: _swap(p, a, b)))
+    for a in range(n):  # all single-coordinate complementations
+        gens.append(_perm(lambda p, a=a: _flip(p, a)))
+    for a, b in _it.combinations(range(n), 2):  # complement-one-then-swap products
+        gens.append(_perm(lambda p, a=a, b=b: _flip(_swap(p, a, b), a)))
+    return gens
+
+
+def _add_lex_ge(model, a: Sequence, b: Sequence) -> None:
+    """
+    Post the lexicographic constraint ``a >=_lex b`` on two equal-length boolean
+    vectors (``a[0]`` most significant).
+
+    Standard prefix-equality encoding: ``eq`` tracks "all earlier positions equal";
+    while the prefix is equal we require ``a_t >= b_t``. Positions where ``a_t`` and
+    ``b_t`` are the *same* variable (fixed points of the generator) are skipped -- they
+    are trivially equal and cannot break the tie. Sound and complete for lex order.
+    """
+    eq_prev = None  # None == constant True (prefix all-equal so far)
+    for t in range(len(a)):
+        at, bt = a[t], b[t]
+        if at is bt:  # identical variable: equal, ordering trivially holds, eq unchanged
+            continue
+        if eq_prev is None:
+            model.Add(at >= bt)
+        else:
+            model.Add(at >= bt).OnlyEnforceIf(eq_prev)
+        same = model.NewBoolVar("")  # same <=> (a_t == b_t)
+        model.Add(at == bt).OnlyEnforceIf(same)
+        model.Add(at + bt == 1).OnlyEnforceIf(same.Not())
+        if eq_prev is None:
+            eq_prev = same
+        else:
+            eq_next = model.NewBoolVar("")  # eq_next <=> eq_prev AND same
+            model.AddBoolAnd([eq_prev, same]).OnlyEnforceIf(eq_next)
+            model.AddBoolOr([eq_prev.Not(), same.Not()]).OnlyEnforceIf(eq_next.Not())
+            eq_prev = eq_next
+
+
 def build_b3_model(
     n: int,
     *,
     min_size: int | None = None,
     fix_origin: bool = True,
+    lex_leader: bool = True,
     maximize: bool = False,
 ):
     """
@@ -98,8 +193,10 @@ def build_b3_model(
     Returns ``(model, x, pts)`` where ``x[i]`` is the boolean for ``pts[i]``.
 
     ``min_size`` adds ``sum(x) >= min_size`` (the decision constraint); ``maximize``
-    adds ``Maximize(sum(x))``. ``fix_origin`` pins the origin into S (sound
-    hyperoctahedral reduction). Only sum-buckets with >= 2 triples get constraints.
+    adds ``Maximize(sum(x))``. ``fix_origin`` pins the origin into S and ``lex_leader``
+    adds the partial lex-leader constraints for the hyperoctahedral generators (both
+    sound reductions; see the module docstring). Only sum-buckets with >= 2 triples get
+    constraints.
     """
     from ortools.sat.python import cp_model
 
@@ -110,6 +207,14 @@ def build_b3_model(
 
     if fix_origin:
         model.Add(x[idx[tuple([0] * n)]] == 1)
+
+    if lex_leader:
+        # Require x >=_lex g(x) for each generator g of B_n. g(S) has indicator
+        # g(x)[i] = x[perm[i]] (generators are involutions), so we compare x against
+        # the relabeled vector [x[perm[i]] for i in ...]. Retains the orbit's global
+        # lex-maximum (a maximum B_3 set) -> sound.
+        for perm in _hyperoctahedral_generators(pts, n):
+            _add_lex_ge(model, x, [x[perm[i]] for i in range(len(pts))])
 
     buckets = _sum_buckets(pts, n)
     for s, tris in buckets.items():
@@ -148,6 +253,7 @@ def decide_b3_cpsat(
     time_budget: float = 60.0,
     workers: int = 8,
     fix_origin: bool = True,
+    lex_leader: bool = True,
     log: bool = False,
 ) -> dict[str, Any]:
     """
@@ -166,7 +272,7 @@ def decide_b3_cpsat(
     from ortools.sat.python import cp_model
 
     start = time.time()
-    model, x, pts = build_b3_model(n, min_size=k, fix_origin=fix_origin)
+    model, x, pts = build_b3_model(n, min_size=k, fix_origin=fix_origin, lex_leader=lex_leader)
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = float(time_budget)
     solver.parameters.num_search_workers = int(workers)
@@ -210,6 +316,7 @@ def max_b3_cpsat(
     time_budget: float = 60.0,
     workers: int = 8,
     fix_origin: bool = True,
+    lex_leader: bool = True,
     log: bool = False,
 ) -> dict[str, Any]:
     """
@@ -222,7 +329,7 @@ def max_b3_cpsat(
     from ortools.sat.python import cp_model
 
     start = time.time()
-    model, x, pts = build_b3_model(n, maximize=True, fix_origin=fix_origin)
+    model, x, pts = build_b3_model(n, maximize=True, fix_origin=fix_origin, lex_leader=lex_leader)
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = float(time_budget)
     solver.parameters.num_search_workers = int(workers)

@@ -80,10 +80,28 @@ RECORDS: dict[str, dict[str, Any]] = {
         "title": "Modular Golomb ruler (distinct pairs): least k with an n-subset of Z_k, all pairwise sums distinct.",
         "objective": "minimize",
         "source_note": (
-            "Known through n=17 (a(17)=255); a(18) open. Frontier frozen since "
-            "Cariboni 2017-2018; not marked hard. Modular-Sidon witness check is cheap."
+            "a(n) = least k such that Z_k has an n-subset whose sums of DISTINCT pairs "
+            "(a<b) are distinct mod k. Known through n=17 (a(17)=255); a(18) open. "
+            "Frontier frozen since Cariboni 2017-2018; not marked hard. Terms 1..17 "
+            "transcribed from OEIS A004135 (offset 1). Modular-Sidon witness check is cheap."
         ),
         "terms": {
+            1: {"best_known": 1, "status": "proven_optimal"},
+            2: {"best_known": 2, "status": "proven_optimal"},
+            3: {"best_known": 3, "status": "proven_optimal"},
+            4: {"best_known": 6, "status": "proven_optimal"},
+            5: {"best_known": 11, "status": "proven_optimal"},
+            6: {"best_known": 19, "status": "proven_optimal"},
+            7: {"best_known": 28, "status": "proven_optimal"},
+            8: {"best_known": 40, "status": "proven_optimal"},
+            9: {"best_known": 56, "status": "proven_optimal"},
+            10: {"best_known": 72, "status": "proven_optimal"},
+            11: {"best_known": 96, "status": "proven_optimal"},
+            12: {"best_known": 114, "status": "proven_optimal"},
+            13: {"best_known": 147, "status": "proven_optimal"},
+            14: {"best_known": 178, "status": "proven_optimal"},
+            15: {"best_known": 183, "status": "proven_optimal"},
+            16: {"best_known": 252, "status": "proven_optimal"},
             17: {"best_known": 255, "status": "proven_optimal"},
             18: {"best_known": None, "status": "open"},
         },
@@ -94,10 +112,29 @@ RECORDS: dict[str, dict[str, Any]] = {
         "title": "Perfect/modular Golomb ruler (incl. repeats): least k with an n-subset of Z_k, all pairwise sums distinct mod k.",
         "objective": "minimize",
         "source_note": (
-            "Known through n=18 (a(18)=307); a(19) open. Frontier frozen since "
-            "Cariboni 2017-2018; not marked hard."
+            "a(n) = least k such that Z_k has an n-subset whose sums of ALL pairs "
+            "(a<=b, incl. the doubles 2a) are distinct mod k (a perfect/modular Golomb "
+            "ruler). Known through n=18 (a(18)=307); a(19) open. Frontier frozen since "
+            "Cariboni 2017-2018; not marked hard. Terms 1..18 from OEIS A004136 (offset 1)."
         ),
         "terms": {
+            1: {"best_known": 1, "status": "proven_optimal"},
+            2: {"best_known": 3, "status": "proven_optimal"},
+            3: {"best_known": 7, "status": "proven_optimal"},
+            4: {"best_known": 13, "status": "proven_optimal"},
+            5: {"best_known": 21, "status": "proven_optimal"},
+            6: {"best_known": 31, "status": "proven_optimal"},
+            7: {"best_known": 48, "status": "proven_optimal"},
+            8: {"best_known": 57, "status": "proven_optimal"},
+            9: {"best_known": 73, "status": "proven_optimal"},
+            10: {"best_known": 91, "status": "proven_optimal"},
+            11: {"best_known": 120, "status": "proven_optimal"},
+            12: {"best_known": 133, "status": "proven_optimal"},
+            13: {"best_known": 168, "status": "proven_optimal"},
+            14: {"best_known": 183, "status": "proven_optimal"},
+            15: {"best_known": 255, "status": "proven_optimal"},
+            16: {"best_known": 255, "status": "proven_optimal"},
+            17: {"best_known": 273, "status": "proven_optimal"},
             18: {"best_known": 307, "status": "proven_optimal"},
             19: {"best_known": None, "status": "open"},
         },
