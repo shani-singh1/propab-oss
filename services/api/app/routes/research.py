@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,8 @@ from propab.domain_modules.registry import resolve_domain_plugin
 from propab.events import EventEmitter
 from propab.types import EventType
 from services.api.app.deps import get_emitter, get_session_factory
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["research"])
 
@@ -162,6 +165,7 @@ async def create_research_session(
             "question": request.question,
             "max_hypotheses": request.config.max_hypotheses,
             "paper_ttl_days": request.config.paper_ttl_days,
+            "llm_model": request.config.llm_model,
         }
         headers: dict[str, str] = {}
         if (settings.orchestrator_internal_token or "").strip():
@@ -187,6 +191,7 @@ async def create_research_session(
             paper_ttl_days=request.config.paper_ttl_days,
             emitter=emitter,
             session_factory=session_factory,
+            llm_model=request.config.llm_model,
         )
 
     return ResearchResponse(
@@ -335,8 +340,26 @@ async def create_campaign(
         except Exception:  # noqa: BLE001 — routing/objective errors must not block launch
             _obj = None
         if _obj and _obj.get("metric_name"):
-            metric_name = str(_obj["metric_name"])
-            direction = str(_obj.get("direction") or direction)
+            # Only adopt the domain metric when the domain ALSO declares its
+            # optimization direction. Silently inheriting the ML default
+            # ("higher_is_better") would score a minimization metric backwards —
+            # a domain that reports a "lower_is_better" metric with no explicit
+            # direction would be optimized in the wrong direction. If direction is
+            # missing, keep the generic default metric + direction and log.
+            _obj_direction = _obj.get("direction")
+            if _obj_direction:
+                metric_name = str(_obj["metric_name"])
+                direction = str(_obj_direction)
+            else:
+                logger.warning(
+                    "Domain objective_spec for question %r declared metric_name=%r "
+                    "but no direction; keeping generic metric %r/%r to avoid scoring "
+                    "a minimization metric backwards.",
+                    request.question,
+                    _obj.get("metric_name"),
+                    metric_name,
+                    direction,
+                )
     plausibility_max = bc.plausibility_max
     if (
         plausibility_max is None
@@ -556,7 +579,13 @@ async def resume_campaign(
         budget_hours = float(launch_meta["compute_budget_hours"])
     if budget_hours is not None:
         campaign.compute_budget_seconds = int(budget_hours * 3600)
-        campaign.started_at = datetime.now(tz=UTC).isoformat()
+    # ALWAYS rebase the budget clock on resume, even when no new budget is supplied.
+    # Budget is enforced by wall clock (should_stop() -> elapsed_seconds() = now -
+    # started_at); compute_seconds_used is not consulted. Without this, a plain resume
+    # hours/days after launch sees elapsed >> budget, so should_stop() is True on the
+    # first loop iteration and the run finalizes as budget_exhausted with zero new
+    # hypotheses while the API still returns status="resumed" — a silent no-op.
+    campaign.started_at = datetime.now(tz=UTC).isoformat()
 
     new_question = req.question
     if new_question is None and launch_meta and launch_meta.get("question"):
