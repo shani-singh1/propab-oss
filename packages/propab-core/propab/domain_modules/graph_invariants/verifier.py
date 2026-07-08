@@ -70,15 +70,29 @@ def run_graph_invariant_check(spec: GraphInvariantSpec) -> dict[str, Any]:
         holds_train = train_corr > 0.15
         holds_held = held_corr > 0.05
 
-    verified = holds_train and holds_held
-
     # Real adversarial null (replaces the old bare-threshold confirm that, via
     # verification_method="cross_network_lofo", was classified "deterministic" and
     # bypassed the artifact gate entirely). We emit the label-shuffle null in the
     # lofo shape the gate reads (lofo_r2 / label_shuffle_null_p95 /
-    # label_shuffle_permutation_p) so classify_evidence_type routes this as "lofo"
-    # and the artifact gate — not this threshold — decides confirmation. When the
-    # null cannot be built the stats are omitted, so the result fails closed.
+    # label_shuffle_permutation_p) so classify_evidence_type routes this as "lofo".
+    #
+    # The null must also GATE this domain's own verdict counters — not just the
+    # downstream artifact gate. Previously ``verified`` was the bare
+    # train/held threshold alone, so a spurious correlation that clears the
+    # threshold but SITS INSIDE the shuffle-null distribution (perm_p not
+    # significant) still emitted verified_true_steps=1 / discovery_worthy=True,
+    # and classify_graph_verdict returned "confirmed" at 0.90 — a fail-open that
+    # every sibling statistical domain (genomics/enzyme/network_diffusion) closes
+    # by requiring the null. When the null cannot be built we fail CLOSED
+    # (verified=False), consistent with this function's "no free confirm" contract.
+    null = _label_shuffle_null(df, held, src, tgt, abs(held_corr))
+    survives_null = False
+    if null is not None:
+        _p95, _perm_p = null
+        survives_null = abs(held_corr) > _p95 and _perm_p < 0.05
+
+    verified = holds_train and holds_held and survives_null
+
     result: dict[str, Any] = {
         "metric_name": "invariant_correlation",
         "metric_value": held_corr,
@@ -92,7 +106,6 @@ def run_graph_invariant_check(spec: GraphInvariantSpec) -> dict[str, Any]:
         "discovery_worthy": verified,
         "trivial_rediscovery": not verified,
     }
-    null = _label_shuffle_null(df, held, src, tgt, abs(held_corr))
     if null is not None:
         p95, perm_p = null
         result["lofo_r2"] = abs(held_corr)
