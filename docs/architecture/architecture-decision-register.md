@@ -37,11 +37,11 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 | services/literature (65 files) | 9.2k | ⬜ |
 | core: hypothesis_tree | 0.9k | 🟡 |
 | core: verdict_pipeline/significance | 0.4k | ✅ (§E, §K) |
-| core: artifact_verification | 0.8k | ⬜ |
+| core: artifact_verification | 0.8k | ✅ (§O1) |
 | core: campaign_synthesis | 1.0k | 🟡 |
 | core: campaign / campaign_db / campaign_snapshot | ~1k | ⬜ |
-| core: research_quality / evidence_binding / scoped_claim / claim_grounding | ~2k | ⬜ |
-| core: paper_compiler / paper_narrative / paper_sections / paper_gate | ~1.9k | ⬜ |
+| core: research_quality / evidence_binding / scoped_claim / claim_grounding | ~2k | ✅ (§O) |
+| core: paper_compiler / paper_narrative / paper_sections / paper_gate | ~1.9k | 🟡 (paper_gate ✅ §O6; compiler/narrative/sections ⬜) |
 | core: telemetry / telemetry_db / health_metrics / knowledge_graph / numerical_seeds | ~1.5k | ⬜ |
 | domain_modules (12 domains) | 14.7k | 🟡 (genomics ✅; pattern known; rest ⬜) |
 | domain_adapters / domain_profiles | ~2.1k | ⬜ |
@@ -470,6 +470,44 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 ### N8. No audit/retention/erasure (GDPR Art. 17/30) controls — BUILD
 - **What:** the `events` table audits *actions*, but there's no data-access audit, retention policy, or subject-erasure path.
 - **Action:** BUILD (deferred) — data-access audit log, retention policy, erasure API.
+
+---
+
+## O. Core honesty / quality backbone (grounded — code read 2026-07-09)
+
+> **Overall verdict: the strongest part of the codebase.** A thoughtful, layered,
+> domain-agnostic honesty architecture. The redesign should **relocate its
+> invocation** (worker → orchestrator) and **unify entry points** — NOT rewrite
+> the logic. Do not "improve" these gates casually; they encode hard-won
+> anti-false-confirm lessons.
+
+### O1. Artifact-adversarial verification (`artifact_verification`) — KEEP (crown jewel)
+- **What:** confirmation must survive adversarial tests against plausible artifact models — `generate_artifact_models` (confounds/leakage/network markers), `run_adversarial_test`, `_survives_label_shuffle_lofo` / `_survives_permutation` / `_survives_panel_within_fe`, `apply_two_stage_gate` (a real claim must beat the top-k artifact explanations, and a second trivial artifact must NOT also "confirm").
+- **Why:** the anti-"val_accuracy"/anti-false-breakthrough core.
+- **Needed?/Better way?** Essential; well-factored. **Maintainable/Testable:** good (pure functions on evidence dicts).
+- **Action:** KEEP; centralize *invocation* in the orchestrator (E1/E3). Never regress.
+
+### O2. Scoped-claim + OOD integrity (`scoped_claim`) — KEEP (check one smell)
+- **What:** every hypothesis declares where it applies + where it should transfer (OOD); `validate_scoped_claim`, `ood_similarity`, `is_boilerplate_scope`, `parse_scope_from_*`.
+- **Assessment:** strong scope-discipline gate. One to check: `infer_domain_scope_template(question)` may carry ML/domain assumptions — verify it's domain-general (INVESTIGATE-lite).
+- **Action:** KEEP; verify `infer_domain_scope_template` is domain-agnostic.
+
+### O3. Evidence binding (`evidence_binding`) — KEEP
+- **What:** mechanical/deterministic check that any field claiming a relationship to evidence actually references the tested subject/population/features; `extract_subject_from_{node,statement,mechanism,anomaly}`, `BindingMetrics`.
+- **Assessment:** prevents ungrounded claims; deterministic and testable. **Action:** KEEP.
+
+### O4. `research_quality` shared controls — KEEP (domain-agnostic, load-bearing)
+- **What:** `compute_evidence_hash` / `compute_verification_hash` / `compute_claim_dedup_key` (the dedup + split-brain hashing), `classify_inconclusive_reason`, `is_control_hypothesis`/`infer_node_role`, `extract_theme_vector`, `compute_replication_level`, `retry_policy_for_signature`.
+- **Assessment:** exactly the domain-general layer core should own; used by both the tree and the orchestrator apply-path. **Action:** KEEP.
+
+### O5. Verdict classifiers — refine E2 (base + composition + domain overrides)
+- **What:** `significance.classify_verdict` is the **base** classifier (p/effect/CI + verification scan); `verdict_pipeline` **composes** it with the artifact/ood/scope stages; `DomainPlugin.classify_verdict` are **domain overrides**; mandrake/materials adapters add their own.
+- **Assessment (refined):** it's less "4 rival implementations" than "a base + a composition + domain overrides" whose *invocation path* isn't single — the worker sometimes calls a plugin override, sometimes the composed pipeline. The risk is inconsistent gating, not four copies of the same math.
+- **Action:** unify so ALL verdicts flow through the composed `verdict_pipeline` (which internally may call the base + domain override) at ONE orchestrator call site (C2/C3). Confirm `significance.classify_verdict` vs the pipeline don't disagree.
+
+### O6. Honest-output controls (`claim_grounding`, `paper_gate`) — KEEP
+- **What:** `claim_grounding` matches paper prose sentences to actual trace evidence (flags ungrounded prose); `paper_gate.session_merits_paper` decides full-paper vs trace-only so a nothing-campaign doesn't get a fabricated paper.
+- **Assessment:** directly addresses the "writes a paper even with zero findings" worry — a merit gate exists. **Action:** KEEP; audit that the gate + the zero-findings honest-signal (campaign_loop O3-log) are consistent.
 
 ---
 
