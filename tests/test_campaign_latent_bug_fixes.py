@@ -197,21 +197,31 @@ def test_is_breakthrough_does_not_drop_zero_metric_value() -> None:
 
 # ── Bug 4: inverted _is_ml_campaign default for plugin-owned campaigns ───────
 
-def test_plugin_with_none_objective_spec_is_non_ml() -> None:
-    """A domain plugin whose objective_spec() is None (coding_theory / materials today)
-    must be classified NON-ML even when the metric label contains an ML token."""
+def test_plugin_with_none_objective_spec_is_non_ml(monkeypatch) -> None:
+    """A domain plugin whose objective_spec() is None must STILL be classified NON-ML by
+    the inverted _is_ml_campaign (domain-owned ⇒ ML only if the plugin explicitly asserts
+    is_ml=True), even when the metric label carries an ML token. Every shipped domain now
+    declares an objective_spec, so this uses a synthetic None-objective plugin to exercise
+    the base-default path directly."""
+    import propab.domain_modules.registry as reg
+    from propab.domain_modules.base import DomainPlugin
     from services.orchestrator.campaign_loop import _is_ml_campaign
-    from propab.domain_modules.registry import resolve_domain_plugin
 
-    question = "Construct a binary error-correcting code with minimum distance 5 [domain_profile:coding_theory]"
-    plugin = resolve_domain_plugin(question=question)
-    assert plugin is not None and plugin.objective_spec() is None  # precondition
+    class _NoneObjPlugin(DomainPlugin):
+        domain_id = "none_obj_test"
+
+        def available_features(self):
+            return []
+
+        def objective_spec(self):
+            return None
+
+    # _is_ml_campaign resolves the owning plugin from the registry at call time.
+    monkeypatch.setattr(reg, "resolve_domain_plugin", lambda **_kw: _NoneObjPlugin())
 
     campaign = ResearchCampaign(
         id="00000000-0000-0000-0000-0000000000b4",
-        question=question,
-        # default val_accuracy metric carries the "accuracy" ML token — the pre-fix
-        # keyword fallback misclassified this as ML.
+        question="A domain-owned question whose default metric carries the accuracy token",
         breakthrough_criteria=BreakthroughCriteria(metric_name="val_accuracy"),
         compute_budget_seconds=60,
     )
