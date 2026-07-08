@@ -38,15 +38,18 @@ const HYPS: Record<string, { text: string; verdict: string; conf: number }> = {
   h3b: { text: "Monotonic constraint on tenure aids generalization", verdict: "running", conf: 0 },
 };
 
-function workerEvents(id: string, startSec: number, done: boolean): PropabEvent[] {
+function workerEvents(id: string, startSec: number, done: boolean, round: number): PropabEvent[] {
   const h = HYPS[id];
   const out: PropabEvent[] = [];
-  out.push(ev(startSec, "worker", "agent.started", `experiment.${id}`, { hypothesis_id: id, text: h.text }, id));
+  // agent.* events now carry an authoritative `round`; llm.prompt/response pair
+  // by a shared `call_id`; llm.response carries duration_ms + tokens_in/out.
+  const cid1 = `demo-call-${id}-1`;
+  out.push(ev(startSec, "worker", "agent.started", `experiment.${id}`, { hypothesis_id: id, text: h.text, round }, id));
   out.push(ev(startSec + 3, "worker", "agent.step_started", `experiment.${id}.step_0`, { tool: "load_dataset", source: "heuristic_seed" }, id));
   out.push(ev(startSec + 4, "worker", "tool.called", `experiment.${id}.step_0`, { tool: "load_dataset" }, id));
   out.push(ev(startSec + 6, "worker", "tool.result", `experiment.${id}.step_0`, { tool: "load_dataset" }, id));
-  out.push(ev(startSec + 8, "worker", "llm.prompt", `llm.decide_next`, { purpose: "decide_next", model: "claude-opus" }, id));
-  out.push(ev(startSec + 11, "worker", "llm.response", `llm.decide_next`, { purpose: "decide_next", model: "claude-opus" }, id));
+  out.push(ev(startSec + 8, "worker", "llm.prompt", `llm.decide_next`, { purpose: "decide_next", model: "claude-opus", call_id: cid1 }, id));
+  out.push(ev(startSec + 11, "worker", "llm.response", `llm.decide_next`, { purpose: "decide_next", model: "claude-opus", call_id: cid1, duration_ms: 2600 + Math.round(h.conf * 900), tokens_in: 1800, tokens_out: 420 }, id));
   out.push(ev(startSec + 12, "worker", "agent.step_started", `experiment.${id}.step_1`, { action: "code", reasoning: "Fit model and measure LOFO R² against the baseline split." }, id));
   out.push(
     ev(startSec + 13, "worker", "code.generated", `experiment.${id}.step_1`, {
@@ -63,12 +66,15 @@ function workerEvents(id: string, startSec: number, done: boolean): PropabEvent[
         confidence: h.conf,
         sig_gate_passed: h.verdict !== "inconclusive",
         mean_r2: 0.7 + h.conf * 0.1,
+        round,
       }, id),
     );
   } else {
     // leave it mid-flight: code submitted but no result yet (an in-flight task)
     out.push(ev(startSec + 14, "worker", "code.submitted", `experiment.${id}.step_1`, { timeout_sec: 20, execution: "inline_stub", attempt: 1 }, id));
-    out.push(ev(startSec + 15, "worker", "llm.prompt", `llm.decide_next`, { purpose: "decide_next", model: "claude-opus" }, id));
+    // a heartbeat + an unpaired llm.prompt (in-flight LLM task, exact call_id)
+    out.push(ev(startSec + 15, "worker", "agent.progress", `experiment.${id}.progress`, { hypothesis_id: id, round, alive: true, heartbeat_seq: 1 }, id));
+    out.push(ev(startSec + 16, "worker", "llm.prompt", `llm.decide_next`, { purpose: "decide_next", model: "claude-opus", call_id: `demo-call-${id}-2` }, id));
   }
   return out;
 }
@@ -78,22 +84,24 @@ export function buildDemoEvents(): PropabEvent[] {
   const e: PropabEvent[] = [];
   e.push(ev(0, "orchestrator", "campaign.started", "campaign.start", { question: DEMO_QUESTION }));
   e.push(ev(2, "orchestrator", "campaign.progress", "campaign.phase", { phase: "prior_build", detail: "Building literature prior (LLM + retrieval) over 41 papers." }));
-  e.push(ev(4, "orchestrator", "llm.prompt", "llm.prior", { purpose: "prior_synthesis", model: "claude-opus" }));
-  e.push(ev(30, "orchestrator", "llm.response", "llm.prior", { purpose: "prior_synthesis", model: "claude-opus" }));
+  e.push(ev(4, "orchestrator", "llm.prompt", "llm.prior", { purpose: "prior_synthesis", model: "claude-opus", call_id: "demo-prior" }));
+  e.push(ev(30, "orchestrator", "llm.response", "llm.prior", { purpose: "prior_synthesis", model: "claude-opus", call_id: "demo-prior", duration_ms: 26000, tokens_in: 14200, tokens_out: 3100 }));
   e.push(ev(60, "orchestrator", "campaign.baseline_measured", "campaign.baseline_measured", { baseline_metric: 0.612 }));
 
   // Round 1
   e.push(ev(70, "orchestrator", "round.started", "round.1.start", { round: 1, round_id: "r1" }));
   e.push(ev(72, "orchestrator", "hypothesis.generated", "hypothesis.generate", { hypotheses: [{}, {}, {}] }));
-  for (const [i, id] of ["h1a", "h1b", "h1c"].entries()) e.push(...workerEvents(id, 80 + i * 40, true));
+  for (const [i, id] of ["h1a", "h1b", "h1c"].entries()) e.push(...workerEvents(id, 80 + i * 40, true, 1));
   e.push(ev(230, "orchestrator", "synthesis.ledger_updated", "synthesis.ledger", { round: 1 }));
   e.push(ev(232, "orchestrator", "synthesis.breakthrough", "synthesis.breakthrough", { round: 1, finding: "Income scaling lifts R² to 0.68" }, "h1a"));
+  // First-class discovery event: a new best-so-far (feeds the Discovery Hero).
+  e.push(ev(233, "orchestrator", "finding.best_updated", "campaign.best_updated", { metric_name: "LOFO R²", best_metric: 0.681, previous_best: 0.612, baseline_metric: 0.612, direction: "higher_is_better", metric_value: 0.681 }, "h1a"));
   e.push(ev(236, "orchestrator", "round.completed", "round.1.complete", { round: 1, confirmed: 1, refuted: 1, inconclusive: 1, marginal_return: 0.42 }));
 
   // Round 2
   e.push(ev(240, "orchestrator", "round.started", "round.2.start", { round: 2, round_id: "r2" }));
   e.push(ev(242, "orchestrator", "hypothesis.generated", "hypothesis.generate", { hypotheses: [{}, {}] }));
-  for (const [i, id] of ["h2a", "h2b"].entries()) e.push(...workerEvents(id, 250 + i * 40, true));
+  for (const [i, id] of ["h2a", "h2b"].entries()) e.push(...workerEvents(id, 250 + i * 40, true, 2));
   e.push(ev(360, "orchestrator", "synthesis.ledger_updated", "synthesis.ledger", { round: 2 }));
   e.push(ev(362, "orchestrator", "round.completed", "round.2.complete", { round: 2, confirmed: 1, refuted: 0, inconclusive: 1, marginal_return: 0.19 }));
 
@@ -101,10 +109,10 @@ export function buildDemoEvents(): PropabEvent[] {
   e.push(ev(370, "orchestrator", "round.started", "round.3.start", { round: 3, round_id: "r3" }));
   e.push(ev(372, "orchestrator", "campaign.progress", "campaign.phase", { phase: "pipelined_sub_agents", detail: "Dispatching 2 sub-agents for round 3 verification." }));
   e.push(ev(374, "orchestrator", "hypothesis.generated", "hypothesis.generate", { hypotheses: [{}, {}] }));
-  e.push(...workerEvents("h3a", 380, false));
-  e.push(...workerEvents("h3b", 395, false));
-  // an orchestrator LLM call in flight
-  e.push(ev(410, "orchestrator", "llm.prompt", "llm.rank", { purpose: "rank_hypotheses", model: "claude-opus" }));
+  e.push(...workerEvents("h3a", 380, false, 3));
+  e.push(...workerEvents("h3b", 395, false, 3));
+  // an orchestrator LLM call in flight (unpaired prompt → in-flight LLM task)
+  e.push(ev(410, "orchestrator", "llm.prompt", "llm.rank", { purpose: "rank_hypotheses", model: "claude-opus", call_id: "demo-rank" }));
 
   return e.sort((a, b) => (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
 }

@@ -1,10 +1,13 @@
 # Biology domains — honest capability statement (v1)
 
 Propab ships three real-data biology domains: **genomics**, **enzyme_kinetics**,
-and **mandrake**. Each runs a real leave-one-group-out (LOFO) generalization test
-plus a label-shuffle permutation null through Propab's honesty gate. This document
-states plainly what each domain's real data + verifier **can** and **cannot**
-detect, the key limits, how to fetch data and run, and the honest bottom line.
+and **mandrake**, plus a cross-topology-family **network_diffusion** domain and
+four synthetic-first subfield domains (**qsar**, **epitope**, **proteomics**,
+**transcriptomics** — see "Extended biology subfields" below). Each runs a real
+leave-one-group-out (LOFO) generalization test plus a label-shuffle permutation
+null through Propab's honesty gate. This document states plainly what each
+domain's data + verifier **can** and **cannot** detect, the key limits, how to
+fetch data and run, and the honest bottom line.
 
 > **Bottom line, stated up front.** On the datasets currently shipped, these
 > domains more often produce a rigorous *"no signal"* (an honest refute or
@@ -126,6 +129,95 @@ headline discovery count by the domain-general paper path
   RT sequence identity. A claim that merely assigns RT sequences to their known
   Pfam family, or restates the seven conserved motifs, is flagged as a
   rediscovery.
+
+---
+
+## Extended biology subfields (v2) — synthetic-first, same honesty contract
+
+Four additional biology-subfield domains broaden coverage to cheminformatics,
+immunology, protein engineering and gene regulation. They use the **same
+leave-one-group-out + permutation-null honesty contract** as the domains above,
+with one deliberate difference in the null and a clearly-labelled data status:
+
+- **Null design.** These four use a **within-group target-shuffle** null (the
+  target is permuted *inside each group*, preserving the per-group marginal while
+  destroying the feature→target pairing), exactly as the shipped
+  `network_diffusion` domain does. This null cleanly rejects a broken/noise signal
+  and confirms a genuine one end-to-end: a planted cross-group relationship beats
+  it (`p<0.05`) and pure noise does not (`p≈0.5`). The p-value is the standard
+  permutation fraction `float(np.mean(np.asarray(nulls) >= observed))`.
+- **Data status — honestly synthetic by default.** Unlike genomics/enzyme (which
+  fetch a real public atlas), these four ship a **labelled SYNTHETIC** compound/
+  peptide/protein/gene table so they run offline with no private or licensed data.
+  `uses_synthetic_data()` reads the on-disk `.meta.json` `synthetic` flag, so every
+  finding is labelled "synthetic dataset (illustrative)" and is **never** passed
+  off as a real-world result. Each adapter documents a concrete real-data upgrade
+  path (drop a real export at the cache path with `synthetic: false`), and the
+  synthetic generator carries a genuine planted structure→target law so the
+  holdout is a real generalization test, not a within-row tautology.
+- **is_ml=False.** Each declares an `objective_spec` with `is_ml=False` and a
+  non-ML metric label (`loso_r2` / `laoo_r2` / `lofo_r2` / `loco_r2`), so core
+  scores them by statistical holdout, never by a trained-baseline ML metric.
+
+| Domain | Subfield | Group (holdout) | Features | Target | Metric |
+|--------|----------|-----------------|----------|--------|--------|
+| **qsar** | Drug–target bioactivity / QSAR | chemical scaffold (leave-one-scaffold-out) | MW, cLogP, H-donors/acceptors, TPSA, rotatable bonds, aromatic rings, fraction sp3 | pIC50 potency | `loso_r2` |
+| **epitope** | Immunology / peptide-MHC | MHC/HLA allele (leave-one-allele-out) | length, hydrophobicity, net charge, aromatic fraction, P2/C-term anchor hydrophobicity, MW, proline fraction | binding score | `laoo_r2` |
+| **proteomics** | Protein stability / engineering | fold family (leave-one-protein-family-out) | length, MW, GRAVY, charged/helix-propensity/aromatic/proline fractions, instability index | melting temperature Tm | `lofo_r2` |
+| **transcriptomics** | Gene regulation | experimental condition (leave-one-condition-out) | GC content, CpG ratio, TATA score, promoter length, TF-motif count, conservation, chromatin accessibility | log2 fold change | `loco_r2` |
+
+**CAN detect (each):** whether the domain's feature set, learned on the other
+groups, predicts the held-out group's target beyond a within-group shuffle null —
+i.e. a structure→property relationship that generalizes out-of-group.
+
+**CANNOT detect / limits (each):**
+- On the shipped **synthetic** frame, a "confirmed" finding demonstrates the
+  *pipeline* on a planted law; it is not a real-world discovery and is labelled
+  synthetic. Real findings require dropping a real export (ChEMBL, IEDB/NetMHCpan,
+  Meltome Atlas/ProThermDB, GEO/ENCODE) at the documented cache path.
+- The features are coarse 2D/sequence/promoter descriptors, not 3D structure,
+  docking, cofactor chemistry, or per-cell measurements — so genuinely subtle
+  effects (activity cliffs, allele-specific anchor chemistry, active-site
+  stabilization, condition-specific enhancer logic) will honestly read as
+  "no signal" on real data, as they do for genomics/enzyme.
+- Each plugin's `literature_profile()` anchors a rediscovery guard (Lipinski
+  rule-of-five; canonical HLA anchor motifs; thermophile charge/proline heuristics;
+  TATA-box position / CpG-island facts) so restating a textbook value is not
+  counted as novel.
+
+---
+
+## What biology does NOT fit Propab's cheap-verify model (honest scope)
+
+Propab's honesty gate is a **cheap, in-silico verifier**: it can confirm a claim
+only when there is a computable statistic on available data whose out-of-group
+generalization can be tested against a permutation null in seconds. Large parts of
+biology do **not** fit that mould, and Propab should not pretend to adjudicate
+them:
+
+- **Wet-lab-required claims.** Anything whose ground truth is a physical
+  measurement not already in a dataset — a new assay result, a knockout phenotype,
+  a binding constant for an untested pair, an animal-model outcome. There is no
+  cheap verifier; the "experiment" is a bench experiment. Propab can *rank
+  hypotheses*, never *confirm* them.
+- **Causal / mechanistic claims from observational data.** "Gene X drives disease
+  Y", "pathway Z is the mechanism". LOFO generalization is associational; it cannot
+  establish causation without a perturbation/intervention design the data usually
+  lacks.
+- **Single-structure / de-novo design claims.** "This designed protein folds",
+  "this molecule binds pocket P" — verification is a folding/docking/synthesis
+  problem, not a held-out statistic over a group-partitioned table.
+- **Clinical / safety claims.** Efficacy, toxicity, dosing — these require trials
+  and regulatory evidence, categorically outside a permutation-null gate.
+- **Small-n family biology (see mandrake).** When a real partition has only a
+  handful of members per group, the LOFO + permutation test is underpowered for
+  *any* method; the honest output is "insufficient power", not a confirmation.
+
+The domains in this document fit because each reduces to *"does a computable
+feature→target relationship survive leaving out a whole biological group, beating
+its label-shuffle null?"* — a question a cheap verifier can answer honestly, and
+answer "no" more often than "yes". Claims that cannot be reduced to that shape are
+out of scope by design.
 
 ---
 

@@ -4,14 +4,26 @@ import { computeStats, type ComputeBreakdownRow } from "../../lib/model";
 import { fmtDuration } from "../../lib/format";
 
 // Compute / cost tab (§D): LLM / tool / code / error volume, a per-purpose and
-// per-tool breakdown, and the compute-budget burn-down.
-//
-// TODO(design.md §3.1–3.2): latency, tokens and cost are intentionally absent —
-// the stream does not yet carry `tokens_in`/`tokens_out`/`duration_ms` on
-// `llm.response`, nor a `call_id` to pair prompt→response. Once the backend emits
-// them, surface p50/p95 latency, token totals, and a cost estimate here.
+// per-tool breakdown, the compute-budget burn-down, and — once the backend emits
+// them (design.md §3.1–3.2) — per-call latency percentiles and token totals read
+// from `llm.response` `duration_ms` / `tokens_in` / `tokens_out`.
 
-function StatTile({ label, value, color }: { label: string; value: number; color?: string }) {
+// Compact millisecond duration, e.g. "840ms", "3.2s".
+function fmtMs(ms: number | null): string {
+  if (ms == null || !isFinite(ms)) return "—";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`;
+}
+
+// Compact token count, e.g. "812", "12.4k", "1.2M".
+function fmtTokens(n: number): string {
+  if (!isFinite(n)) return "—";
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(2)}M`;
+}
+
+function StatTile({ label, value, color }: { label: string; value: number | string; color?: string }) {
   return (
     <div className="rounded-[9px] border border-edge bg-right px-[11px] py-[10px]">
       <div className="font-mono text-[18px] font-semibold leading-none" style={{ color: color ?? "var(--text)" }}>
@@ -100,24 +112,62 @@ export default function ComputePanel({
         </div>
       )}
 
+      {/* per-call latency (design.md §3.1) — once llm.response carries duration_ms */}
+      {stats.hasLatency && (
+        <div className="mb-[16px]">
+          <div className="mb-[8px] flex items-baseline gap-[8px]">
+            <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-3">
+              LLM latency
+            </span>
+            <span className="font-mono text-[10px] text-ink-4">{stats.latency.count} calls</span>
+          </div>
+          <div className="grid grid-cols-3 gap-[7px]">
+            <StatTile label="p50" value={fmtMs(stats.latency.p50Ms)} />
+            <StatTile label="p95" value={fmtMs(stats.latency.p95Ms)} />
+            <StatTile label="max" value={fmtMs(stats.latency.maxMs)} />
+          </div>
+        </div>
+      )}
+
+      {/* token totals (design.md §3.2) — once llm.response carries tokens_in/out */}
+      {stats.hasTokens && (
+        <div className="mb-[16px]">
+          <div className="mb-[8px] flex items-baseline gap-[8px]">
+            <span className="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-3">
+              Tokens
+            </span>
+            <span className="font-mono text-[10px] text-ink-4">{stats.tokens.count} calls</span>
+          </div>
+          <div className="grid grid-cols-3 gap-[7px]">
+            <StatTile label="in" value={fmtTokens(stats.tokens.in)} />
+            <StatTile label="out" value={fmtTokens(stats.tokens.out)} />
+            <StatTile label="total" value={fmtTokens(stats.tokens.total)} />
+          </div>
+        </div>
+      )}
+
       <Breakdown title="LLM by purpose" rows={stats.llmByPurpose} total={stats.llm} />
       <Breakdown title="Tools by name" rows={stats.toolByName} total={stats.tool} />
       {stats.errors > 0 && (
         <Breakdown title="Errors by type" rows={stats.errorsByType} total={stats.errors} />
       )}
 
-      {/* honest gap for the not-yet-emitted signals */}
-      <div className="mt-[6px] rounded-[9px] border border-dashed border-edge px-[11px] py-[10px]">
-        <div className="font-mono text-[9.5px] uppercase tracking-[0.1em] text-ink-3">
-          Latency · tokens · cost
+      {/* honest gap only for what remains un-emitted */}
+      {(!stats.hasLatency || !stats.hasTokens) && (
+        <div className="mt-[6px] rounded-[9px] border border-dashed border-edge px-[11px] py-[10px]">
+          <div className="font-mono text-[9.5px] uppercase tracking-[0.1em] text-ink-3">
+            {!stats.hasLatency && !stats.hasTokens ? "Latency · tokens" : !stats.hasLatency ? "Latency" : "Tokens"}
+          </div>
+          <div className="mt-[5px] text-[11px] leading-[1.5] text-ink-3">
+            Awaiting per-call{" "}
+            {!stats.hasLatency && <span className="text-ink-2">duration_ms</span>}
+            {!stats.hasLatency && !stats.hasTokens && " / "}
+            {!stats.hasTokens && <span className="text-ink-2">tokens_in/out</span>} on{" "}
+            <span className="text-ink-2">llm.response</span>. They render here the moment the
+            backend emits them.
+          </div>
         </div>
-        <div className="mt-[5px] text-[11px] leading-[1.5] text-ink-3">
-          Awaiting backend fields (design.md §3): per-call <span className="text-ink-2">duration_ms</span>,{" "}
-          <span className="text-ink-2">tokens_in/out</span>, and a{" "}
-          <span className="text-ink-2">call_id</span> to pair prompt→response. Latency percentiles,
-          token totals, and a cost estimate render here once emitted.
-        </div>
-      </div>
+      )}
     </div>
   );
 }

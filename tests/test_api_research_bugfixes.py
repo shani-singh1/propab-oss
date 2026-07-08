@@ -255,3 +255,65 @@ def test_explicit_evidence_status_is_honored():
         )
         == "PARTIAL"
     )
+
+
+# ── Bug 5: default ResearchConfig.llm_model must NOT shadow settings.llm_model ──
+
+def test_default_research_config_defers_to_settings_model(monkeypatch):
+    """A default (no-model) /research request must use the operator's LLM_MODEL.
+
+    Pre-fix ``ResearchConfig.llm_model`` defaulted to the literal ``"gpt-4o"``, so
+    every default request shipped that hardcoded id to ``run_research_loop`` and the
+    ``llm_model or settings.llm_model`` fallback was dead. On a deployment configured
+    for a different model — or a non-OpenAI provider (Gemini/Ollama) — this silently
+    overrode the operator's setting and 404'd every generation call.
+
+    The API hands ``request.config.llm_model`` to the loop, which resolves it against
+    ``settings.llm_model``. With settings pinned to a distinct value, the effective
+    model must equal the operator's setting, never the old ``"gpt-4o"`` literal.
+    """
+    monkeypatch.setattr(research.settings, "orchestrator_url", "", raising=False)
+    monkeypatch.setattr(research.settings, "llm_model", "operator-configured-model", raising=False)
+
+    req = research.ResearchRequest(question="a valid research question about descriptors?")
+    # The default config no longer pins a model.
+    assert req.config.llm_model is None
+
+    bg = BackgroundTasks()
+    resp = asyncio.run(
+        research.create_research_session(
+            request=req,
+            background_tasks=bg,
+            emitter=_FakeEmitter(),
+            session_factory=_fake_session_factory,
+        )
+    )
+    assert resp.status == "started"
+    # The in-process fallback registered the loop as a background task; inspect the
+    # model it will run with (resolved the same way run_research_loop resolves it).
+    assert bg.tasks, "expected an in-process research task to be scheduled"
+    scheduled_model = bg.tasks[0].kwargs["llm_model"]
+    effective_model = scheduled_model or research.settings.llm_model
+    assert effective_model == "operator-configured-model"
+    # And specifically NOT the old hardcoded default.
+    assert effective_model != "gpt-4o"
+
+
+# ── Bug 6: an invalid breakthrough direction is rejected, not silently mis-scored ──
+
+def test_invalid_breakthrough_direction_is_rejected():
+    """A typo'd direction must 422 at the boundary, not silently score backwards.
+
+    campaign.py treats any non-'higher_is_better' string as lower_is_better in its
+    sort key but matches NEITHER in record detection, so 'higher' (a plausible typo)
+    would either invert scoring or register no records at all — a silently broken run.
+    """
+    from pydantic import ValidationError
+
+    # Valid values still construct.
+    for good in ("higher_is_better", "lower_is_better"):
+        assert research.BreakthroughCriteriaRequest(direction=good).direction == good
+
+    for bad in ("higher", "lower", "higher_is_worse", "maximize", ""):
+        with pytest.raises(ValidationError):
+            research.BreakthroughCriteriaRequest(direction=bad)

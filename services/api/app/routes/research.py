@@ -89,7 +89,12 @@ async def _dispatch_campaign(
 class ResearchConfig(BaseModel):
     max_hypotheses: int = Field(default=5, ge=1, le=10)
     paper_ttl_days: int = Field(default=30, ge=1, le=365)
-    llm_model: str = Field(default="gpt-4o")
+    # Default None (NOT a hardcoded "gpt-4o"): when the caller does not pin a model,
+    # defer to the server-configured LLM_MODEL. A non-None literal here would shadow
+    # the operator's setting on every default request — and, worse, ship an
+    # OpenAI-only id ("gpt-4o") to a Gemini/Ollama-configured deployment, 404-ing
+    # every generation call. run_research_loop resolves `llm_model or settings.llm_model`.
+    llm_model: str | None = Field(default=None)
 
 
 class ResearchRequest(BaseModel):
@@ -206,7 +211,15 @@ async def create_research_session(
 class BreakthroughCriteriaRequest(BaseModel):
     metric_name: str = Field(default="val_accuracy")
     improvement_threshold: float = Field(default=0.05, ge=0.001, le=1.0)
-    direction: str = Field(default="higher_is_better")
+    # Constrain to the two values the scoring logic recognizes. campaign.py treats
+    # ANY non-"higher_is_better" string as lower_is_better in some paths (sort key)
+    # yet matches NEITHER in others (record detection), so a typo like "higher"
+    # is silently accepted and scores the whole campaign backwards or never registers
+    # a record. Reject it at the boundary, mirroring policy_mode/seed_source.
+    direction: str = Field(
+        default="higher_is_better",
+        pattern="^(higher_is_better|lower_is_better)$",
+    )
     min_confidence: float = Field(default=0.85, ge=0.5, le=1.0)
     min_replications: int = Field(default=3, ge=1, le=20)
     # Optional declared instrumentation ceiling for higher_is_better metrics. If omitted,

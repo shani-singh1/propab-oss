@@ -27,6 +27,22 @@ from propab.domain_modules.graph_invariants.routing_inspector import (  # noqa: 
     ROUTING_CORPUS as GRAPH_CORPUS,
     inspect_corpus as inspect_graph_corpus,
 )
+from propab.domain_modules.qsar.routing_inspector import (  # noqa: E402
+    ROUTING_CORPUS as QSAR_CORPUS,
+    inspect_corpus as inspect_qsar_corpus,
+)
+from propab.domain_modules.epitope.routing_inspector import (  # noqa: E402
+    ROUTING_CORPUS as EPITOPE_CORPUS,
+    inspect_corpus as inspect_epitope_corpus,
+)
+from propab.domain_modules.proteomics.routing_inspector import (  # noqa: E402
+    ROUTING_CORPUS as PROTEOMICS_CORPUS,
+    inspect_corpus as inspect_proteomics_corpus,
+)
+from propab.domain_modules.transcriptomics.routing_inspector import (  # noqa: E402
+    ROUTING_CORPUS as TRANSCRIPTOMICS_CORPUS,
+    inspect_corpus as inspect_transcriptomics_corpus,
+)
 
 DEFAULT_EXAMPLE = {
     "statement": "F(n)/sqrt(n) is below 0.90 for all n >= 1000",
@@ -120,6 +136,12 @@ def main() -> int:
         )
         genomics_report = inspect_genomics_corpus(GENOMICS_CORPUS)
         enzyme_report = inspect_enzyme_corpus(ENZYME_CORPUS)
+        # New biology subfield domains run on a labelled synthetic fallback frame
+        # so their verifiers execute offline (same as genomics/enzyme).
+        qsar_report = inspect_qsar_corpus(QSAR_CORPUS)
+        epitope_report = inspect_epitope_corpus(EPITOPE_CORPUS)
+        proteomics_report = inspect_proteomics_corpus(PROTEOMICS_CORPUS)
+        transcriptomics_report = inspect_transcriptomics_corpus(TRANSCRIPTOMICS_CORPUS)
         # graph_invariants fails closed without real SNAP data (git-ignored), so its
         # actual metric is null and every entry would read as a mismatch. Skip the graph
         # corpus check when the data is absent (CI / fresh checkout) — the routing itself
@@ -138,12 +160,20 @@ def main() -> int:
         comb_report = inspect_combinatorics_corpus(comb_corpus) if comb_corpus else {
             "total": 0, "routing_ok": 0, "routing_mismatches": 0, "mismatch_rate": 0.0, "mismatches": [],
         }
-        extra_total = genomics_report["total"] + enzyme_report["total"] + graph_report["total"]
-        extra_ok = genomics_report["routing_ok"] + enzyme_report["routing_ok"] + graph_report["routing_ok"]
+        bio_reports = (qsar_report, epitope_report, proteomics_report, transcriptomics_report)
+        extra_total = (
+            genomics_report["total"] + enzyme_report["total"] + graph_report["total"]
+            + sum(r["total"] for r in bio_reports)
+        )
+        extra_ok = (
+            genomics_report["routing_ok"] + enzyme_report["routing_ok"] + graph_report["routing_ok"]
+            + sum(r["routing_ok"] for r in bio_reports)
+        )
         extra_mm = (
             genomics_report["routing_mismatches"]
             + enzyme_report["routing_mismatches"]
             + graph_report["routing_mismatches"]
+            + sum(r["routing_mismatches"] for r in bio_reports)
         )
         report = {
             "total": comb_report["total"] + extra_total,
@@ -159,6 +189,7 @@ def main() -> int:
                 + genomics_report.get("mismatches", [])
                 + enzyme_report.get("mismatches", [])
                 + graph_report.get("mismatches", [])
+                + [m for r in bio_reports for m in r.get("mismatches", [])]
             ),
         }
         text = json.dumps(

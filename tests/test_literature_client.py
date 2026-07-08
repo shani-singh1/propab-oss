@@ -171,6 +171,53 @@ def test_map_prior_response_empty_is_insufficient() -> None:
     assert prior.evidence_coverage == 0.0
 
 
+def test_map_prior_response_consulted_only_is_insufficient() -> None:
+    """Sources were searched but NOTHING was extracted → INSUFFICIENT_EVIDENCE.
+
+    Regression: ``key_papers`` is derived purely from ``sources_consulted``
+    (source names/ids that were merely searched, not evidence). A prior with
+    zero facts/gaps/contradictions/dead_ends/tabulations must NOT be labelled
+    READY just because some sources were consulted — that would feed an empty
+    prior to generation as if it were real evidence.
+    """
+    prior = map_prior_response(
+        {
+            "established_facts": [],
+            "open_gaps": [],
+            "contradictions": [],
+            "dead_ends": [],
+            "tabulated_values": [],
+            "novelty_bar": {"criteria": ""},
+            "sources_consulted": ["arxiv", "pubmed", "semantic_scholar"],
+            "papers_indexed": 7,
+            "citation_verification_rate": None,
+        }
+    )
+    # key_papers is non-empty (one per consulted source) but carries no evidence.
+    assert prior.key_papers  # still surfaced for provenance/UI
+    assert prior.evidence_status == "INSUFFICIENT_EVIDENCE"
+
+
+def test_map_prior_response_tabulations_only_is_ready() -> None:
+    """Numerical seeds are real evidence → READY even with no prose facts."""
+    prior = map_prior_response(
+        {
+            "established_facts": [],
+            "open_gaps": [],
+            "contradictions": [],
+            "dead_ends": [],
+            "tabulated_values": [
+                {"description": "seq", "values": {"1": 1, "2": 2}, "source_doi": "10.1/x"}
+            ],
+            "novelty_bar": {"criteria": ""},
+            "sources_consulted": ["oeis"],
+            "papers_indexed": 1,
+            "citation_verification_rate": None,
+        }
+    )
+    assert prior.evidence_status == "READY"
+
+
 @pytest.mark.asyncio
 async def test_build_prior_via_service_maps_response(emitter, llm, domain_plugin) -> None:
     """Mocked /prior returns a populated PriorResponse → correctly mapped Prior."""
