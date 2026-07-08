@@ -204,13 +204,13 @@ Each entry: **What** · **Why (rationale)** · **Assessment + tradeoff** · **Ac
 
 ## I. LLD — Big subsystems to audit next (honest INVESTIGATE)
 
-### I1. `layer05` — offline replay / simulation / policy-eval (4.9k LOC) — DECISION NEEDED (mostly unwired)
+### I1. `layer05` — offline replay / simulation / policy-eval (4.9k LOC) — SHELVED (revisit post-C3)
 - **What:** search/hybrid/ensemble simulators, offline policy eval, calibration, fitness ledgers.
 - **Why:** offline learning of the search/dispatch policy across campaigns (the "moat").
 - **Assessment/tradeoff (TRACED 2026-07-09):** live footprint is 3 imports — a `SimulationFitnessLedger` load + `policy_analyst` (which is *decorative*: "the LLM never edits") + a small `_policy_score_multiplier` nudge on `frontier_score`. The **simulator bulk** (`simulate_search`, hybrid/ensemble, `replay_campaign_snapshots`, offline eval) is called **only by `operator_credit`** (I2), which has no consumers → dead subgraph. So ~4k of the 4.9k LOC does not affect a live campaign.
 - **Action:** DECISION NEEDED (strategic, user's call — this is Track B "moat"): (a) **wire it** into the live loop so learned policy actually steers dispatch/expansion, or (b) **shelve** it behind a clearly-labelled flag/branch until the reasoning loop needs it. Do NOT silently carry it as if it's active. The tiny live policy-multiplier hook is KEEP-WATCH meanwhile.
 
-### I2. `operator_credit` (3.5k LOC) — telemetry/operator-statistics moat — DECISION NEEDED (unwired island)
+### I2. `operator_credit` (3.5k LOC) — telemetry/operator-statistics moat — SHELVED (revisit post-C3)
 - **What:** per-operator credit, running stats, difference-rewards, counterfactual replay.
 - **Why:** the "telemetry moat" track (Track B).
 - **Assessment/tradeoff (TRACED 2026-07-09):** **zero** non-self, non-test references anywhere in `packages/` or `services/`. It is a fully disconnected island — recorded/computable but feeding **no** decision. A moat that feeds nothing is not yet a moat; it's unintegrated code carrying maintenance + honesty risk (it can drift like the genomics verifier did, invisibly).
