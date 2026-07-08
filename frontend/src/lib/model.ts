@@ -16,7 +16,7 @@
 // Everything is a pure function of the event list so it can be memoized and
 // recomputed cheaply on each streamed event (single O(n) pass).
 
-import type { PropabEvent, Verdict } from "../types";
+import type { CampaignState, CampaignSummary, PropabEvent, Verdict } from "../types";
 
 export type WorkerStatus = "running" | "confirmed" | "refuted" | "inconclusive" | "failed";
 
@@ -110,7 +110,9 @@ export interface CampaignModel {
 // their own row in the center narrative.
 const MILESTONE_STANDALONE = new Set<string>([
   "campaign.started",
+  "campaign.baseline_measured",
   "campaign.breakthrough",
+  "synthesis.breakthrough",
   "campaign.budget_exhausted",
   "campaign.completed",
   "session.completed",
@@ -545,5 +547,181 @@ export function buildCampaignModel(events: PropabEvent[]): CampaignModel {
       workersRunning,
       workersDone: workers.length - workersRunning,
     },
+  };
+}
+
+// ── Discovery derivations (§A meter · §B hero/cards) ─────────────────────────
+// Small PURE helpers layered on top of the event-derived model. They read the
+// campaign summary/snapshot (not the event stream) and never reshape any of the
+// exports above — added so the HUD's distance-to-breakthrough meter and the
+// Discovery Hero can render from what `types.ts` actually provides.
+//
+// NB: until the backend emits first-class discovery events (design.md §3 item 6
+// — `finding.best_updated` / candidate-record / certification carrying the
+// witness + certification booleans), the witness/certification below are read
+// defensively from whatever `campaign.best_finding` happens to carry, and are
+// simply absent when it carries nothing. Nothing here invents a field.
+
+function numOrNull(v: unknown): number | null {
+  if (typeof v === "number") return isFinite(v) ? v : null;
+  if (typeof v === "string" && v.trim() !== "" && isFinite(Number(v))) return Number(v);
+  return null;
+}
+
+function firstNum(...vals: unknown[]): number | null {
+  for (const v of vals) {
+    const n = numOrNull(v);
+    if (n != null) return n;
+  }
+  return null;
+}
+
+function firstStr(...vals: unknown[]): string | null {
+  for (const v of vals) {
+    if (typeof v === "string" && v.trim() !== "") return v.trim();
+  }
+  return null;
+}
+
+function boolRecord(v: unknown): Record<string, boolean> | null {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return null;
+  const entries = Object.entries(v as Record<string, unknown>).filter(
+    ([, x]) => typeof x === "boolean",
+  ) as [string, boolean][];
+  return entries.length ? Object.fromEntries(entries) : null;
+}
+
+export interface BreakthroughMeter {
+  /** true when the summary carries a usable (nonzero) baseline+best metric pair. */
+  hasMetric: boolean;
+  baseline: number;
+  best: number;
+  /** signed % improvement of best over baseline (positive = better), e.g. 11.3. */
+  improvementPct: number | null;
+  /** % improvement required to declare a breakthrough, e.g. 15. */
+  thresholdPct: number;
+  /** best's position on the baseline→threshold track, in [0,1]. */
+  progress: number;
+  /** best_metric has reached/exceeded the breakthrough threshold. */
+  crossed: boolean;
+}
+
+type MeterInput =
+  | Pick<
+      CampaignSummary,
+      "baseline_metric" | "best_metric" | "improvement_pct" | "breakthrough_threshold_pct"
+    >
+  | null
+  | undefined;
+
+// The distance-to-breakthrough meter: where `best_metric` sits on the track from
+// baseline (0) to the breakthrough threshold (1). Direction-agnostic — it keys off
+// `improvement_pct` (already signed so positive = better) vs the threshold %.
+export function breakthroughMeter(summary: MeterInput): BreakthroughMeter {
+  const baseline = firstNum(summary?.baseline_metric) ?? 0;
+  const best = firstNum(summary?.best_metric) ?? 0;
+  const improvementPct = summary?.improvement_pct ?? null;
+  const thresholdPct = firstNum(summary?.breakthrough_threshold_pct) ?? 0;
+  const hasMetric = Math.abs(baseline) > 1e-12 && Math.abs(best) > 1e-12;
+  let progress = 0;
+  if (improvementPct != null && thresholdPct > 0) {
+    progress = Math.max(0, Math.min(1, improvementPct / thresholdPct));
+  }
+  const crossed = improvementPct != null && thresholdPct > 0 && improvementPct >= thresholdPct;
+  return { hasMetric, baseline, best, improvementPct, thresholdPct, progress, crossed };
+}
+
+export interface DiscoverySummary {
+  /** best_finding carries real content (vs. an early / metric-only campaign). */
+  hasFinding: boolean;
+  /** one-line human statement of the best finding, if any. */
+  statement: string | null;
+  metricName: string | null;
+  /** best-so-far scalar (finding metric_value, else summary.best_metric). */
+  best: number | null;
+  /** the value to beat — published best-known / prior record, if derivable. */
+  bestKnown: number | null;
+  /** next integer to reach when not yet beaten (integer record-chase), else null. */
+  need: number | null;
+  direction: "higher_is_better" | "lower_is_better";
+  /** best strictly beats best-known. */
+  beatsBestKnown: boolean;
+  /** witness passed every certification check (null = no certification data). */
+  certified: boolean | null;
+  /** the raw witness the finding carries (set / certificate), if any. */
+  witness: unknown | null;
+  /** certification check booleans, if the finding carries them. */
+  checks: Record<string, boolean> | null;
+  note: string | null;
+  meter: BreakthroughMeter;
+}
+
+// Derive the discovery state the Hero + breakthrough card render from. Reads
+// `campaign.best_finding` defensively (its shape is domain-general and, per §3,
+// not yet standardized) and falls back to the summary metrics for the honest
+// "no result yet" state.
+export function discoverySummary(
+  campaign: CampaignState["campaign"] | null | undefined,
+  summary: MeterInput,
+): DiscoverySummary {
+  const f = (campaign?.best_finding ?? null) as Record<string, unknown> | null;
+  const crit = (campaign?.breakthrough_criteria ?? {}) as Record<string, unknown>;
+  const direction = crit.direction === "lower_is_better" ? "lower_is_better" : "higher_is_better";
+  const meter = breakthroughMeter(summary);
+
+  const metricName = firstStr(crit.metric_name, f?.metric_name);
+  const statement = firstStr(f?.statement, f?.description, f?.summary, f?.key_finding);
+  const note = firstStr(f?.note);
+  const best = firstNum(
+    f?.metric_value,
+    metricName ? f?.[metricName] : undefined,
+    f?.size,
+    summary?.best_metric,
+    campaign?.best_metric,
+  );
+  const bestKnown = firstNum(f?.best_known, f?.published_best, f?.record, f?.prior_best);
+  const witness = f?.witness ?? f?.set ?? f?.certificate ?? null;
+  const checks = boolRecord(f?.checks);
+
+  let certified: boolean | null = null;
+  if (typeof f?.certified === "boolean") certified = f.certified as boolean;
+  else if (checks) certified = Object.values(checks).every(Boolean);
+
+  const beatsBestKnown =
+    best != null && bestKnown != null
+      ? direction === "higher_is_better"
+        ? best > bestKnown
+        : best < bestKnown
+      : false;
+
+  // Record-chase "need": for an integer, higher-is-better target that isn't yet
+  // beaten, the next value to reach is best-known + 1 (e.g. "found 16 · need 17").
+  let need: number | null = null;
+  if (
+    best != null &&
+    bestKnown != null &&
+    Number.isInteger(bestKnown) &&
+    direction === "higher_is_better" &&
+    !beatsBestKnown
+  ) {
+    need = bestKnown + 1;
+  }
+
+  const hasFinding = !!f && Object.keys(f).length > 0 && (statement != null || witness != null || firstNum(f?.metric_value, f?.size) != null);
+
+  return {
+    hasFinding,
+    statement,
+    metricName,
+    best,
+    bestKnown,
+    need,
+    direction,
+    beatsBestKnown,
+    certified,
+    witness,
+    checks,
+    note,
+    meter,
   };
 }

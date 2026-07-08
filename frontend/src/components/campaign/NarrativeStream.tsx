@@ -1,10 +1,11 @@
 import { useState } from "react";
-import type { NarrativeItem, RoundView, Worker } from "../../lib/model";
+import type { DiscoverySummary, NarrativeItem, RoundView, Worker } from "../../lib/model";
 import type { PropabEvent } from "../../types";
 import { eventLabel } from "../../lib/events";
 import { fmtElapsed, fmtOffset } from "../../lib/format";
 import { StatusDot, WorkerStatusMeta } from "./bits";
 import WorkerDetail from "./WorkerDetail";
+import EventCard from "./EventCards";
 
 // ── Round group card ─────────────────────────────────────────────────────────
 // A completed round collapses to a one-line summary with a verdict tally; the
@@ -191,49 +192,26 @@ function RoundGroup({
   );
 }
 
-// ── Standalone lifecycle milestone ───────────────────────────────────────────
-
-function milestoneMeta(e: PropabEvent): { color: string; emphatic: boolean } {
-  const t = e.event_type;
-  if (t === "campaign.breakthrough" || (t === "campaign.completed" && !e.payload?.stop_reason))
-    return { color: "var(--green)", emphatic: true };
-  if (t === "campaign.budget_exhausted" || t === "session.failed")
-    return { color: "var(--red)", emphatic: true };
-  if (t === "paper.ready") return { color: "var(--green)", emphatic: false };
-  return { color: "var(--text)", emphatic: false };
-}
-
-function MilestoneRow({ e, start }: { e: PropabEvent; start: string | null }) {
-  const m = milestoneMeta(e);
-  return (
-    <div
-      className="mb-[14px] flex items-center gap-[11px] rounded-[10px] px-[15px] py-[12px]"
-      style={{
-        border: `1px solid ${m.emphatic ? m.color : "var(--border)"}`,
-        background: m.emphatic ? "var(--chip)" : "transparent",
-      }}
-    >
-      <StatusDot color={m.color} size={9} />
-      <span className="flex-1 text-[13px] font-semibold leading-none text-ink">
-        {eventLabel(e)}
-      </span>
-      <span className="font-mono text-[10.5px] text-ink-4">{fmtOffset(start, e.timestamp)}</span>
-    </div>
-  );
-}
-
 // ── The stream ───────────────────────────────────────────────────────────────
+// Standalone milestone events are dispatched through the special-event card
+// registry (EventCards) — a breakthrough, a confirmed finding, a paper, and the
+// baseline each get a purpose-built card; everything else falls back to a plain
+// milestone row.
 
 export default function NarrativeStream({
   narrative,
   start,
   now,
   live,
+  discovery = null,
+  campaignId,
 }: {
   narrative: NarrativeItem[];
   start: string | null;
   now: number;
   live: { active: boolean; label?: string } | null;
+  discovery?: DiscoverySummary | null;
+  campaignId?: string;
 }) {
   // Index of the last round item — that one is live-expanded by default.
   let lastRoundIdx = -1;
@@ -253,7 +231,13 @@ export default function NarrativeStream({
 
       {narrative.map((it, i) =>
         it.kind === "milestone" ? (
-          <MilestoneRow key={it.event.event_id} e={it.event} start={start} />
+          <EventCard
+            key={it.event.event_id}
+            e={it.event}
+            start={start}
+            discovery={discovery}
+            campaignId={campaignId}
+          />
         ) : (
           <RoundGroup
             key={it.round.key}
