@@ -48,7 +48,10 @@ export default function Campaign() {
 
   const model = useMemo(() => buildCampaignModel(events), [events]);
   const meter = useMemo(() => breakthroughMeter(campaign?.summary), [campaign?.summary]);
-  const discovery = useMemo(() => discoverySummary(c, campaign?.summary), [c, campaign?.summary]);
+  const discovery = useMemo(
+    () => discoverySummary(c, campaign?.summary, events),
+    [c, campaign?.summary, events],
+  );
   const active = sv.active && connected;
   const now = useNow(active);
 

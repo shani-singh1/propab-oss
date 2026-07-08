@@ -113,6 +113,7 @@ const MILESTONE_STANDALONE = new Set<string>([
   "campaign.baseline_measured",
   "campaign.breakthrough",
   "synthesis.breakthrough",
+  "finding.certified",
   "campaign.budget_exhausted",
   "campaign.completed",
   "session.completed",
@@ -127,6 +128,16 @@ function shortId(id: string | null | undefined): string {
 
 function isErr(t: string): boolean {
   return t.endsWith(".error") || t.endsWith(".timeout") || t.endsWith(".failed");
+}
+
+// Authoritative round from an event payload — an integer only. Mirrors the
+// backend `_round_of` contract: a bool is not a round, and a stringified number
+// is rejected (we only trust the first-class int the worker events now carry).
+function payloadRound(payload: unknown): number | null {
+  if (!payload || typeof payload !== "object") return null;
+  const v = (payload as Record<string, unknown>).round;
+  if (typeof v === "number" && Number.isInteger(v) && !Number.isNaN(v)) return v;
+  return null;
 }
 
 // ── Workers ──────────────────────────────────────────────────────────────────
@@ -174,6 +185,14 @@ function buildWorkers(events: PropabEvent[]): Map<string, Worker> {
 
     if (typeof p.text === "string" && p.text && !w.text) w.text = p.text;
     if (isErr(t)) w.errors += 1;
+
+    // Authoritative round: worker agent.* / agent.progress events now carry a
+    // first-class `round`. Trust the first one seen (a worker belongs to one
+    // round); buildRounds respects this over positional bucketing.
+    if (w.round == null) {
+      const r = payloadRound(p);
+      if (r != null) w.round = r;
+    }
 
     switch (t) {
       case "agent.started":
@@ -248,11 +267,18 @@ function stepLabel(e: PropabEvent): string {
 function buildInFlight(events: PropabEvent[], workers: Map<string, Worker>): InFlightTask[] {
   const openCode = new Map<string, PropabEvent>();
   const openTool = new Map<string, PropabEvent>();
-  // llm prompts pair FIFO per (source|hypothesis) context
+  // Prompts pair with their response by the authoritative `call_id` when present
+  // (exact, no ordering assumptions); otherwise fall back to FIFO per
+  // (source|hypothesis) context for older streams that don't carry one.
+  const openLlmById = new Map<string, PropabEvent>();
   const openLlm = new Map<string, PropabEvent[]>();
   const runningWorkers = new Set<string>();
 
   const llmKey = (e: PropabEvent) => `${e.source}|${e.hypothesis_id ?? "root"}`;
+  const callId = (e: PropabEvent): string | null => {
+    const v = e.payload?.call_id;
+    return typeof v === "string" && v ? v : null;
+  };
 
   for (const e of events) {
     const t = e.event_type;
@@ -283,14 +309,24 @@ function buildInFlight(events: PropabEvent[], workers: Map<string, Worker>): InF
         openTool.delete(e.step + "|" + (e.payload?.tool ?? ""));
         break;
       case "llm.prompt": {
-        const k = llmKey(e);
-        (openLlm.get(k) ?? openLlm.set(k, []).get(k)!).push(e);
+        const cid = callId(e);
+        if (cid) {
+          openLlmById.set(cid, e);
+        } else {
+          const k = llmKey(e);
+          (openLlm.get(k) ?? openLlm.set(k, []).get(k)!).push(e);
+        }
         break;
       }
       case "llm.response":
       case "llm.parse_error": {
-        const k = llmKey(e);
-        openLlm.get(k)?.shift();
+        const cid = callId(e);
+        if (cid) {
+          openLlmById.delete(cid);
+        } else {
+          const k = llmKey(e);
+          openLlm.get(k)?.shift();
+        }
         break;
       }
     }
@@ -343,22 +379,22 @@ function buildInFlight(events: PropabEvent[], workers: Map<string, Worker>): InF
     });
   }
 
-  for (const arr of openLlm.values()) {
-    for (const e of arr) {
-      const purpose = e.payload?.purpose ?? "call";
-      tasks.push({
-        id: `llm:${e.event_id}`,
-        kind: "llm",
-        title: `LLM · ${String(purpose).replace(/_/g, " ")}`,
-        detail: e.payload?.model ? String(e.payload.model) : null,
-        hypothesisId: e.hypothesis_id,
-        shortId: e.hypothesis_id ? shortId(e.hypothesis_id) : null,
-        source: e.source,
-        startedAt: e.timestamp,
-        event: e,
-      });
-    }
-  }
+  const pushLlm = (e: PropabEvent) => {
+    const purpose = e.payload?.purpose ?? "call";
+    tasks.push({
+      id: `llm:${e.event_id}`,
+      kind: "llm",
+      title: `LLM · ${String(purpose).replace(/_/g, " ")}`,
+      detail: e.payload?.model ? String(e.payload.model) : null,
+      hypothesisId: e.hypothesis_id,
+      shortId: e.hypothesis_id ? shortId(e.hypothesis_id) : null,
+      source: e.source,
+      startedAt: e.timestamp,
+      event: e,
+    });
+  };
+  for (const e of openLlmById.values()) pushLlm(e);
+  for (const arr of openLlm.values()) for (const e of arr) pushLlm(e);
 
   // Most recently started first.
   tasks.sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || ""));
@@ -434,13 +470,25 @@ function buildRounds(events: PropabEvent[], workers: Map<string, Worker>): {
   }
   pushCurrent();
 
-  // Attribute workers to rounds by membership of their events.
+  // Attribute workers to rounds. Prefer the authoritative `round` the worker's
+  // events now carry (set in buildWorkers); fall back to positional membership
+  // when it's absent (older streams / trimmed history).
   const roundOfEvent = new Map<string, number>();
   rounds.forEach((r, i) => r.events.forEach((e) => roundOfEvent.set(e.event_id, i)));
+  const realByNumber = new Map<number, number>();
+  rounds.forEach((r, i) => {
+    if (!r.isSetup) realByNumber.set(r.number, i);
+  });
   for (const w of workers.values()) {
-    const idx = w.events.map((e) => roundOfEvent.get(e.event_id)).find((x) => x != null);
+    let idx: number | undefined;
+    if (w.round != null && realByNumber.has(w.round)) {
+      idx = realByNumber.get(w.round);
+    } else {
+      idx = w.events.map((e) => roundOfEvent.get(e.event_id)).find((x) => x != null);
+    }
     if (idx != null) {
-      w.round = rounds[idx].isSetup ? null : rounds[idx].number;
+      // Only overwrite the display round when it wasn't authoritatively set.
+      if (w.round == null) w.round = rounds[idx].isSetup ? null : rounds[idx].number;
       rounds[idx].workers.push(w);
     }
   }
@@ -656,43 +704,105 @@ export interface DiscoverySummary {
   meter: BreakthroughMeter;
 }
 
-// Derive the discovery state the Hero + breakthrough card render from. Reads
-// `campaign.best_finding` defensively (its shape is domain-general and, per §3,
-// not yet standardized) and falls back to the summary metrics for the honest
-// "no result yet" state.
+// The latest first-class discovery events (design.md §3 item 6). `finding.*`
+// events carry authoritative witness/certification/metric data, so — when the
+// stream includes them — the Hero renders from real data instead of inferring
+// from the `best_finding` snapshot. Returns the freshest of each, or null.
+interface FindingOverlay {
+  best: number | null;
+  bestKnown: number | null;
+  metricName: string | null;
+  direction: "higher_is_better" | "lower_is_better" | null;
+  witness: unknown | null;
+  checks: Record<string, boolean> | null;
+  certified: boolean | null;
+  beatsBestKnown: boolean | null;
+}
+
+function findingOverlay(events: PropabEvent[] | null | undefined): FindingOverlay | null {
+  if (!events || !events.length) return null;
+  let bestUpdated: Record<string, unknown> | null = null;
+  let certified: Record<string, unknown> | null = null;
+  // Events arrive in chronological order; the LAST of each type is freshest.
+  for (const e of events) {
+    if (e.event_type === "finding.best_updated") bestUpdated = e.payload || {};
+    else if (e.event_type === "finding.certified") certified = e.payload || {};
+  }
+  if (!bestUpdated && !certified) return null;
+
+  const dirRaw = firstStr(bestUpdated?.direction, certified?.direction);
+  const vs = firstStr(certified?.vs_best_known);
+  const checks = boolRecord(certified?.checks) ?? boolRecord((bestUpdated?.certification as Record<string, unknown> | undefined)?.checks);
+  let cert: boolean | null = null;
+  if (typeof certified?.certified === "boolean") cert = certified.certified as boolean;
+  else if (checks) cert = Object.values(checks).every(Boolean);
+
+  return {
+    best: firstNum(bestUpdated?.best_metric, bestUpdated?.metric_value, certified?.metric_value),
+    bestKnown: firstNum(certified?.best_known_size, bestUpdated?.best_known, certified?.best_known),
+    metricName: firstStr(certified?.metric_name, bestUpdated?.metric_name),
+    direction: dirRaw === "lower_is_better" ? "lower_is_better" : dirRaw === "higher_is_better" ? "higher_is_better" : null,
+    witness: certified?.witness ?? bestUpdated?.witness ?? null,
+    checks,
+    certified: cert,
+    beatsBestKnown: vs != null ? vs === "exceeds_best_known" : null,
+  };
+}
+
+// Derive the discovery state the Hero + breakthrough card render from. Prefers
+// the authoritative `finding.best_updated` / `finding.certified` events when the
+// stream carries them (§3 item 6), else reads `campaign.best_finding` defensively
+// (domain-general, not yet standardized), else falls back to the summary metrics
+// for the honest "no result yet" state.
 export function discoverySummary(
   campaign: CampaignState["campaign"] | null | undefined,
   summary: MeterInput,
+  events?: PropabEvent[] | null,
 ): DiscoverySummary {
   const f = (campaign?.best_finding ?? null) as Record<string, unknown> | null;
   const crit = (campaign?.breakthrough_criteria ?? {}) as Record<string, unknown>;
-  const direction = crit.direction === "lower_is_better" ? "lower_is_better" : "higher_is_better";
+  const ov = findingOverlay(events);
+  const direction =
+    ov?.direction ?? (crit.direction === "lower_is_better" ? "lower_is_better" : "higher_is_better");
   const meter = breakthroughMeter(summary);
 
-  const metricName = firstStr(crit.metric_name, f?.metric_name);
+  const metricName = firstStr(ov?.metricName, crit.metric_name, f?.metric_name);
   const statement = firstStr(f?.statement, f?.description, f?.summary, f?.key_finding);
   const note = firstStr(f?.note);
   const best = firstNum(
+    ov?.best,
     f?.metric_value,
     metricName ? f?.[metricName] : undefined,
     f?.size,
     summary?.best_metric,
     campaign?.best_metric,
   );
-  const bestKnown = firstNum(f?.best_known, f?.published_best, f?.record, f?.prior_best);
-  const witness = f?.witness ?? f?.set ?? f?.certificate ?? null;
-  const checks = boolRecord(f?.checks);
+  const bestKnown = firstNum(
+    ov?.bestKnown,
+    f?.best_known,
+    f?.published_best,
+    f?.record,
+    f?.prior_best,
+  );
+  const witness = ov?.witness ?? f?.witness ?? f?.set ?? f?.certificate ?? null;
+  const checks = ov?.checks ?? boolRecord(f?.checks);
 
-  let certified: boolean | null = null;
-  if (typeof f?.certified === "boolean") certified = f.certified as boolean;
-  else if (checks) certified = Object.values(checks).every(Boolean);
+  let certified: boolean | null = ov?.certified ?? null;
+  if (certified == null) {
+    if (typeof f?.certified === "boolean") certified = f.certified as boolean;
+    else if (checks) certified = Object.values(checks).every(Boolean);
+  }
 
+  // The certified event's `vs_best_known` is authoritative when present; else
+  // compare the derived metric against best-known in the objective direction.
   const beatsBestKnown =
-    best != null && bestKnown != null
-      ? direction === "higher_is_better"
-        ? best > bestKnown
-        : best < bestKnown
-      : false;
+    ov?.beatsBestKnown != null
+      ? ov.beatsBestKnown
+      : best != null && bestKnown != null
+        ? direction === "higher_is_better"
+          ? best > bestKnown
+          : best < bestKnown
+        : false;
 
   // Record-chase "need": for an integer, higher-is-better target that isn't yet
   // beaten, the next value to reach is best-known + 1 (e.g. "found 16 · need 17").
@@ -707,7 +817,9 @@ export function discoverySummary(
     need = bestKnown + 1;
   }
 
-  const hasFinding = !!f && Object.keys(f).length > 0 && (statement != null || witness != null || firstNum(f?.metric_value, f?.size) != null);
+  const hasFinding =
+    ov != null ||
+    (!!f && Object.keys(f).length > 0 && (statement != null || witness != null || firstNum(f?.metric_value, f?.size) != null));
 
   return {
     hasFinding,
@@ -980,9 +1092,33 @@ export interface ComputeStats {
     remainingSec: number;
     pct: number;
   };
-  /** always false for now — flips true once §3 backend fields land. */
+  /** true once any llm.response carried a duration_ms (design.md §3.1). */
   hasLatency: boolean;
+  /** true once any llm.response reported token counts (design.md §3.2). */
   hasTokens: boolean;
+  /** per-call latency, derived from llm.response `duration_ms`. */
+  latency: {
+    /** number of responses that carried a duration. */
+    count: number;
+    p50Ms: number | null;
+    p95Ms: number | null;
+    maxMs: number | null;
+  };
+  /** token totals, derived from llm.response `tokens_in`/`tokens_out`. */
+  tokens: {
+    /** number of responses that reported token usage. */
+    count: number;
+    in: number;
+    out: number;
+    total: number;
+  };
+}
+
+// Nearest-rank percentile over an unsorted numeric sample (0 <= q <= 1).
+function percentile(sorted: number[], q: number): number | null {
+  if (!sorted.length) return null;
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(q * sorted.length) - 1));
+  return sorted[idx];
 }
 
 function topRows(counter: Map<string, number>, limit = 8): ComputeBreakdownRow[] {
@@ -1003,6 +1139,10 @@ export function computeStats(
   const byPurpose = new Map<string, number>();
   const byTool = new Map<string, number>();
   const byError = new Map<string, number>();
+  const durations: number[] = [];
+  let tokensIn = 0;
+  let tokensOut = 0;
+  let tokenCalls = 0;
 
   for (const e of events) {
     const t = e.event_type;
@@ -1011,6 +1151,17 @@ export function computeStats(
       llm += 1;
       const purpose = String(p.purpose ?? "other").replace(/_/g, " ");
       byPurpose.set(purpose, (byPurpose.get(purpose) ?? 0) + 1);
+    } else if (t === "llm.response") {
+      // Cost/latency now ride on the response (design.md §3.1–3.2).
+      const d = numOrNull(p.duration_ms);
+      if (d != null && d >= 0) durations.push(d);
+      const ti = numOrNull(p.tokens_in);
+      const to = numOrNull(p.tokens_out);
+      if (ti != null || to != null) {
+        tokensIn += ti ?? 0;
+        tokensOut += to ?? 0;
+        tokenCalls += 1;
+      }
     } else if (t === "tool.called") {
       tool += 1;
       const name = String(p.tool ?? "call");
@@ -1029,6 +1180,8 @@ export function computeStats(
   const totalSec = usedSec + remainingSec;
   const hasBudget = totalSec > 0;
 
+  const sortedDur = durations.slice().sort((a, b) => a - b);
+
   return {
     llm,
     tool,
@@ -1044,8 +1197,20 @@ export function computeStats(
       remainingSec,
       pct: hasBudget ? Math.max(0, Math.min(1, usedSec / totalSec)) : 0,
     },
-    hasLatency: false,
-    hasTokens: false,
+    hasLatency: sortedDur.length > 0,
+    hasTokens: tokenCalls > 0,
+    latency: {
+      count: sortedDur.length,
+      p50Ms: percentile(sortedDur, 0.5),
+      p95Ms: percentile(sortedDur, 0.95),
+      maxMs: sortedDur.length ? sortedDur[sortedDur.length - 1] : null,
+    },
+    tokens: {
+      count: tokenCalls,
+      in: tokensIn,
+      out: tokensOut,
+      total: tokensIn + tokensOut,
+    },
   };
 }
 
