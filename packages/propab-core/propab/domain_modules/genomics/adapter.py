@@ -209,6 +209,12 @@ class GenomicsExperimentSpec:
             else:
                 features = ["expression_variance", "mean_expression"]
         target = "tissue_specificity_tau" if "tau" in text else "mean_expression"
+        # Never let the target column leak in as its own predictor: with the target
+        # among the features the Ridge model reads off the answer and the
+        # leave-one-tissue-out R² is trivially 1.0 regardless of the data.
+        features = [f for f in features if f != target]
+        if not features:
+            features = [f for f in KNOWN_FEATURES if f != target][:2]
         return cls(feature_subset=features[:4], target_column=target)
 
 

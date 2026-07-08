@@ -1,9 +1,9 @@
 """Verifier-honesty tests for the genomics domain.
 
-These assert the leave-one-tissue-out (LOFO) + tissue-label-shuffle-null
+These assert the leave-one-tissue-out (LOFO) + target-label-shuffle-null
 machinery is a real honesty gate:
   1. A shuffled-label frame (broken tissue signal) must NOT be confirmed.
-  2. The tissue-label-shuffle null must reject a pure-noise signal.
+  2. The target-label-shuffle null must reject a pure-noise signal.
   3. The confirm path fires only when the result carries the LOFO null stats the
      gate reads; absent those stats the gate must refute.
 
@@ -107,15 +107,19 @@ def test_shuffled_labels_are_not_confirmed(monkeypatch):
     assert result["verified_true_steps"] == 0
 
 
-def test_tissue_label_shuffle_null_rejects_pure_noise():
-    """Random features vs a random target: observed R2 must not beat the null."""
+def test_target_label_shuffle_null_rejects_pure_noise():
+    """Random features vs a random target: observed R2 must not beat the null.
+
+    The null permutes the target labels (``y``) across genes, so a signal that
+    is really absent cannot beat it.
+    """
     rng = np.random.default_rng(11)
     n = 400
     X = rng.normal(size=(n, 3))
     y = rng.normal(size=n)
     tissues = np.array([TISSUES[i % len(TISSUES)] for i in range(n)])
-    observed, nulls = GV._tissue_label_shuffle_null(X, y, tissues, n_perm=40)
-    p = float(np.mean([1 for v in nulls if v >= observed]))
+    observed, nulls = GV._target_label_shuffle_null(X, y, tissues, n_perm=40)
+    p = float(np.mean(np.asarray(nulls) >= observed))
     assert p >= 0.05
     assert observed <= float(np.percentile(nulls, 95)) + 1e-9
 

@@ -33,20 +33,29 @@ def _leave_one_tissue_out_r2(
     return float(np.mean(scores)) if scores else 0.0
 
 
-def _tissue_label_shuffle_null(
+def _target_label_shuffle_null(
     X: np.ndarray,
     y: np.ndarray,
     tissues: np.ndarray,
     *,
     n_perm: int = 50,
 ) -> tuple[float, list[float]]:
+    """Permutation null that shuffles the TARGET labels (``y``) across genes.
+
+    The observed statistic is the leave-one-tissue-out R² of X→y. To ask whether
+    that predictive relationship is real we must break it — permuting ``y``
+    destroys the X→y correspondence while preserving the LOFO-by-tissue split
+    structure. Shuffling ``tissues`` instead (the old behaviour) only re-randomised
+    the train/test split and left X→y fully intact, so the null R² always matched
+    the observed value and the test had no statistical power.
+    """
     observed = _leave_one_tissue_out_r2(X, y, tissues)
     nulls: list[float] = []
     rng = np.random.default_rng(42)
     for _ in range(n_perm):
-        shuffled = tissues.copy()
-        rng.shuffle(shuffled)
-        nulls.append(_leave_one_tissue_out_r2(X, y, shuffled))
+        y_shuffled = y.copy()
+        rng.shuffle(y_shuffled)
+        nulls.append(_leave_one_tissue_out_r2(X, y_shuffled, tissues))
     return observed, nulls
 
 
@@ -55,7 +64,9 @@ def run_genomics_experiment(spec: GenomicsExperimentSpec) -> dict[str, Any]:
     pivot = raw.pivot_table(index="gene_id", columns="tissue", values="expression", aggfunc="mean")
     dominant = pivot.idxmax(axis=1)
     gene_df = raw.groupby("gene_id", as_index=False).first()
-    feat_cols = [c for c in spec.feature_subset if c in gene_df.columns]
+    # Defence in depth against target leakage (see GenomicsExperimentSpec): the
+    # target must never also be a predictor or LOFO R² is trivially 1.0.
+    feat_cols = [c for c in spec.feature_subset if c in gene_df.columns and c != spec.target_column]
     if not feat_cols:
         raise ValueError(f"No usable genomics features: {spec.feature_subset}")
     if spec.target_column not in gene_df.columns:
@@ -66,7 +77,7 @@ def run_genomics_experiment(spec: GenomicsExperimentSpec) -> dict[str, Any]:
     tissues = gene_df["gene_id"].map(dominant).fillna("Unknown").astype(str).to_numpy()
     X = gene_df[feat_cols].to_numpy(dtype=float)
     y = gene_df[spec.target_column].to_numpy(dtype=float)
-    lofo_r2, nulls = _tissue_label_shuffle_null(X, y, tissues)
+    lofo_r2, nulls = _target_label_shuffle_null(X, y, tissues)
     label_shuffle_p95 = float(np.percentile(nulls, 95)) if nulls else 1.0
     label_shuffle_null_p = float(np.mean(np.asarray(nulls) >= lofo_r2)) if nulls else 1.0
     return {

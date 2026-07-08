@@ -82,7 +82,7 @@ class GenomicsPlugin(DomainPlugin):
             "min_confidence": 0.85,
             "requires_holdout": True,
             "holdout_type": "leave_tissue_out",
-            "null_test": "tissue_label_shuffle",
+            "null_test": "target_label_shuffle",
             "verification_type": "statistical",
         }
 
@@ -91,8 +91,9 @@ class GenomicsPlugin(DomainPlugin):
 
         The verifier measures a leave-one-tissue-out R² (``lofo_r2`` in
         ``genomics/verifier.py``): how well a cross-tissue expression relationship
-        survives holding out an entire tissue, gated by a tissue-label-shuffle
-        null. That is statistical holdout evidence, not MLP training.
+        survives holding out an entire tissue, gated by a target-label-shuffle
+        null (permuting ``y`` across genes). That is statistical holdout evidence,
+        not MLP training.
 
         ``is_ml=False`` is load-bearing: without it core would see the default
         ``val_accuracy`` breakthrough metric (or a "regression"-shaped question)
