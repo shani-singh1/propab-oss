@@ -84,29 +84,49 @@ export function useVirtual({
           dirty = true;
         }
       }
-      if (dirty) setMeasured((prev) => ({ ...prev, ...next }));
+      // Only trigger a state update when a height ACTUALLY changed — otherwise the
+      // new object identity re-renders → re-attaches refs → re-observes → the RO
+      // fires again, an infinite loop. Returning `prev` unchanged lets React bail.
+      if (dirty)
+        setMeasured((prev) => {
+          let changed = false;
+          for (const k in next) {
+            if (prev[Number(k)] !== next[Number(k)]) {
+              changed = true;
+              break;
+            }
+          }
+          return changed ? { ...prev, ...next } : prev;
+        });
     });
     roRef.current = ro;
     return () => ro.disconnect();
   }, []);
 
-  const measureRefFor = useCallback(
-    (index: number) => (el: HTMLElement | null) => {
-      const prev = elsRef.current.get(index);
-      if (prev && roRef.current) roRef.current.unobserve(prev);
-      if (el) {
-        el.dataset.vindex = String(index);
-        elsRef.current.set(index, el);
-        roRef.current?.observe(el);
-        const h = Math.round(el.getBoundingClientRect().height);
-        if (h > 0) setMeasured((p) => (p[index] === h ? p : { ...p, [index]: h }));
-      } else {
-        if (prev && roRef.current) roRef.current.unobserve(prev);
-        elsRef.current.delete(index);
-      }
-    },
-    [],
-  );
+  // A STABLE ref callback per index (cached), so React doesn't treat it as a new
+  // ref every render and detach/reattach (which would re-observe and re-loop).
+  const refCache = useRef<Map<number, (el: HTMLElement | null) => void>>(new Map());
+  const measureRefFor = useCallback((index: number) => {
+    const cache = refCache.current;
+    let cb = cache.get(index);
+    if (!cb) {
+      cb = (el: HTMLElement | null) => {
+        if (el) {
+          el.dataset.vindex = String(index);
+          elsRef.current.set(index, el);
+          roRef.current?.observe(el);
+          const h = Math.round(el.getBoundingClientRect().height);
+          if (h > 0) setMeasured((p) => (p[index] === h ? p : { ...p, [index]: h }));
+        } else {
+          const prev = elsRef.current.get(index);
+          if (prev && roRef.current) roRef.current.unobserve(prev);
+          elsRef.current.delete(index);
+        }
+      };
+      cache.set(index, cb);
+    }
+    return cb;
+  }, []);
 
   // Cumulative offsets over the whole list (measured height or estimate).
   const offsets = useMemo(() => {
