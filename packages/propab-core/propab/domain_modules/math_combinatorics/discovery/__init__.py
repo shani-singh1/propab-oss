@@ -45,6 +45,15 @@ from propab.domain_modules.math_combinatorics.discovery.cp_sat_finder import (
     max_b3_cpsat,
     ortools_available,
 )
+from propab.domain_modules.math_combinatorics.discovery.modular_golomb import (
+    A004135_TERMS,
+    A004136_TERMS,
+    attempt_open_term,
+    certify_modular_ruler,
+    decide_modular_ruler,
+    is_modular_sidon,
+    min_modular_ruler,
+)
 
 __all__ = [
     "is_B3",
@@ -66,4 +75,12 @@ __all__ = [
     "max_b3_cpsat",
     "attempt_a7_size17",
     "ortools_available",
+    # Modular / cyclic Golomb rulers (OEIS A004135 / A004136): CP-SAT-friendly frontier.
+    "decide_modular_ruler",
+    "min_modular_ruler",
+    "is_modular_sidon",
+    "certify_modular_ruler",
+    "attempt_open_term",
+    "A004135_TERMS",
+    "A004136_TERMS",
 ]
