@@ -74,6 +74,54 @@ def test_think_prompt_template_has_no_unescaped_braces():
     assert not bad, f"unescaped braces in the think prompt parsed as format fields: {bad}"
 
 
+def test_tools_summary_marks_verify_and_significance():
+    # The catalog must flag BOTH evidence paths so a deterministic agent can find a
+    # [VERIFY] certifier instead of being nudged into the [SIGNIFICANCE] (ML) path.
+    from services.worker.think_act import _tools_summary
+
+    specs = [
+        {"name": "statistical_significance", "significance_capable": True, "description": "p-value"},
+        {"name": "certify_witness", "verification_capable": True, "description": "certify a witness"},
+        {"name": "plain_tool", "description": "no flags"},
+    ]
+    out = _tools_summary(specs)
+    assert "statistical_significance [SIGNIFICANCE]:" in out
+    assert "certify_witness [VERIFY]:" in out
+    # A tool with neither flag carries no marker.
+    assert "plain_tool: no flags" in out
+
+
+def test_think_prompt_describes_both_evidence_paths():
+    # Regression: the prompt must offer the DETERMINISTIC (certified-witness) path, not
+    # only the statistical one, so a math agent does not manufacture a meaningless
+    # p-value. Guards against a silent revert to the ML-only wording.
+    from services.worker.think_act import _THINK_PROMPT_TMPL
+
+    t = _THINK_PROMPT_TMPL
+    assert "CERTIFIED WITNESS" in t
+    assert "[VERIFY]" in t
+    assert "DETERMINISTIC" in t and "STATISTICAL" in t
+    # It must explicitly warn off running significance on a deterministic claim.
+    assert "meaningless" in t.lower()
+    # The verification-status field must be present (else the code gate and prompt diverge).
+    assert "{verify_tool_ran}" in t
+
+
+def test_think_prompt_renders_with_all_fields():
+    # Smoke test: every {field} in the template has a value, so .format() never raises
+    # KeyError at runtime (the class of bug that once silently broke think-act). Build a
+    # dummy value for each parsed field and render.
+    import string
+
+    from services.worker.think_act import _THINK_PROMPT_TMPL
+
+    fields = {f for _, f, _, _ in string.Formatter().parse(_THINK_PROMPT_TMPL) if f}
+    dummy = {f: f"<{f}>" for f in fields}
+    rendered = _THINK_PROMPT_TMPL.format(**dummy)
+    assert "<verify_tool_ran>" in rendered
+    assert "<hypothesis_text>" in rendered
+
+
 def test_should_stop_at_max_steps():
     ctx = _make_ctx(steps_taken=10, max_steps=10)
     assert should_stop(ctx) is True

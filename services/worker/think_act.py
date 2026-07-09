@@ -187,12 +187,10 @@ Test methodology: {test_methodology}
 Results collected so far ({steps_taken} of max {max_steps} steps):
 {results_summary}
 
-Current significance status:
-  p_value: {p_value}
-  effect_size: {effect_size}
-  confidence_interval: {ci}
-  Significance gate passed: {gate_passed}
-  Has ANY significance-capable tool run yet: {sig_tool_ran}
+Current evidence status (the stop-gate accepts EITHER path — pick the one that fits the hypothesis):
+  [statistical path] p_value: {p_value}  effect_size: {effect_size}  confidence_interval: {ci}
+  [statistical path] significance gate passed: {gate_passed}  |  a significance tool ran: {sig_tool_ran}
+  [deterministic path] a verification/certifier tool ran: {verify_tool_ran}
 
 ═══════════════════════════════════════════════════════
 EXTRACTED NUMERIC VALUES from your prior results.
@@ -220,14 +218,29 @@ Available tools (name → description):
 {tools_summary}
 
 What should you do next? Rules:
-1. If the significance gate is NOT passed yet and steps_taken >= {min_steps}, you MUST run one of
-   these significance tools before stopping: statistical_significance, bootstrap_confidence,
-   literature_baseline_compare. Do not stop without statistical evidence.
-2. If you have real val_losses or metric lists above, pass them to statistical_significance NOW.
-3. If you have passing significance AND sufficient corroboration (>= {min_steps} steps), you MAY stop.
+1. MATCH THE EVIDENCE TO THE HYPOTHESIS. Before you may stop (once steps_taken >= {min_steps}) the
+   run needs verification-grade evidence, and there are TWO valid kinds — choose the one the
+   hypothesis actually calls for:
+   • DETERMINISTIC / exactly-checkable claim (combinatorics, number theory, a construction, a
+     search, a proof — anything an exact check settles): the evidence is a CERTIFIED WITNESS, NOT a
+     p-value. Emit the concrete object your code found and pass it to a certifier / verification
+     tool (marked [VERIFY] in the catalog above) to re-check it independently. Do NOT run
+     statistical_significance on a deterministic claim — a p-value on an exact fact is meaningless.
+   • STATISTICAL / empirical claim (learning curves, metric comparisons, noisy measurements): the
+     evidence is a p-value + effect size. Run one of statistical_significance, bootstrap_confidence,
+     literature_baseline_compare on your REAL measurements.
+   Either kind satisfies the stop-gate; stopping with NEITHER is not allowed.
+2. (Statistical path) If you have real val_losses or metric lists above, pass them to
+   statistical_significance NOW — never a spec example.
+3. You MAY stop once you have verification-grade evidence for the RIGHT path (a certified witness
+   for a deterministic claim, OR passing significance for a statistical claim) AND sufficient
+   corroboration (>= {min_steps} steps).
 4. Do not repeat a tool you already ran unless with meaningfully different parameters.
-5. Good sequence: build_mlp → train_model → (train_model again with different config) →
-   statistical_significance(results_a=val_losses_A, results_b=val_losses_B) → stop
+5. Good sequences — follow the one that matches your hypothesis:
+   • Deterministic:  code (search/construct, print the witness) → [VERIFY] tool on that witness →
+     (iterate to a STRONGER witness, re-certify) → stop.
+   • Statistical:    build_mlp → train_model → (train_model again with a different config) →
+     statistical_significance(results_a=val_losses_A, results_b=val_losses_B) → stop
 6. action_type="code" is a first-class instrument: write COMPLETE, self-contained, executable
    Python to compute, search, simulate, or verify whatever the hypothesis requires. This is the
    primary way to attack computational/mathematical problems (combinatorics, number theory,
@@ -357,8 +370,12 @@ def _extract_json(text: str) -> dict | None:
 def _tools_summary(specs: list[dict]) -> str:
     lines = []
     for s in specs:
-        sig_flag = " [SIGNIFICANCE]" if s.get("significance_capable") else ""
-        lines.append(f"  {s['name']}{sig_flag}: {s.get('description', '')}")
+        flags = ""
+        if s.get("significance_capable"):
+            flags += " [SIGNIFICANCE]"
+        if s.get("verification_capable"):
+            flags += " [VERIFY]"
+        lines.append(f"  {s['name']}{flags}: {s.get('description', '')}")
     return "\n".join(lines)
 
 
@@ -546,6 +563,7 @@ async def decide_next_action(
         ci=sig.confidence_interval if sig.confidence_interval is not None else "not measured yet",
         gate_passed=sig.gate_passed,
         sig_tool_ran=any_significance_tool_ran(context.tool_names_run),
+        verify_tool_ran=any_verification_tool_ran(context.tool_names_run, specs),
         peer_summary=context.to_peer_summary(),
         tool_failures_block=_tool_failures_block(context),
         tools_summary=_tools_summary(specs),
