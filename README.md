@@ -73,28 +73,39 @@ graph invariants are stubs. The frontend is evolving separately (Agent 3).
 ## Quickstart
 
 **Requirements:** Docker + Docker Compose, and an LLM API key (OpenAI or Google
-Gemini). No GPU required.
+Gemini). No GPU required. New here? See the step-by-step
+[beta setup & troubleshooting guide](./docs/beta-setup.md).
 
 ```bash
 git clone https://github.com/shani-singh1/propab-oss.git
-cd propab-oss
-cp .env.example .env          # set OPENAI_API_KEY (or GOOGLE_API_KEY + LLM_PROVIDER)
+cd propab-oss                 # keep this dir name — the sandbox image default depends on it
+cp .env.example .env          # then set your LLM provider + key (see below)
 docker compose up
 ```
 
-This starts the full stack — `api`, `orchestrator`, `worker`, `frontend`, plus
-Postgres, Redis, Qdrant, MinIO — and runs database migrations automatically
-(the one-shot `migrate` service applies `alembic upgrade head`).
+In `.env`, set **one** provider:
+
+- **OpenAI** (matches defaults): `LLM_PROVIDER=openai`, `OPENAI_API_KEY=sk-...`
+- **Gemini**: `LLM_PROVIDER=gemini`, `LLM_MODEL=gemini-2.0-flash`,
+  `GOOGLE_API_KEY=AIza...`, and `EMBED_PROVIDER=google` (so embeddings reuse the
+  same key). Everything else has a working default.
+
+This starts the full stack — `api`, `orchestrator`, `worker`, `literature`,
+`frontend`, plus Postgres, Redis, Qdrant, MinIO — and runs database migrations
+automatically (the one-shot `migrate` service applies `alembic upgrade head`).
 
 - Dashboard → http://localhost:3000
-- API health → http://localhost:8000/health
+- API health → http://localhost:8000/health · API docs → http://localhost:8000/docs
+- Literature service → http://localhost:8020/health
 
-Launch a campaign from the dashboard, via the API ([docs](./docs/api_reference.md)), or:
+Launch a campaign from the dashboard, via the API ([docs](./docs/api_reference.md)), or
+with curl. `math_combinatorics` is the safest first run — pure computation, no
+dataset needed:
 
 ```bash
 curl -X POST http://localhost:8000/campaigns \
   -H 'Content-Type: application/json' \
-  -d '{"question": "Does the descriptor→dielectric relationship hold on held-out crystal systems? [domain_profile:materials]", "compute_budget_hours": 3.0}'
+  -d '{"question": "Which additive combinatorics constructions maximize Sidon density under greedy search? [domain_profile:math_combinatorics]", "compute_budget_hours": 1.0, "max_hypotheses": 40}'
 ```
 
 Production-style deploy (built images, no source mounts):
@@ -240,14 +251,14 @@ Defaults work for a local run.
 | Variable | Default | Purpose |
 |---|---|---|
 | `OPENAI_API_KEY` / `GOOGLE_API_KEY` | — | LLM + embedding calls (one required) |
-| `LLM_PROVIDER` | `openai` | `openai` · `anthropic` · `ollama` |
+| `LLM_PROVIDER` | `openai` | `openai` · `gemini` · `ollama` |
 | `LLM_MODEL` | `gpt-4o` | Model for orchestrator + agents |
 | `DATABASE_URL` | local Postgres | Async connection string |
 | `REDIS_URL` / `CELERY_BROKER_URL` | local Redis | Pub/sub + Celery broker |
 | `ORCHESTRATOR_URL` | — | If set, API delegates campaigns to the orchestrator; else in-process |
 | `ORCHESTRATOR_INTERNAL_TOKEN` | — | Shared secret for the internal campaign endpoint |
 | `QDRANT_URL` / `MINIO_ENDPOINT` | — | Vector search / object storage |
-| `SANDBOX_TIMEOUT_SEC` | `60` | Max CPU time for sandboxed code |
+| `SANDBOX_TIMEOUT_SEC` | `120` | Max CPU time for sandboxed code (profile-tuned) |
 | `LIFETIME_STORE_BACKEND` | `json` | `json` (tests) or `postgres` (production upserts) |
 | `PROPAB_DATA_DIR` | `./data` | Lifetime store, genomics cache, snapshots |
 
@@ -302,6 +313,7 @@ tests/                         pytest suite (530+)
 ## Documentation
 
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — services, campaign path, verification, domains, persistence
+- [docs/beta-setup.md](./docs/beta-setup.md) — clone-and-run beta setup + troubleshooting
 - [docs/adding_a_domain.md](./docs/adding_a_domain.md) — add a domain (genomics worked example)
 - [docs/api_reference.md](./docs/api_reference.md) — launch, monitor, resume campaigns
 - [docs/operator_runbook.md](./docs/operator_runbook.md) — production troubleshooting
