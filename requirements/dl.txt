@@ -1,3 +1,6 @@
 -r base.txt
 torch>=2.2.0
 torchvision>=0.17.0
+# Biology tooling (worker/sandbox only) — see docs/architecture/domain-capabilities.md Batch B0
+biopython>=1.84
+statsmodels>=0.14.2
