@@ -57,14 +57,19 @@ def test_normalize_and_match_audience() -> None:
     assert not audience_matches("orchestrator", "worker")
 
 
-def test_existing_tools_default_to_both_audience() -> None:
+def test_unscoped_tools_default_to_both_audience() -> None:
     reg = ToolRegistry()
     all_names = {s["name"] for s in reg.get_all_specs()}
     orch = {s["name"] for s in reg.get_for("orchestrator")}
     worker = {s["name"] for s in reg.get_for("worker")}
-    # Nothing is restricted yet -> every tool defaults to "both" and is visible to all.
-    assert orch == all_names
+    # S1 added a few worker-scoped trusted primitives; everything else defaults to
+    # "both". A worker sees {worker} + {both} == everything; the orchestrator sees
+    # everything EXCEPT the worker-only tools.
+    worker_only = {e.spec["name"] for e in reg._registry.values() if e.audience == "worker"}
     assert worker == all_names
+    assert orch == all_names - worker_only
+    # The S1 primitives are worker-scoped (workers call them; orchestrator does not).
+    assert {"extremal_set_search", "certify_b3_record", "label_shuffle_null"} <= worker_only
     # The literature tool stays "both" (orchestrator literature stream is separate).
     assert "literature_baseline_compare" in orch
     assert "literature_baseline_compare" in worker
