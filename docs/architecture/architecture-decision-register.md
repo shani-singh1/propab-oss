@@ -35,7 +35,7 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 | services/worker/sub_agent_loop.py | 3.0k | 🟡 (verdict/confidence/routing/return read; full ⬜) |
 | services/worker (think_act/permutation_null/sandbox/domain_router/failure_classify/sandbox_code_rewrite/peer_findings) | ~1.5k | 🟡 (think_act/sandbox/domain_router/peer_findings/significance/permutation_null read → §L; failure_classify/sandbox_code_rewrite ⬜) |
 | services/literature (65 files) | 9.2k | ✅ design surface → §P (KEEP; own Gemini egress §P2) |
-| core: hypothesis_tree | 0.9k | 🟡 |
+| core: hypothesis_tree | 0.9k | ✅ (§G1; from_dict rehydrates both dedup sets — resume-dedup bug fixed+verified; frontier_score policy to move in C3) |
 | core: verdict_pipeline/significance | 0.4k | ✅ (§E, §K) |
 | core: artifact_verification | 0.8k | ✅ (§O1) |
 | core: campaign_synthesis | 1.0k | 🟡 |
@@ -193,7 +193,8 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 
 ## G. LLD — Core data structures & contracts
 
-### G1. `HypothesisTree` (926 LOC) as the campaign state object — KEEP-WATCH
+### G1. `HypothesisTree` (926 LOC) as the campaign state object — KEEP-WATCH (verified)
+> **Verified (deep-read):** `from_dict` rehydrates `_used_confirmed_claim_keys` AND `_used_evidence_hashes` on resume (the earlier resume-dedup no-op bug is fixed and present), and `register_confirmed_claim` is the single dedup gate. State/serialization is sound; the only issue is that it also *encodes policy* (`frontier_score`, downgrade logic in `update_node`) that moves to the orchestrator in C3.
 - **What:** nodes dict + frontier + confirmed set + scoring + serialization.
 - **Why:** one structure for the search tree.
 - **Assessment/tradeoff:** central and reasonable, but it also *encodes policy* (frontier_score, downgrade logic in `update_node`) that should move to the orchestrator's reasoning. Keep the structure; extract the policy.
