@@ -7,14 +7,14 @@ from __future__ import annotations
 import propab.tools.mathematics.oeis_lookup as mod
 from propab.tools.mathematics.oeis_lookup import oeis_lookup
 
-_CANNED = {
-    "results": [
-        {"number": 79, "name": "Powers of 2", "data": "1,2,4,8,16,32,64",
-         "offset": "0,2", "keyword": "nonn,easy"},
-        {"number": 3022, "name": "Length of shortest (or optimal) Golomb ruler with n marks.",
-         "data": "0,1,3,6,11,17,25,34,44,55,72,85,106,127", "offset": "1,3", "keyword": "nonn,hard,more"},
-    ]
-}
+# The real OEIS fmt=json API returns a JSON LIST of sequence dicts directly (verified
+# live against oeis.org) — NOT a {"results": [...]} wrapper. The mock must match reality.
+_CANNED = [
+    {"number": 79, "name": "Powers of 2", "data": "1,2,4,8,16,32,64",
+     "offset": "0,2", "keyword": "nonn,easy"},
+    {"number": 3022, "name": "Length of shortest (or optimal) Golomb ruler with n marks.",
+     "data": "0,1,3,6,11,17,25,34,44,55,72,85,106,127", "offset": "1,3", "keyword": "nonn,hard,more"},
+]
 
 
 def test_parses_real_response(monkeypatch):
@@ -36,7 +36,7 @@ def test_network_failure_degrades_not_fabricates(monkeypatch):
 
 
 def test_no_match_is_not_found(monkeypatch):
-    monkeypatch.setattr(mod, "_fetch_oeis", lambda q, t: {"results": None})
+    monkeypatch.setattr(mod, "_fetch_oeis", lambda q, t: [])  # OEIS returns [] for no match
     r = oeis_lookup(terms=[7, 13, 999999])
     assert r.success and r.output["status"] == "not_found"
 

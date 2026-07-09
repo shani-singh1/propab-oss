@@ -99,7 +99,14 @@ def oeis_lookup(terms=None, anum=None, max_results=3, timeout_sec=6.0):
             "note": f"OEIS lookup unavailable ({type(exc).__name__}); proceed without a reference or retry.",
         })
 
-    raw = (data or {}).get("results") or []
+    # The OEIS fmt=json API returns a JSON LIST of sequence dicts directly; older/other
+    # shapes wrap them in {"results": [...]}. Handle both, defensively.
+    if isinstance(data, list):
+        raw = data
+    elif isinstance(data, dict):
+        raw = data.get("results") or []
+    else:
+        raw = []
     if not raw:
         return ToolResult(success=True, output={
             "status": "not_found", "query": query, "results": [],
