@@ -245,9 +245,14 @@ What should you do next? Rules:
    it. Only set verified=true when the check is exact and exhaustive over the claimed range.
 7. Maximum code steps allowed for this hypothesis: {max_code_steps}.
    Code steps already used: {used_code_steps}.
-8. Prefer an exact-fit tool over code when one exists. If you are training/evaluating/comparing
-   ML models, use tools (train_model, run_experiment_grid, compare_optimizers); reserve code for
-   computations the tools do not cover.
+8. A result you compute in your OWN code is SELF-REPORTED and CANNOT be a trusted finding (the
+   honesty gate keeps it inconclusive no matter what your code prints for "verified"). To make a
+   computation trustworthy you MUST get an INDEPENDENT check: (a) use an audited tool that
+   re-verifies its own result (constraint_solve for linear/AllDifferent optimization;
+   extremal_set_search only for B_3 in {0,1}^n; train_model/run_experiment_grid for ML), OR
+   (b) when you must write code (the search a tool can't express), have it emit a concrete WITNESS
+   (the actual set/object/counterexample) and then call a certifier/verification tool to re-check
+   that witness independently. Never rely on your own code's "verified" flag as proof.
 
 SANDBOX ENVIRONMENT (read before writing any action_type="code"):
 • Available: Python 3.11 with numpy, scipy, torch, matplotlib. CPU only (no GPU).

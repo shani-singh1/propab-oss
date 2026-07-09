@@ -51,10 +51,16 @@ TOOL_SPEC = {
     # is a re-verified witness, not a p-value. Satisfies the worker stop-gate.
     "verification_capable": True,
     "description": (
-        "General constraint-programming / SAT solver over a DECLARED model (data, not "
-        "code). Declare integer/boolean variables with domains, linear constraints "
-        "(coeffs, op in {<=,>=,==}, rhs), optional AllDifferent groups, and an optional "
-        "linear objective (minimize/maximize); the tool builds an OR-tools CP-SAT model, "
+        "General exact solver whose result is INDEPENDENTLY re-verified (a trustworthy "
+        "finding, unlike hand-written code). Use it when the problem can be expressed as "
+        "LINEAR constraints + AllDifferent over integer/boolean variables — e.g. max "
+        "independent set, optimal packing/assignment/scheduling, exact feasibility. NOTE: "
+        "constraints whose feasibility depends on products/all-distinct-SUMS (e.g. a Sidon "
+        "set) are NOT directly expressible here — prefer a dedicated certifier for those. "
+        "Declare a DECLARED model (data, not code): integer/boolean variables with domains, "
+        "linear constraints (coeffs, op in {<=,>=,==}, rhs), optional AllDifferent groups, "
+        "and an optional linear objective (minimize/maximize); the tool builds an OR-tools "
+        "CP-SAT model, "
         "solves within a time+worker budget, and returns outcome in "
         "{sat, optimal, unsat, unknown} with the variable assignment for sat/optimal. "
         "Every returned assignment is independently re-checked against the declared "

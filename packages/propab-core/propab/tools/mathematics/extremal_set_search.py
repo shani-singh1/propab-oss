@@ -27,13 +27,13 @@ TOOL_SPEC = {
     # p-value. Satisfies the worker stop-gate (see significance.any_verification_tool_ran).
     "verification_capable": True,
     "description": (
-        "Search for a maximum-size extremal set of a combinatorial object and "
-        "independently CERTIFY the result. object='b3_binary_cube' searches for the "
-        "largest B_3 (threefold-sum-distinct) set in {0,1}^n (OEIS A396704) via the "
+        "SPECIALIZED — ONLY for B_3 (threefold-sum-distinct) sets in the BINARY CUBE "
+        "{0,1}^n (OEIS A396704). NOT for general Sidon sets, integer sets in {1..N}, "
+        "cap sets, or any other extremal object — for those use constraint_solve. "
+        "object='b3_binary_cube' searches for the largest B_3 set in {0,1}^n via the "
         "trusted finder, then re-verifies the witness with the independent "
-        "certify_b3_record. Returns the set, its certified size, whether it beats "
-        "the best-known, and the best-known/target for comparison. Never self-reports "
-        "a record — certification is the sole gate."
+        "certify_b3_record. Returns the certified size, whether it beats the best-known, "
+        "and the target. Never self-reports a record — certification is the sole gate."
     ),
     "params": {
         "object": {"type": "str", "required": False, "default": "b3_binary_cube",
