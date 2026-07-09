@@ -1832,6 +1832,13 @@ async def run_sub_agent_async(payload: dict) -> dict:
         from propab.domain_modules.registry import resolve_domain_plugin
 
         _domain_plugin = resolve_domain_plugin(question=question, payload=payload)
+        # General-agent mode (S0): dissolve the plugin path — skip every plugin /
+        # dedicated verification bypass so EVERY hypothesis falls through to the
+        # general think-act experimenter below (with the full tool catalog + the
+        # trusted tools). Opt-in per deployment or per dispatch; default off.
+        _general_agent_mode = bool(getattr(settings, "worker_general_agent_mode", False)) or bool(
+            payload.get("general_agent_mode")
+        )
         _worker_verification_paths = {
             "materials": _materials_verification_path,
             "mandrake": _mandrake_verification_path,
@@ -1843,7 +1850,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
         )
         if _worker_path is None and _domain_plugin is not None:
             _worker_path = _plugin_verification_path
-        if _worker_path is not None:
+        if _worker_path is not None and not _general_agent_mode:
             if _worker_path is _plugin_verification_path:
                 result = await _worker_path(
                     payload=payload,
@@ -1977,6 +1984,9 @@ async def run_sub_agent_async(payload: dict) -> dict:
 
         hyp_text = str(hypothesis.get("text", ""))
         plan_source = (settings.sub_agent_plan_source or "heuristic").strip().lower()
+        if _general_agent_mode:
+            # Every hypothesis runs the adaptive think-act experimenter.
+            plan_source = "llm"
         payload_domain = str(payload.get("domain") or "").strip()
         if plan_source == "heuristic" and payload_domain:
             domain = coerce_routed_domain(payload_domain)
@@ -2006,10 +2016,16 @@ async def run_sub_agent_async(payload: dict) -> dict:
 
         # Materials/mandrake campaigns take their dedicated verification path above
         # and return before reaching here; every remaining campaign uses the routed
-        # domain's tool cluster (plus significance-capable tools).
-        specs = registry.get_cluster_with_significance(domain)
-        if not specs:
-            specs = registry.get_cluster_with_significance("general_computation")
+        # domain's tool cluster (plus significance-capable tools). In general-agent
+        # mode there is NO domain clustering — the worker gets the full worker-audience
+        # catalog and selects tools by description (the trusted certifier / null tools
+        # included), which is the endgame of dissolving the plugins.
+        if _general_agent_mode:
+            specs = registry.get_for("worker")
+        else:
+            specs = registry.get_cluster_with_significance(domain)
+            if not specs:
+                specs = registry.get_cluster_with_significance("general_computation")
         available_tools = [str(s["name"]) for s in specs]
         resource_limits = {
             "memory_mb": settings.sandbox_memory_mb,
@@ -2836,7 +2852,7 @@ async def run_sub_agent_async(payload: dict) -> dict:
         # plugin's confirmation_criteria() (ownership contract), falling back to the
         # global setting when no scientific-domain plugin owns this campaign.
         _base_metric_steps = int(getattr(settings, "min_metric_steps_for_confirm", 2))
-        if _domain_plugin is not None:
+        if _domain_plugin is not None and not _general_agent_mode:
             try:
                 _crit = _domain_plugin.confirmation_criteria()
                 _base_metric_steps = int(_crit.get("min_metric_steps_for_confirm") or _base_metric_steps)

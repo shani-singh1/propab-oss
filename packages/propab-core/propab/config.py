@@ -179,6 +179,16 @@ class Settings(BaseSettings):
     # Tier-2 synthesis), so the change is non-breaking and opt-in for reasoning evaluation.
     orchestrator_reasoning_enabled: bool = False
 
+    # General-agent redesign (S0). When True, the worker dissolves the plugin path:
+    # EVERY hypothesis goes through the general think-act experimenter (plan_source
+    # forced to "llm"), the plugin-verification bypass is skipped, and the worker is
+    # given the FULL worker-audience tool catalog (selection by description) instead
+    # of a domain cluster. Honesty is preserved by the trusted tools (certifier, the
+    # correct null) + the orchestrator's central verdict gate + the evidence stop-gate
+    # (which now accepts a certified witness). DEFAULT False: behavior is EXACTLY
+    # today's plugin/cluster path, so this is non-breaking and opt-in per deployment.
+    worker_general_agent_mode: bool = False
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
