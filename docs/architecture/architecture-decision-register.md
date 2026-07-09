@@ -49,7 +49,7 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 | tools (registry ✅; tool impls ⬜) | 4.3k | 🟡 |
 | skills | 0.3k | ✅ |
 | operator_credit / layer05 | ~8.4k | ✅ (traced → SHELVED §I) |
-| frontend/src | — | 🟡 (model/events/panels known from rebuild) |
+| frontend/src | ~8k | 🟡 structure read → §T (NarrativeStream+WorkersPanel already match intended layout; C5=route new events; per-component deep read ⬜) |
 | Security & data governance (auth/egress/tenancy/at-rest) | — | ✅ posture grounded → §N (build deferred) |
 
 ---
@@ -616,6 +616,15 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 - **What:** `propab/tools/` clusters by area (statistics, ml_research, deep_learning, mathematics, data_analysis, algorithm_optimization, general_computation, materials, mandrake) + `registry.py` (auto-scan, audience-scoped now) + `model_registry.py`. Each tool module exposes `TOOL_SPEC` + a callable.
 - **Sampled `statistical_significance` (ml_research):** rejects known spec-leak placeholder vectors (`_SPEC_LEAK_VECTORS` — same anti-cheat as think_act L2); **rejects zero-within-group variance** (bitwise-constant replicates ⇒ memoized/stale measurements ⇒ refuses to emit a fake p-value); auto-selects wilcoxon/t-test/mannwhitney; Cohen's d; paired-zero guard. Honest and defensive.
 - **Assessment:** the tools layer matches the core's strong honesty posture (fail-closed, anti-cheat, no fabricated stats). **Action:** KEEP. Remaining: a full per-tool read (esp. `deep_learning/train_model` real-data handling, `data_analysis`, `general_computation`) — sampled, not exhaustive; no bug found in the sample.
+
+---
+
+## T. Frontend (grounded — structure read 2026-07-09)
+
+### T1. Panel scaffolding already matches the intended layout — KEEP (C5 is smaller than feared)
+- **What:** `frontend/src` (~8k LOC) already has `NarrativeStream.tsx` (mid-panel narrative), `WorkersPanel.tsx`+`WorkerCard.tsx`+`RightPanel.tsx` (right-panel per-worker cards, click-to-drill), `EventCards.tsx`, `HypothesisTreeView.tsx`, `CampaignHud`/`MetricsPanel`/`ComputePanel`/`DiscoveryHero`/`BeliefsView`/`TasksPanel`, `events.ts`, `useCampaignLive.ts` (SSE hook), `lib/model.ts` (the big event/state model).
+- **Assessment:** the user's intended layout (mid = orchestrator reasoning collapsible stream; right = worker cards) is *already scaffolded* — `NarrativeStream` + `WorkersPanel`/`WorkerCard` exist. The gap (G2/M) is upstream: there are **no orchestrator-reasoning events** to populate `NarrativeStream`, so it currently renders worker `llm.*` chatter. The earlier rebuild already wired `call_id`/`duration_ms`/tokens/authoritative round/`certified` ([[frontend-rebuild]]).
+- **Action:** C5 = (a) render the new orchestrator reasoning event types (emitted by C3) in `NarrativeStream` with plain-language labels; (b) ensure `WorkersPanel` populates from dispatched workers; (c) collapse worker chatter under its worker card. NOT a rebuild — a routing + labeling change on existing components. Per-component deep read still ⬜ (model.ts 1.3k, EventCards, NarrativeStream) but the architecture is clear.
 
 ---
 
