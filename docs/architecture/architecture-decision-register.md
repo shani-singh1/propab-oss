@@ -62,11 +62,11 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 - **Assessment/tradeoff:** correct for parallel experiment execution and independent worker scaling. Cost: 4 deploy units, cross-service imports, and stale-per-service deploys (we hit this: api ran old verdict code while workers ran new). Boundaries are currently *leaky* (see A2, E1). Sound topology, but the boundaries must be made honest.
 - **Action:** keep the split; enforce the boundary (A2). Add a "rebuild-all or none" deploy rule to kill stale-per-service drift.
 
-### A2. Layering: services depend on `propab-core`; core is domain- & service-agnostic — FIX
+### A2. Layering: services depend on `propab-core`; core is domain- & service-agnostic — FIX (partly done)
 - **What:** intended dependency direction api/orchestrator/worker → propab-core → (nothing upward).
 - **Why:** core holds reusable, testable, domain-general logic; services compose it.
-- **Assessment/tradeoff:** **violated** — `campaign_synthesis.py`, `replay_support.py`, `cli.py` in core lazily import `services.*` (deferred imports to dodge a cycle). This is dependency inversion; it means "core" isn't actually a lower layer. Tradeoff of fixing: must move the imported helpers (e.g. `hypothesis_ranking`) down into core or invert via injection.
-- **Action:** move shared helpers into core or pass them in; forbid `from services` inside `propab-core` (add a lint/test guard).
+- **Assessment/tradeoff:** was **violated** — `campaign_synthesis.py`, `replay_support.py`, `cli.py` in core lazily imported `services.*`.
+- **Status/Action:** ✅ **campaign_synthesis fixed (commit ffa495e):** the lexical text-relevance helpers moved DOWN into `propab/text_relevance.py`; campaign_synthesis imports from core; hypothesis_ranking re-exports. A genuine core algorithm module no longer imports up. ⏳ Remaining: `cli.py` + `replay_support.py` still import `services.*` — but those are **entry-point/glue** modules (cli composes celery/runner; replay composes campaign_loop/paper), where importing services is defensible; relocate them to `services/` or accept as top-layer glue, THEN add the `no core→services` lint/test guard (can't add the blanket guard until cli/replay are resolved).
 
 ### A3. Separate literature microservice (9.2k LOC, own FastAPI + tests) — KEEP (earns separateness; see §P)
 - **What:** standalone service for papers/embeddings/gaps/contradictions over HTTP.
