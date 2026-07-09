@@ -51,8 +51,17 @@ def _make_llm():
 
 
 async def _ask(llm, prompt: str) -> str:
-    # _call_provider_once does the raw provider call without touching the DB/emitter.
-    return await llm._call_provider_once(prompt)
+    # _call_provider runs the raw provider call WITH bounded retry on transient errors,
+    # without touching the DB/emitter (those live in the public .call()).
+    return await llm._call_provider(prompt)
+
+
+def _bounded(history: str, max_chars: int = 14000) -> str:
+    """Keep prompts under the model's context limit on heavy, many-step problems
+    (unbounded history caused an LLM error -> null answer on carrier_cnv)."""
+    if len(history) <= max_chars:
+        return history
+    return "\n...(earlier steps truncated)...\n" + history[-max_chars:]
 
 
 def _extract_json(text: str) -> dict | None:
@@ -142,10 +151,13 @@ _HISTORY_STEP = """
 {stdout}
 """
 
-_FORCE_FINAL = """You have used your analysis budget. Based on everything above, output your
-BEST final answer now as a single JSON object:
-{{"action": "final", "answer": {{<exact fields>}}, "reasoning": "<method + QC>"}}
-Output ONLY the JSON.
+_FINALIZE = """You have used your analysis budget. You MUST produce an answer now. Choose ONE:
+- If your best numeric estimate is already computed above, output it directly:
+  {{"action": "final", "answer": {{<exact fields>}}, "reasoning": "<method + QC>"}}
+- Otherwise write ONE complete Python program that computes the answer from the data and
+  PRINTS as its final stdout line exactly: {{"answer": {{<exact fields>}}, "reasoning": "..."}}
+  as {{"action": "code", "code": "..."}}.
+Do NOT ask for more inspection. Use your best estimate even if imperfect. Output ONLY the JSON.
 """
 
 
@@ -199,7 +211,7 @@ async def solve_problem(llm, prob_dir: Path, max_steps: int, code_timeout: int) 
         left = max_steps - i
         finalize_hint = ("\n\nBUDGET NEARLY SPENT — finalize this step: run your final computation "
                          "and PRINT the answer JSON, or emit action=final.") if left <= 1 else ""
-        prompt = base + history + finalize_hint + f"\n\n[step {i} of {max_steps}, {left} left] Your next action (JSON only):"
+        prompt = base + _bounded(history) + finalize_hint + f"\n\n[step {i} of {max_steps}, {left} left] Your next action (JSON only):"
         try:
             raw = await _ask(llm, prompt)
         except Exception as exc:  # noqa: BLE001
@@ -216,22 +228,25 @@ async def solve_problem(llm, prob_dir: Path, max_steps: int, code_timeout: int) 
             break
         await _run_code_action(action, i)
 
-    # Finalize: run up to 2 more rounds. If the model still wants to compute, RUN its
-    # code (its final MLE often lands here), then demand a final answer.
+    # Finalize: up to 3 robust rounds. Accept a direct final answer, or RUN the model's
+    # final program and capture the answer it PRINTS. History is bounded so a long run
+    # can't blow the context window (which previously errored -> null).
     if final_answer is None:
-        for j in range(2):
+        for j in range(3):
             try:
-                force_raw = await _ask(llm, base + history + "\n\n" + _FORCE_FINAL)
+                force_raw = await _ask(llm, base + _bounded(history) + "\n\n" + _FINALIZE)
             except Exception as exc:  # noqa: BLE001
-                force_raw = f"(force-final LLM error: {exc})"
-                break
+                history += f"\n--- finalize LLM error round {j}: {exc} ---\n"
+                continue
             action = _extract_json(force_raw) or {}
-            if action.get("action") == "final" or ("answer" in action and "code" not in action):
+            if action.get("action") == "final" or ("answer" in action and not action.get("code")):
                 final_answer = action.get("answer")
                 reasoning = str(action.get("reasoning", ""))
                 break
             if action.get("code"):
-                await _run_code_action(action, max_steps + 1 + j)  # run its final computation
+                await _run_code_action(action, max_steps + 1 + j)  # its final computation
+                if printed_answer is not None:
+                    break
 
     # Fall back to an answer the code printed if the model never emitted a clean final.
     if final_answer is None and printed_answer is not None:
