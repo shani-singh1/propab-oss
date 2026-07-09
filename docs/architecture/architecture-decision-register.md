@@ -582,6 +582,14 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 
 ---
 
+### R3. Deterministic domain verifiers (coding_theory, math_combinatorics) — KEEP (verified)
+- **coding_theory** (deep-read): builds a real binary linear code, computes the TRUE minimum distance by exhaustive enumeration, and does an **independent witness re-check** (`recompute_distance_of_witness`) — if the witness fails independent recomputation it **refuses to certify** ("distance not certifiable"). Plus `is_table_lookup_evidence`/`trivial_rediscovery` guards so a known table value isn't confirmed as a discovery. This is the deterministic analog of the null (independent certification of the witness) and is correctly fail-closed. No bug.
+- **math_combinatorics** (per prior work + PLUGIN_WIRING): the discovery apparatus (`is_B3` → `certify_b3_record` as the sole record gate → `find_max_b3`/CP-SAT) uses an independent certifier re-verifying the witness before any record; `sandbox_exec` runs model-written construction code under an AST screen + restricted builtins + subprocess + timeout. Deterministic, exact.
+- **Assessment:** both deterministic domains use independent witness re-verification (fail-closed) — the honest pattern. KEEP.
+- **Action:** KEEP; the remaining domain-layer read is the per-domain `plugin.py`/`routing_inspector.py` (routing/objective_spec correctness), lower risk.
+
+---
+
 ## Loop protocol
 1. Pick the highest-severity non-`INVESTIGATE` entry.
 2. For `INVESTIGATE`, do the trace first → assign a real status here (with rationale/tradeoff).
