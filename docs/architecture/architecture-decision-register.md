@@ -42,7 +42,7 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 | core: campaign / campaign_db / campaign_snapshot | ~1k | ✅ (§Q1) |
 | core: research_quality / evidence_binding / scoped_claim / claim_grounding | ~2k | ✅ (§O) |
 | core: paper_compiler / paper_narrative / paper_sections / paper_gate | ~1.9k | ✅ (§O6 + §Q2) |
-| core: telemetry (§Q3 LIVE moat) / telemetry_db / health_metrics / knowledge_graph / numerical_seeds | ~1.5k | 🟡 (telemetry ✅; db/health/kg/seeds ⬜) |
+| core: telemetry / telemetry_db / health_metrics / knowledge_graph / numerical_seeds | ~1.5k | ✅ (§Q3,§Q5) |
 | domain_modules (12 domains) | 14.7k | 🟡 (deep-read+verified: genomics, enzyme_kinetics[FIXED], network_diffusion, graph_invariants, materials/mandrake[shared-null FIXED], 4 new-biology; §R. Remaining deep-read: coding_theory + math_combinatorics [deterministic], + plugin/routing_inspector per domain) |
 | domain_adapters / domain_profiles | ~2.1k | ⬜ |
 | anomaly_engine | 1.9k | ✅ (§Q4) |
@@ -572,6 +572,10 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 - **What:** persists one structured trajectory per hypothesis; `build_trajectories` DERIVES records from tree + event stream; **pure instrumentation** (never mutates verdict/honesty). Wired into campaign finalize.
 - **Why:** the "dataset nobody else has" — cross-campaign meta-learning corpus.
 - **Assessment/tradeoff (important nuance):** this is the LIVE, valuable half of the "moat" and is cleanly non-invasive. It is **distinct from the SHELVED `operator_credit`/`layer05` (§I)**, which is the *analysis/credit layer on top* and is dead. So: **data collection = alive + good; the analytics on top = shelved**. **Action:** KEEP telemetry; when C3 lands, wire the (revived) analytics on top of this existing dataset.
+
+### Q5. Remaining core small modules — KEEP (grounded, no honesty concern)
+- `numerical_seeds` (cross-campaign Q1-crossing/threshold extraction to seed follow-up searches — Track A2 finder continuity; domain-general sweep parsing), `knowledge_graph` (Claim/Mechanism/Failure/Theory store for lifetime learning; used by lifetime_knowledge which is live), `health_metrics` (synthesis/literature/campaign-end health logging — observability), `telemetry_db` (save/load `HypothesisTrajectory` — the live moat's persistence), `campaign_db` (`db_save_campaign`/`db_load_campaign` — the C1 DB-writeback path), `campaign_snapshot` (serialize campaign+prior for offline replay/paper synthesis).
+- **Assessment:** all clean, single-purpose, no honesty/correctness concerns. **Action:** KEEP.
 
 ### Q4. `anomaly_engine` — sweep→detect→induce→seed — KEEP-WATCH
 - **What:** an anomaly-detection pipeline (sweep_engine, anomaly_detector, mechanism_inducer, competing_mechanisms) feeding `anomaly_seeds` (orchestrator) — the 3rd seed source (B4).
