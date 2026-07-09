@@ -33,7 +33,7 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 | services/orchestrator/campaign_loop.py | 2.9k | 🟡 (verdict/dispatch/apply read; full ⬜) |
 | services/orchestrator (hypotheses/prior_builder/answer_gate/question_domain/lifetime/policy_analyst/ranking/seed_validation/research_loop/diagnostics/budget/ledger) | ~4k | 🟡 (design surface mapped → §M; literature.py/literature_client/retrieval/literature_cache/literature_quality full ⬜) |
 | services/worker/sub_agent_loop.py | 3.0k | 🟡 (verdict/confidence/routing/return read; full ⬜) |
-| services/worker (think_act/permutation_null/sandbox/domain_router/failure_classify/sandbox_code_rewrite/peer_findings) | ~1.5k | 🟡 (think_act/sandbox/domain_router/peer_findings/significance/permutation_null/failure_classify read → §L,§K7; sandbox_code_rewrite ⬜) |
+| services/worker (all files) | ~1.5k | ✅ (§L,§K6,§K7 — worker layer fully read) |
 | services/literature (65 files) | 9.2k | ✅ design surface → §P (KEEP; own Gemini egress §P2) |
 | core: hypothesis_tree | 0.9k | ✅ (§G1; from_dict rehydrates both dedup sets — resume-dedup bug fixed+verified; frontier_score policy to move in C3) |
 | core: verdict_pipeline/significance | 0.4k | ✅ (§E, §K) |
@@ -367,6 +367,11 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 - **Maintainable:** ⚠ a **second** sandbox exists in `math_combinatorics/discovery/sandbox_exec.py` (AST screen + restricted builtins + subprocess). Two security models = two things to keep correct.
 - **Assessment/tradeoff:** the Docker approach is the stronger boundary; the AST/subprocess one is lighter but weaker.
 - **Action:** KEEP the Docker sandbox; INVESTIGATE consolidating the math_combinatorics subprocess sandbox onto it (one security model).
+
+### L7. `sandbox_code_rewrite.py` — timeout-recovery code simplification — KEEP-WATCH
+- **What:** after a sandbox wall-clock timeout, an LLM rewrites the code to fit the budget (fewer steps/smaller model), preserving the JSON output contract; only fires for `looks_like_heavy_training_code` (an ML-hint list: torch/keras/sklearn/mnist/epoch/…).
+- **Assessment:** reasonable resilience helper; no honesty concern (the rewritten result still goes through verification). The heavy-code detector is ML-biased (a heavy combinatorics search wouldn't match) — minor, part of the L3 domain-independence cluster.
+- **Action:** KEEP-WATCH; generalize the "heavy code" hint with L3.
 
 ### L6. `worker/permutation_null.py` — two-sample label-permutation null — KEEP (correct)
 - **What:** genuine label-permutation null for a two-group significance comparison (`results_a` vs `results_b`): pools the arrays, permutes group labels, recomputes `|mean(a)-mean(b)|`, unbiased `(#≥+1)/(n+1)` p-value; vectorized; fail-closed (returns `None` unless both real arrays present) with a degenerate-guard.
