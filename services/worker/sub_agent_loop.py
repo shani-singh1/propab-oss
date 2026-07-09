@@ -598,6 +598,95 @@ def _build_evidence(
     )
 
 
+_WITNESS_KEYS = ("certified", "size", "is_record")
+
+
+def _as_int_or_none(v: Any) -> int | None:
+    try:
+        if isinstance(v, bool):
+            return None
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def enrich_certified_witness_evidence(
+    evidence_obj: dict[str, Any], successful_outputs: list[dict[str, Any]]
+) -> None:
+    """Map a certified-witness tool result onto the deterministic evidence shape.
+
+    When a general-agent worker runs a ``verification_capable`` tool (the B_3
+    ``extremal_set_search`` / ``certify_b3_record``), its output carries
+    ``{certified, size, is_record, best_known}`` — NOT the accuracy/R² metric shape
+    ``_build_evidence`` looks for. Without this the certified witness reads as "no
+    metric-bearing steps" and a genuine record is MISSED (a false negative). This
+    mutates ``evidence_obj`` so the verdict pipeline (plugin chain or generic) judges
+    it correctly. Shape-driven (fires on the witness keys, not a mode flag), so it is
+    inert on campaigns whose tools never emit them.
+
+    Honesty invariants:
+      * ``verified_true_steps`` / ``discovery_worthy`` are set ONLY for a genuine
+        ``is_record`` (the tool sets that iff the INDEPENDENT certifier confirmed AND
+        it strictly beats an improvable best-known). A rediscovery or below-record set
+        never earns ``verified_true_steps``, so NEITHER the plugin verdict (gated on
+        ``discovery_worthy``) NOR the generic verdict (``verified_true_steps > 0``) can
+        confirm it — no false positives.
+      * ``verification_method = combinatorial_computation`` marks it deterministic (a
+        proof, not a noisy sample): recomputable by the orchestrator and correctly
+        exempt from the ML significance gate. Mirrors the math plugin's evidence shape.
+    """
+    witnesses = [
+        o for o in successful_outputs
+        if isinstance(o, dict) and all(k in o for k in _WITNESS_KEYS)
+    ]
+    if not witnesses:
+        return
+    # Prefer a genuine record, then a certified set, then the largest size.
+    best = max(
+        witnesses,
+        key=lambda o: (
+            bool(o.get("is_record")),
+            bool(o.get("certified")),
+            _as_int_or_none(o.get("size")) or 0,
+        ),
+    )
+    size = _as_int_or_none(best.get("size"))
+    is_record = bool(best.get("is_record"))
+    certified = bool(best.get("certified"))
+    best_known = _as_int_or_none(best.get("best_known"))
+
+    evidence_obj["verification_method"] = "combinatorial_computation"
+    evidence_obj["certified"] = certified
+    evidence_obj["is_record"] = is_record
+    if best.get("best_known") is not None:
+        evidence_obj["best_known"] = best.get("best_known")
+    if size is not None:
+        evidence_obj["witness_size"] = size
+        # A certified extremal SIZE is the metric here (integer, not an ML [0,1]
+        # score), so the result is metric-bearing rather than "no metric steps".
+        evidence_obj["metric_value"] = float(size)
+        evidence_obj["n_metric_steps"] = max(1, int(evidence_obj.get("n_metric_steps") or 0))
+
+    if is_record and certified:
+        evidence_obj["verified_true_steps"] = max(1, int(evidence_obj.get("verified_true_steps") or 0))
+        evidence_obj["discovery_worthy"] = True
+        evidence_obj["notes"] = (
+            f"certified record: B_3 set of size {size} strictly beats best-known {best_known}"
+        )
+    else:
+        evidence_obj["discovery_worthy"] = False
+        if certified and best_known is not None and size == best_known:
+            evidence_obj["trivial_rediscovery"] = True
+            evidence_obj["notes"] = (
+                f"certified rediscovery of best-known {best_known}; not open-problem evidence"
+            )
+        elif certified:
+            below = f" below best-known {best_known}" if best_known is not None else ""
+            evidence_obj["notes"] = f"certified valid B_3 set of size {size}{below}; not a record"
+        else:
+            evidence_obj["notes"] = f"uncertified candidate of size {size}; no record"
+
+
 def attach_permutation_null_to_evidence(
     evidence_obj: dict[str, Any],
     sig_call_arrays: list[tuple[list[float], list[float]]],
@@ -2752,6 +2841,14 @@ async def run_sub_agent_async(payload: dict) -> dict:
             n_tool_steps=n_tool_steps,
             baseline_value=baseline_value,
         )
+
+        # A certified-witness tool result (extremal_set_search / certify_b3_record)
+        # carries {certified, size, is_record}, not the ML metric shape. Map it onto
+        # the deterministic evidence shape so a genuine record is judged CONFIRMED and
+        # a rediscovery/below-record set stays inconclusive (shape-driven; inert when
+        # no such tool ran). Runs before the metric_value==None branches below so the
+        # certified size is the metric (no MNIST baseline fallback for a math result).
+        enrich_certified_witness_evidence(evidence_obj, successful_tool_outputs)
 
         # ── Significance-input provenance (audit signal) ──────────────────────
         # Aggregate per-call verdicts into a single evidence-level signal. This
