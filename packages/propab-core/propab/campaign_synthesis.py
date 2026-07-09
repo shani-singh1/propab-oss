@@ -22,11 +22,10 @@ from propab.scoped_claim import (
 
 
 def _question_relevance(question: str, snippets: list[str], core: str) -> float:
-    try:
-        from services.orchestrator.hypothesis_ranking import compute_question_relevance_score_lexical  # noqa: WPS433
-        return float(compute_question_relevance_score_lexical(question, snippets, core))
-    except ImportError:
-        return 1.0
+    # Core stays a lower layer: import the domain-agnostic helper from core, not up
+    # into services (ADR A2).
+    from propab.text_relevance import compute_question_relevance_score_lexical
+    return float(compute_question_relevance_score_lexical(question, snippets, core))
 
 logger = logging.getLogger(__name__)
 
@@ -745,10 +744,7 @@ def apply_synthesis_to_frontier(
         node.theme_id = primary
         node.theme_confidence = theme_conf
         node.node_role = infer_node_role(node.text)
-        try:
-            from services.orchestrator.hypothesis_ranking import strip_question_suffix  # noqa: WPS433
-        except ImportError:
-            strip_question_suffix = lambda t: t  # type: ignore[misc, assignment]
+        from propab.text_relevance import strip_question_suffix  # core layer (ADR A2)
 
         core = strip_question_suffix(node.text)
         rel = _question_relevance(question, snippets, core)
