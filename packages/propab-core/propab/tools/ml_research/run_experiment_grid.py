@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import os
 from typing import Any
 
 import numpy as np
@@ -124,8 +125,12 @@ def _real_train_score(
                     transforms.Lambda(lambda x: x.view(-1)),
                 ]
             )
-            mnist_train = torchvision.datasets.MNIST("/tmp/mnist", train=True, download=True, transform=transform)
-            mnist_val = torchvision.datasets.MNIST("/tmp/mnist", train=False, download=True, transform=transform)
+            # Writable torchvision download cache. Defaults to the container's /tmp/mnist
+            # (unchanged in-docker); override with MNIST_DATA_DIR on a host checkout where
+            # /tmp is not a sensible location (e.g. Windows).
+            _mnist_root = os.environ.get("MNIST_DATA_DIR", "/tmp/mnist")
+            mnist_train = torchvision.datasets.MNIST(_mnist_root, train=True, download=True, transform=transform)
+            mnist_val = torchvision.datasets.MNIST(_mnist_root, train=False, download=True, transform=transform)
             tr_n = min(800, len(mnist_train))
             va_n = min(200, len(mnist_val))
             tr_idx = torch.randperm(len(mnist_train))[:tr_n]

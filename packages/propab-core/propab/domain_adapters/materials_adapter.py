@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from propab.domain_adapters._data_paths import resolve_data_dir as _resolve_data_dir
 from propab.domain_adapters.materials_crystal_system import symmetry_from_structure_dict
 from propab.domain_adapters.materials_featurizer import featurize_structure
 from propab.domain_adapters.materials_frame_cache import (
@@ -72,6 +73,9 @@ _FEATURE_ALIASES: dict[str, tuple[str, ...]] = {
 
 DEFAULT_TARGET = "dielectric"
 DEFAULT_FAMILY = "crystal_system"
+# Container ships / caches under /app/data/v1_candidates; on a host checkout it lives
+# at the repo-root data/v1_candidates. resolve_data_dir() (below) is CWD-independent and
+# honors the MATERIALS_DATA_DIR override. Kept for backward compatibility with importers.
 DEFAULT_DATA_DIRS = (
     Path("/app/data/v1_candidates"),
     Path("data/v1_candidates"),
@@ -135,10 +139,12 @@ class MaterialsAdapter:
 
     @staticmethod
     def resolve_data_dir() -> Path:
-        for candidate in DEFAULT_DATA_DIRS:
-            if (candidate / "matbench_dielectric.json.gz").is_file():
-                return candidate
-        return DEFAULT_DATA_DIRS[-1]
+        return _resolve_data_dir(
+            sentinel="matbench_dielectric.json.gz",
+            rel_path="data/v1_candidates",
+            env_var="MATERIALS_DATA_DIR",
+            container_dirs=(Path("/app/data/v1_candidates"),),
+        )
 
     def _cache_path(self) -> Path:
         return self.data_dir / "matbench_dielectric.json.gz"

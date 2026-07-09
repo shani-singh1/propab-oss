@@ -9,6 +9,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from propab.domain_adapters._data_paths import resolve_data_dir as _resolve_data_dir
 from sklearn.base import clone
 from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.metrics import mean_absolute_error, r2_score
@@ -39,6 +40,9 @@ _BIOLOGY_THEME_KEYWORDS: dict[str, tuple[str, ...]] = {
 
 DEFAULT_TARGET = "pe_efficiency_pct"
 DEFAULT_FAMILY = "rt_family"
+# Container ships data at /app/mandrake-data; on a host checkout it lives at the
+# repo-root mandrake-data/. resolve_data_dir() (below) is CWD-independent and honors
+# the MANDRAKE_DATA_DIR override. Kept for backward compatibility with importers.
 DEFAULT_DATA_DIRS = (Path("/app/mandrake-data"), Path("mandrake-data"))
 
 
@@ -106,10 +110,12 @@ class MandrakeAdapter:
 
     @staticmethod
     def resolve_data_dir() -> Path:
-        for candidate in DEFAULT_DATA_DIRS:
-            if (candidate / "handcrafted_features.csv").is_file():
-                return candidate
-        return DEFAULT_DATA_DIRS[0]
+        return _resolve_data_dir(
+            sentinel="handcrafted_features.csv",
+            rel_path="mandrake-data",
+            env_var="MANDRAKE_DATA_DIR",
+            container_dirs=(Path("/app/mandrake-data"),),
+        )
 
     def load_frame(self) -> pd.DataFrame:
         root = self.data_dir

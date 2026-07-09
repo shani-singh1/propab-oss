@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time as _t
 
 from propab.tools.model_registry import get_model, put_model
@@ -190,8 +191,12 @@ def train_model(
                 transforms.Normalize((0.1307,), (0.3081,)),
                 transforms.Lambda(lambda x: x.view(-1)),  # flatten 28x28 → 784
             ])
-            mnist_train = torchvision.datasets.MNIST("/tmp/mnist", train=True, download=True, transform=transform)
-            mnist_val = torchvision.datasets.MNIST("/tmp/mnist", train=False, download=True, transform=transform)
+            # Writable torchvision download cache. Defaults to the container's /tmp/mnist
+            # (unchanged in-docker); override with MNIST_DATA_DIR on a host checkout where
+            # /tmp is not a sensible location (e.g. Windows).
+            _mnist_root = os.environ.get("MNIST_DATA_DIR", "/tmp/mnist")
+            mnist_train = torchvision.datasets.MNIST(_mnist_root, train=True, download=True, transform=transform)
+            mnist_val = torchvision.datasets.MNIST(_mnist_root, train=False, download=True, transform=transform)
 
             # 2000 train / 500 val for speed
             train_size = min(2000, len(mnist_train))

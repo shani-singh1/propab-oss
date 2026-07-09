@@ -23,6 +23,7 @@ from propab.domain_adapters.mandrake_adapter import (
     _permutation_p_value,
     _within_family_r2,
 )
+from propab.domain_adapters._data_paths import resolve_data_dir as _resolve_data_dir
 from propab.domain_adapters.materials_featurizer import featurize_structure
 from propab.domain_adapters.perovskites_a_site import a_site_group
 from propab.artifact_verification import _survives_label_shuffle_lofo
@@ -44,6 +45,9 @@ KNOWN_FEATURES: tuple[str, ...] = (
 
 DEFAULT_TARGET = "e_form"
 DEFAULT_FAMILY = "a_site_group"
+# Container ships / caches under /app/data/v1_candidates; on a host checkout it lives
+# at the repo-root data/v1_candidates. resolve_data_dir() (below) is CWD-independent and
+# honors the PEROVSKITES_DATA_DIR override. Kept for backward compatibility with importers.
 DEFAULT_DATA_DIRS = (
     Path("/app/data/v1_candidates"),
     Path("data/v1_candidates"),
@@ -77,10 +81,12 @@ class PerovskitesAdapter:
 
     @staticmethod
     def resolve_data_dir() -> Path:
-        for candidate in DEFAULT_DATA_DIRS:
-            if (candidate / "matbench_perovskites.json.gz").is_file():
-                return candidate
-        return DEFAULT_DATA_DIRS[-1]
+        return _resolve_data_dir(
+            sentinel="matbench_perovskites.json.gz",
+            rel_path="data/v1_candidates",
+            env_var="PEROVSKITES_DATA_DIR",
+            container_dirs=(Path("/app/data/v1_candidates"),),
+        )
 
     def _cache_path(self) -> Path:
         return self.data_dir / "matbench_perovskites.json.gz"
