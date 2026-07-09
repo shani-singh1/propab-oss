@@ -249,7 +249,7 @@ What should you do next? Rules:
    honesty gate keeps it inconclusive no matter what your code prints for "verified"). To make a
    computation trustworthy you MUST get an INDEPENDENT check: (a) use an audited tool that
    re-verifies its own result (constraint_solve for linear/AllDifferent optimization;
-   extremal_set_search only for B_3 in {0,1}^n; train_model/run_experiment_grid for ML), OR
+   extremal_set_search only for B_3 in {{0,1}}^n; train_model/run_experiment_grid for ML), OR
    (b) when you must write code (the search a tool can't express), have it emit a concrete WITNESS
    (the actual set/object/counterexample) and then call a certifier/verification tool to re-check
    that witness independently. Never rely on your own code's "verified" flag as proof.

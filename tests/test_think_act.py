@@ -61,6 +61,19 @@ def _make_ctx(**kwargs) -> AgentContext:
     return AgentContext(**defaults)
 
 
+def test_think_prompt_template_has_no_unescaped_braces():
+    # Regression: a literal "{0,1}^n" in the prompt (a .format() template) was parsed as a
+    # format field '0,1' and raised KeyError at runtime, silently breaking think-act for the
+    # whole worker. Every format field must be a valid identifier (literal braces -> {{ }}).
+    import string
+
+    from services.worker.think_act import _THINK_PROMPT_TMPL
+
+    fields = [f for _, f, _, _ in string.Formatter().parse(_THINK_PROMPT_TMPL) if f]
+    bad = [f for f in fields if not f.isidentifier()]
+    assert not bad, f"unescaped braces in the think prompt parsed as format fields: {bad}"
+
+
 def test_should_stop_at_max_steps():
     ctx = _make_ctx(steps_taken=10, max_steps=10)
     assert should_stop(ctx) is True
