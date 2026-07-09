@@ -43,7 +43,7 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 | core: research_quality / evidence_binding / scoped_claim / claim_grounding | ~2k | ✅ (§O) |
 | core: paper_compiler / paper_narrative / paper_sections / paper_gate | ~1.9k | ✅ (§O6 + §Q2) |
 | core: telemetry (§Q3 LIVE moat) / telemetry_db / health_metrics / knowledge_graph / numerical_seeds | ~1.5k | 🟡 (telemetry ✅; db/health/kg/seeds ⬜) |
-| domain_modules (12 domains) | 14.7k | 🟡 (genomics ✅ deep; new-biology ✅; cross-domain null scan ✅ §R; per-verifier leakage deep-read of 7 remaining ⬜) |
+| domain_modules (12 domains) | 14.7k | 🟡 (deep-read+verified: genomics, enzyme_kinetics[FIXED], network_diffusion, graph_invariants, materials/mandrake[shared-null FIXED], 4 new-biology; §R. Remaining deep-read: coding_theory + math_combinatorics [deterministic], + plugin/routing_inspector per domain) |
 | domain_adapters / domain_profiles | ~2.1k | ⬜ |
 | anomaly_engine | 1.9k | ✅ (§Q4) |
 | tools (registry ✅; tool impls ⬜) | 4.3k | 🟡 |
@@ -567,11 +567,18 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 
 ## R. Domain layer — cross-domain honesty consistency (partial — scan 2026-07-09)
 
-### R1. No cross-domain replication of the genomics null bug — KEEP (verified shallow)
-- **What checked:** whether any domain verifier shuffles the split/group variable instead of the target (the genomics §I / verdict bug), and whether the null pattern matches verification type.
-- **Findings:** a scan for `shuffle(groups|tissues|split|…)` across all domains found **zero** — no domain permutes the split instead of the label. Statistical domains (materials, mandrake, enzyme_kinetics, graph_invariants, network_diffusion) carry null/shuffle machinery (expected); deterministic domains (coding_theory=0, math_combinatorics=2 exact) correctly have no distributional null. The 4 new biology domains were already verified to shuffle the target within-group; mandrake/materials permutation p-value was verified correct earlier.
-- **Assessment/tradeoff:** the genomics bug was domain-specific, not systemic. **But this is a shallow (pattern-count) scan, not a per-verifier read** — a full target-in-features leakage audit of each of the 7 non-genomics/non-new-biology domains is still pending (genomics leaked via feature==target, which a shuffle-scan would NOT catch).
-- **Action:** KEEP; do a per-domain verifier deep read (leakage + null + degenerate-metric guard, like the genomics fix) as the remaining domain-layer audit. Status `🟡` until each verifier is read.
+### R1. The genomics null bug WAS replicated — found by deep read, now fixed — DONE
+- **Correction to the earlier shallow scan:** a grep for `shuffle(groups|tissues|…)` found nothing and I wrongly concluded "not systemic." The per-line deep read (which the user insisted on) found the bug in **two more places**, missed by the grep because the shuffled variable was aliased (`shuffled = groups.copy(); rng.shuffle(shuffled)`):
+  - `enzyme_kinetics/verifier._label_shuffle_null` — shuffled `groups`, not `y`.
+  - `mandrake_adapter._family_label_shuffle_null` (**shared by materials AND mandrake**, feeding the artifact gate's `label_shuffle_null_p95`/`label_shuffle_permutation_p`) — shuffled `families`, not `y`.
+- **Fixed (commit 950d32b):** both now permute the TARGET within each group/family (matching the correct `_permutation_p_value`); enzyme also got the target-leakage + degenerate-target guards. New `tests/test_domain_null_shuffle.py` (planted signal beats null + null collapses; noise rejected). enzyme/mandrake/materials suites green.
+- **Verified correct (deep-read):** `network_diffusion` (shuffles y within family + alt-simulator robustness) and `graph_invariants` (permutes y, fails closed). The 4 new-biology domains were already correct.
+- **Lesson recorded:** a pattern-count scan is NOT sufficient for honesty audits — every verifier must be read line-by-line. `coding_theory` + `math_combinatorics` are deterministic (exact checks, no distributional null — correct by design); still to deep-read for exactness/degenerate-input handling.
+
+### R2. Enzyme LOFO design is weaker than network_diffusion — FIX (design-strengthen)
+- **What:** enzyme confirms on `LOFO R² + target-shuffle null` alone. With a genuine *global* X→y signal, the held-out "family" can be trivially in-distribution, so a real but non-family-specific relationship confirms as if it were cross-family generalization (surfaced by `_grouped_signal_frame`, whose signal is global `y=1.2·mw`).
+- **Why it matters:** for real frontier science a "generalizes across EC families" claim should require the family structure to *matter* — as `network_diffusion` does (cross-family replication with same sign+strength AND alternate-mechanism robustness).
+- **Action:** FIX (follow-up) — strengthen enzyme (and audit genomics/proteomics/qsar/transcriptomics/epitope similarly) to require cross-group replication, not just a global-signal LOFO R². Not a false-confirm on noise (the null guards that), but a claim-specificity gap.
 
 ---
 
