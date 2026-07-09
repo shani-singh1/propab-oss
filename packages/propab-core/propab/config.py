@@ -169,6 +169,15 @@ class Settings(BaseSettings):
     max_parallel_workers: int = 0
     # Max orchestrator-driven retune rounds per hypothesis before it is abandoned/finalized.
     max_retune_rounds_per_hypothesis: int = 3
+    # Orchestrator-as-brain redesign (C3b): when True, an LLM REASONING step decides the
+    # STRATEGIC action for each already-judged node (deepen / retune / spawn_related / drop)
+    # with full tree context, replacing the mechanical frontier_score/batch-synthesis
+    # expansion. The reasoning LLM is constructed with ``effective_orchestrator_model``.
+    # The deterministic honesty VERDICT (verdict_pipeline.compute_authoritative_verdict) and
+    # gates are UNTOUCHED and remain authoritative — reasoning decides strategy only, never
+    # confirmed/refuted. DEFAULT False: behavior is EXACTLY today's (mechanical frontier +
+    # Tier-2 synthesis), so the change is non-breaking and opt-in for reasoning evaluation.
+    orchestrator_reasoning_enabled: bool = False
 
     model_config = SettingsConfigDict(
         env_file=".env",

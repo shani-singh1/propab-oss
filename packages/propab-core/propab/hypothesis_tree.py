@@ -138,6 +138,12 @@ class HypothesisNode:
     mechanism_id: str | None = None
     claim_scope: dict[str, str] | None = None
     scope_delta: str | None = None
+    # Orchestrator-brain redesign §3.6 (C3b): RETUNE = a re-run of the SAME hypothesis
+    # with changed params/data, recorded as a node ATTEMPT (distinct from ``deepen``, which
+    # creates a child). Each entry is ``{round, changes, rationale}``; the list length is
+    # bounded by ``settings.max_retune_rounds_per_hypothesis`` at the wiring layer. Empty
+    # for every node until the reasoning step (flag-gated) requests a retune.
+    attempts: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -175,6 +181,7 @@ class HypothesisNode:
             "mechanism_id": self.mechanism_id,
             "claim_scope": self.claim_scope,
             "scope_delta": self.scope_delta,
+            "attempts": self.attempts,
         }
 
     @classmethod
@@ -214,6 +221,7 @@ class HypothesisNode:
             mechanism_id=data.get("mechanism_id"),
             claim_scope=data.get("claim_scope"),
             scope_delta=data.get("scope_delta"),
+            attempts=list(data.get("attempts") or []),
         )
 
 
