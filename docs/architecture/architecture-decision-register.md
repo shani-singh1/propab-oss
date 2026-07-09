@@ -140,11 +140,11 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 - **Assessment/tradeoff:** correct and load-bearing. Tradeoff: contract discipline needed so core never learns domain specifics. Mostly honored; one violation is worker-side domain routing (E2).
 - **Action:** keep; enforce (see D2, E2).
 
-### D2. Domain routing decided in the worker via its own LLM + hardcoded taxonomy — REPLACE
-- **What:** `domain_router.py` picks verifier/tool-cluster in the worker with a baked-in domain list.
-- **Why:** worker had the hypothesis in hand.
-- **Assessment/tradeoff:** a routing/strategy decision that belongs to the orchestrator, and the hardcoded taxonomy violates domain-independence. Plugins should self-detect (`DomainPlugin.matches`); orchestrator decides.
-- **Action:** move routing to orchestrator (C2/C3); detection stays in plugins.
+### D2. Domain routing — WHY it exists, and how to do it right — REPLACE (partly done)
+- **The user's question, answered — why is domain routing even needed?** To pick the correct, honesty-**audited verifier + objective frame** for a hypothesis. Verification is domain-specific (genomics = leave-one-tissue-out R²+null; math = exact `is_B3` check; materials = permutation test) and its honesty framing (`objective_spec`: `is_ml`, metric, baseline_kind) differs per domain. You cannot verify a genomics claim with a math verifier, and you must not let the LLM improvise a flawed null each time (it already produced buggy nulls when hand-written). So *some* routing is genuinely required. What is NOT required: guessing the domain from hardcoded keywords, or taking it as user input.
+- **What was wrong:** three hardcoded/guessing mechanisms — `question_domain.infer_session_domain` (session-level keyword taxonomy), `domain_router.route_domain` + `_keyword_fallback_domain` (worker per-hypothesis keyword/LLM router), and the `[domain_profile:X]` user tag (`domain_from_profile_tag`).
+- **The right design:** the registry ALREADY supports plugin **self-detection** — `resolve_domain_plugin(question, payload)` calls each `DomainPlugin.matches()` (registry.py:135). The worker already uses it (sub_agent_loop:1803). So central keyword tables + user tags are redundant; the orchestrator (reasoning brain) confirms/overrides routing per hypothesis.
+- **Status/Action:** ✅ `question_domain.py` + `infer_session_domain` **deleted** (commit 59a2c03); intake no longer guesses a domain. ⏳ The worker still ALSO calls `route_domain` (domain_router, line 1954) alongside `resolve_domain_plugin` (line 1803) — two routers. `domain_router` is entangled in the worker verification flow that C2/C3 rewrites; **delete it during C2/C3** when routing moves to the orchestrator + plugin self-detection. Do NOT rip it out standalone (would break verification).
 
 ---
 
@@ -373,7 +373,11 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 
 ## M. Orchestrator modules (grounded — code read 2026-07-09)
 
-### M1. TWO execution engines: `research_loop` (rounds) + `campaign_loop` (tree) — REPLACE/REMOVE(legacy)
+### M1. TWO execution engines: `research_loop` (rounds) + `campaign_loop` (tree) — ✅ DONE (legacy removed)
+> **Resolved (commit 59a2c03):** `research_loop.py` deleted; `POST /research` +
+> `ResearchConfig/Request/Response` removed from the API; `/internal/research`
+> (+`InternalResearchBody`) removed from orchestrator/main.py. One engine now:
+> `campaign_loop`. Legacy-specific tests removed; affected suites green.
 - **What:** `research_loop.run_research_loop` (session → fixed rounds → hypothesis rows/checkpoints) and `campaign_loop.run_campaign_loop` (campaign → tree → frontier) are two independent orchestration engines. Both are exposed from `research.py` (POST @122 → research_loop; create_campaign @311 → campaign_loop) and `orchestrator/main.py` still delegates to `run_research_loop`.
 - **Why:** `research_loop` is the older rounds-based session engine; `campaign_loop` is the current tree-based campaign engine.
 - **How/evidence:** the frontend creates `/campaigns` (campaign_loop) and only *reads* `/sessions/*` (shared session_id); nothing in the UI drives the rounds engine.
@@ -394,7 +398,10 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 - **Assessment/tradeoff:** the *pre-fetch + inject* is the A3/E-adjacent anti-pattern (user's point 3: literature should be a tool the orchestrator calls, not an injected prefetch). The **short-circuit is a genuinely good idea** — but should also be a tool/skill the reasoning orchestrator invokes, not an automatic gate.
 - **Action:** REPLACE the inject with a `literature_search` tool (C3); KEEP the short-circuit logic, re-expose as an orchestrator tool/decision.
 
-### M4. `question_domain.infer_session_domain` — hardcoded ML-first keyword taxonomy — FIX
+### M4. `question_domain.infer_session_domain` — hardcoded ML-first keyword taxonomy — ✅ DONE (deleted)
+> **Resolved (commit 59a2c03):** `question_domain.py` deleted; `intake.parse_question`
+> no longer guesses a domain (`domain=""`). Routing = plugin self-detection +
+> campaign tag. See D2. (Original entry below for rationale.)
 - **What:** fast keyword heuristic mapping a question to a domain; comment says "v1 focus: DL/ALGO/ML first."
 - **Assessment/tradeoff:** same domain-independence violation as `domain_router` (D2) and the ML think-prompt (L3): domain detection belongs in the plugins (`DomainPlugin.matches`), not a central hardcoded table biased to ML.
 - **Action:** FIX — delegate detection to plugins; delete the central taxonomy. Fold into the D2 routing move.
