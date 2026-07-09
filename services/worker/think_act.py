@@ -10,7 +10,12 @@ from typing import Any
 from propab.config import settings
 from propab.llm import LLMClient
 
-from .significance import SignificanceResult, any_significance_tool_ran, check_significance
+from .significance import (
+    SignificanceResult,
+    any_significance_tool_ran,
+    any_verification_tool_ran,
+    check_significance,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -473,6 +478,26 @@ def _is_spec_example_params(tool_name: str, params: dict, specs: list[dict] | No
     return any(_params_match_example(params, ex) for ex in matched_examples)
 
 
+def _stop_needs_evidence(
+    action: AgentAction, context: AgentContext, specs: list[dict]
+) -> bool:
+    """True when a proposed STOP must be corrected because the run has no
+    verification-grade evidence yet.
+
+    Evidence is verification-grade if a significance tool ran (p-value/effect-size
+    shape) OR a deterministic certifier ran (certified-witness shape — e.g. a B_3
+    record certifier). Either satisfies the gate; a math record search's proof is a
+    certified witness, not a p-value, so it must not be forced through the ML
+    significance path. Only enforced once the agent has taken at least ``min_steps``.
+    """
+    return (
+        action.action_type == "stop"
+        and not any_significance_tool_ran(context.tool_names_run)
+        and not any_verification_tool_ran(context.tool_names_run, specs)
+        and context.steps_taken >= context.min_steps
+    )
+
+
 async def decide_next_action(
     context: AgentContext,
     specs: list[dict],
@@ -573,14 +598,13 @@ async def decide_next_action(
             # Last resort: extract actual values and force bootstrap
             action = _fallback_significance_action(context)
 
-    # Enforce significance gate: if agent wants to stop without any sig tool run
-    if (
-        action.action_type == "stop"
-        and not any_significance_tool_ran(context.tool_names_run)
-        and context.steps_taken >= context.min_steps
-    ):
+    # Enforce the evidence gate: if the agent wants to stop without having produced
+    # verification-grade evidence (neither a significance tool NOR a deterministic
+    # certifier ran), issue a correction. A certified witness (verification_capable
+    # tool) satisfies the gate the same way a p-value does.
+    if _stop_needs_evidence(action, context, specs):
         logger.info(
-            "Agent %s tried to stop without significance tool. Issuing correction prompt.",
+            "Agent %s tried to stop without significance/verification evidence. Issuing correction prompt.",
             hypothesis_id,
         )
         correction_prompt = _CORRECTION_PROMPT_TMPL.format(

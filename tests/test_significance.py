@@ -5,11 +5,34 @@ import pytest
 from services.worker.significance import (
     SignificanceResult,
     any_significance_tool_ran,
+    any_verification_tool_ran,
     check_significance,
     classify_verdict,
     fisher_combine_p_values,
     scan_verification,
+    verification_capable_tool_names,
 )
+
+
+def test_verification_capable_tool_names_reads_flag():
+    specs = [
+        {"name": "extremal_set_search", "verification_capable": True},
+        {"name": "certify_b3_record", "verification_capable": True},
+        {"name": "statistical_significance", "significance_capable": True},
+        {"name": "vector_dot"},
+    ]
+    assert verification_capable_tool_names(specs) == {"extremal_set_search", "certify_b3_record"}
+    assert verification_capable_tool_names(None) == set()
+
+
+def test_any_verification_tool_ran():
+    specs = [{"name": "certify_b3_record", "verification_capable": True}]
+    assert any_verification_tool_ran(["certify_b3_record"], specs) is True
+    assert any_verification_tool_ran(["train_model"], specs) is False
+    # Spec-driven: without the flag in specs, a run of the same tool is not counted.
+    assert any_verification_tool_ran(["certify_b3_record"], None) is False
+    # A significance tool is not a verification tool (distinct evidence shapes).
+    assert any_verification_tool_ran(["statistical_significance"], specs) is False
 
 
 def _evidence(**kw):

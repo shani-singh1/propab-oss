@@ -23,6 +23,9 @@ TOOL_SPEC = {
     "name": "extremal_set_search",
     "domain": "mathematics",
     "audience": "worker",
+    # Deterministic certifier: its evidence is a re-verified certified witness, not a
+    # p-value. Satisfies the worker stop-gate (see significance.any_verification_tool_ran).
+    "verification_capable": True,
     "description": (
         "Search for a maximum-size extremal set of a combinatorial object and "
         "independently CERTIFY the result. object='b3_binary_cube' searches for the "

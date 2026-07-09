@@ -21,6 +21,10 @@ TOOL_SPEC = {
     "name": "certify_b3_record",
     "domain": "mathematics",
     "audience": "worker",
+    # Deterministic independent certifier: its evidence is a re-verified certified
+    # witness, not a p-value. Satisfies the worker stop-gate (see
+    # significance.any_verification_tool_ran).
+    "verification_capable": True,
     "description": (
         "Independently certify a candidate B_3 set in {0,1}^n by re-deriving every "
         "threefold sum from scratch (the trusted, paranoid certify_b3_record). "

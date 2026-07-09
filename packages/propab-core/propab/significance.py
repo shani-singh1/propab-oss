@@ -213,3 +213,31 @@ _SIGNIFICANCE_TOOL_NAMES = frozenset({
 
 def any_significance_tool_ran(tool_names: list[str]) -> bool:
     return any(n in _SIGNIFICANCE_TOOL_NAMES for n in tool_names)
+
+
+def verification_capable_tool_names(specs: list[dict[str, Any]] | None) -> set[str]:
+    """Names of tools whose spec marks them ``verification_capable``.
+
+    These are deterministic certifiers / independent verifiers (e.g. a B_3 record
+    certifier): their evidence is a re-verified certified witness, not a p-value, so
+    they satisfy the worker stop-gate the same way a significance tool does. The
+    concept is spec-driven (no hardcoded domain/tool names in the gate) so it
+    generalises across domains as the plugin architecture is dissolved.
+    """
+    names: set[str] = set()
+    for spec in specs or []:
+        if isinstance(spec, dict) and spec.get("verification_capable") and spec.get("name"):
+            names.add(str(spec["name"]))
+    return names
+
+
+def any_verification_tool_ran(
+    tool_names: list[str], specs: list[dict[str, Any]] | None
+) -> bool:
+    """True when a run has produced verification-grade (certified-witness) evidence.
+
+    Distinct from ``any_significance_tool_ran`` (p-value/effect-size evidence). Either
+    kind counts as "the hypothesis was actually tested" for the stop-gate.
+    """
+    vnames = verification_capable_tool_names(specs)
+    return any(n in vnames for n in tool_names)

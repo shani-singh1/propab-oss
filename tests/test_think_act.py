@@ -5,12 +5,14 @@ import time
 import pytest
 
 from services.worker.think_act import (
+    AgentAction,
     AgentContext,
     _fallback_significance_action,
     _is_spec_example_params,
     _lists_trivially_equal,
     _parse_action,
     _params_match_example,
+    _stop_needs_evidence,
     should_stop,
 )
 
@@ -244,3 +246,51 @@ def test_lists_trivially_equal_variants():
     assert _lists_trivially_equal([1.0, 2.0, 1.5, 1.8], base)  # 10x scale
     assert _lists_trivially_equal([1.1, 1.2, 1.15, 1.18], base)  # +1 offset
     assert not _lists_trivially_equal([0.3, 0.5, 0.9, 0.1], base)  # unrelated
+
+
+# ─── Evidence stop-gate (significance OR verification satisfies it) ────────────
+
+# The three sig specs plus two deterministic certifiers (verification_capable).
+_GATE_SPECS = _SIG_SPECS + [
+    {"name": "extremal_set_search", "verification_capable": True, "example": {"params": {"n": 7}}},
+    {"name": "certify_b3_record", "verification_capable": True, "example": {"params": {"n": 2}}},
+]
+
+
+def _stop() -> AgentAction:
+    return AgentAction(action_type="stop")
+
+
+def test_stop_gate_needs_evidence_when_nothing_ran():
+    ctx = _make_ctx(tool_names_run=[], steps_taken=3, min_steps=3)
+    assert _stop_needs_evidence(_stop(), ctx, _GATE_SPECS) is True
+
+
+def test_stop_gate_satisfied_by_significance_tool():
+    ctx = _make_ctx(tool_names_run=["statistical_significance"], steps_taken=3, min_steps=3)
+    assert _stop_needs_evidence(_stop(), ctx, _GATE_SPECS) is False
+
+
+def test_stop_gate_satisfied_by_verification_tool():
+    # A certified witness is verification-grade evidence -> stop is allowed, never
+    # forced through the ML significance path (the S0 math-discovery fix).
+    ctx = _make_ctx(tool_names_run=["extremal_set_search"], steps_taken=3, min_steps=3)
+    assert _stop_needs_evidence(_stop(), ctx, _GATE_SPECS) is False
+
+
+def test_stop_gate_not_enforced_before_min_steps():
+    ctx = _make_ctx(tool_names_run=[], steps_taken=1, min_steps=3)
+    assert _stop_needs_evidence(_stop(), ctx, _GATE_SPECS) is False
+
+
+def test_stop_gate_only_applies_to_stop_action():
+    ctx = _make_ctx(tool_names_run=[], steps_taken=3, min_steps=3)
+    assert _stop_needs_evidence(AgentAction(action_type="tool"), ctx, _GATE_SPECS) is False
+
+
+def test_stop_gate_is_spec_driven_not_name_driven():
+    # If the specs do NOT mark the tool verification_capable, running it does not
+    # satisfy the gate — the concept is spec-driven, not a hardcoded tool name.
+    plain_specs = [{"name": "extremal_set_search", "example": {"params": {"n": 7}}}]
+    ctx = _make_ctx(tool_names_run=["extremal_set_search"], steps_taken=3, min_steps=3)
+    assert _stop_needs_evidence(_stop(), ctx, plain_specs) is True
