@@ -221,7 +221,7 @@ function RoundGroup({
   const notes = useMemo(() => roundPhaseNotes(round), [round]);
 
   return (
-    <div className="mb-[14px] animate-ptick overflow-hidden rounded-[10px] border border-edge bg-rail/40 motion-reduce:animate-none">
+    <div className="mb-[14px] animate-ptick overflow-hidden rounded-[10px] border border-edge motion-reduce:animate-none">
       <button
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
@@ -371,13 +371,13 @@ function LiveEdge({ label }: { label?: string }) {
 
 function OrchestratorRow({ v, e, start }: { v: OrchestratorView; e: PropabEvent; start: string | null }) {
   return (
-    <div className="flex items-start gap-[9px] border-t border-line px-[15px] py-[9px] first:border-t-0">
+    <div className="flex items-start gap-[10px] border-t border-line px-[15px] py-[10px] first:border-t-0">
       <span className="mt-[4px]">
         <StatusDot color={v.dotColor} size={6} />
       </span>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-x-[8px] gap-y-[4px]">
-          <span className="text-[12px] font-semibold leading-[1.35] text-ink">{v.label}</span>
+          <span className="text-[12.5px] font-semibold leading-[1.35] text-ink">{v.label}</span>
           {v.meta.map((m, i) => (
             <span
               key={i}
@@ -387,10 +387,29 @@ function OrchestratorRow({ v, e, start }: { v: OrchestratorView; e: PropabEvent;
             </span>
           ))}
         </div>
-        {v.detail && (
-          <div className="mt-[3px] text-[11.5px] leading-[1.45] text-ink-2">{v.detail}</div>
+        {/* the hypothesis under test / just written — a quoted claim */}
+        {v.claim && (
+          <div
+            className={`mt-[5px] border-l-2 border-edge pl-[9px] text-[11.5px] leading-[1.45] ${
+              v.kind === "decision" ? "text-ink-3" : "text-ink-2"
+            }`}
+          >
+            {v.claim}
+          </div>
         )}
-        {v.note && <div className="mt-[3px] text-[11px] leading-[1.4] text-ink-3">{v.note}</div>}
+        {/* the orchestrator's reasoning — the prominent "why" */}
+        {v.reason && (
+          <div className="mt-[5px] text-[12px] leading-[1.5] text-ink-2">{v.reason}</div>
+        )}
+        {/* the decided next move */}
+        {v.next && (
+          <div className="mt-[6px] flex items-center gap-[5px] font-mono text-[10px] leading-none text-ink-3">
+            <span aria-hidden style={{ color: v.dotColor }}>
+              →
+            </span>
+            <span>{v.next}</span>
+          </div>
+        )}
       </div>
       <span className="shrink-0 font-mono text-[10px] leading-[1.6] text-ink-4">
         {fmtOffset(start, e.timestamp)}
@@ -405,7 +424,10 @@ function OrchestratorGroupCard({ group, start }: { group: OrchestratorGroup; sta
   const summary = useMemo(() => orchestratorGroupSummary(views), [views]);
 
   return (
-    <div className="mb-[14px] animate-ptick overflow-hidden rounded-[10px] border border-edge bg-rail/30 motion-reduce:animate-none">
+    <div
+      className="mb-[14px] animate-ptick overflow-hidden rounded-[10px] border border-edge motion-reduce:animate-none"
+      style={{ background: "var(--railBg)" }}
+    >
       <button
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
@@ -415,8 +437,13 @@ function OrchestratorGroupCard({ group, start }: { group: OrchestratorGroup; sta
         <span className="shrink-0 font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-3">
           Orchestrator
         </span>
-        <span className="min-w-0 flex-1 truncate text-[12px] leading-none text-ink-2">{summary}</span>
-        <span className="shrink-0 font-mono text-[10px] text-ink-4">{group.events.length}</span>
+        <span className="min-w-0 flex-1 truncate text-[12px] leading-[1.35] text-ink-2">{summary}</span>
+        <span
+          className="shrink-0 rounded bg-chip px-[5px] py-[2px] font-mono text-[9.5px] leading-none text-ink-3"
+          title={`${group.events.length} orchestrator entries`}
+        >
+          {group.events.length}
+        </span>
         <span className="shrink-0 text-[11px] text-ink-4">{open ? "▾" : "▸"}</span>
       </button>
       {open && (

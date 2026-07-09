@@ -204,12 +204,14 @@ export function isOrchestratorEvent(t: string): boolean {
 
 export interface OrchestratorView {
   kind: OrchestratorKind;
-  /** plain-language headline — never a raw enum. */
+  /** plain-language, verb-first headline — never a raw enum. */
   label: string;
-  /** primary supporting line (hypothesis text / the orchestrator's own detail). */
-  detail: string | null;
-  /** tertiary line (e.g. the "why" behind a decision). */
-  note: string | null;
+  /** a hypothesis statement being written or judged — rendered as a quoted claim. */
+  claim: string | null;
+  /** the orchestrator's reasoning / the "why" — the prominent supporting line. */
+  reason: string | null;
+  /** the decided next move (deepen / drop / retune …), as a short phrase. */
+  next: string | null;
   /** set only for a decision, drives the row's verdict color. */
   verdict: Verdict | null;
   /** small monospace chips (metric, p-value, counts). */
@@ -235,6 +237,19 @@ function humanize(s: string): string {
   return t ? t.charAt(0).toUpperCase() + t.slice(1) : "";
 }
 
+// The orchestrator's decided next move, as a plain phrase. `action` is a small
+// backend enum (deepen / drop / retune / …); we narrate it as what happens next.
+function nextMove(action: unknown): string | null {
+  const a = typeof action === "string" ? action.toLowerCase().trim() : "";
+  if (!a) return null;
+  if (a.includes("deepen")) return "Deepening this line";
+  if (a.includes("drop") || a.includes("prune") || a.includes("retire")) return "Closing the branch";
+  if (a.includes("retune") || a.includes("revise") || a.includes("rerun")) return "Retuning the experiment";
+  if (a.includes("lateral") || a.includes("pivot")) return "Trying a lateral angle";
+  if (a.includes("finaliz")) return "Finalizing the campaign";
+  return humanize(a);
+}
+
 // Friendly headline for a reasoning/generation `decision` string.
 function reasoningHeadline(decision: string, p: Record<string, any>): string {
   const d = decision.toLowerCase();
@@ -257,16 +272,24 @@ export function orchestratorView(e: PropabEvent): OrchestratorView {
 
   if (kind === "decision") {
     const verdict = ((p.effective_verdict || p.verdict) as Verdict) || null;
+    const np = num(p.null_p);
+    // Verb-first headline, with a short statistical qualifier when a null test
+    // is present (domain-general — keyed off the `null_p` the backend emits).
     let label: string;
     switch (verdict) {
       case "confirmed":
-        label = "Confirmed a hypothesis";
+        label =
+          np != null && np < 0.05
+            ? "Confirmed a hypothesis — signal beyond the null"
+            : "Confirmed a hypothesis";
         break;
       case "refuted":
-        label = "Refuted a hypothesis";
+        label = np != null ? "Refuted a hypothesis — no signal beyond the null" : "Refuted a hypothesis";
         break;
       case "inconclusive":
-        label = "Marked a hypothesis inconclusive";
+        label = np != null
+          ? "Marked a hypothesis inconclusive — within the noise band"
+          : "Marked a hypothesis inconclusive";
         break;
       default:
         label = "Reviewed a result";
@@ -274,15 +297,14 @@ export function orchestratorView(e: PropabEvent): OrchestratorView {
     const meta: string[] = [];
     const mv = num(p.metric_value);
     if (p.metric_name && mv != null) meta.push(`${p.metric_name} ${fmtMetric(mv)}`);
-    const np = num(p.null_p);
     if (np != null) meta.push(fmtNullP(np));
-    if (p.downgraded) meta.push("adjusted");
-    const detail = typeof p.hypothesis_text === "string" ? p.hypothesis_text : null;
-    const note =
+    if (p.downgraded) meta.push("worker overruled");
+    const claim = typeof p.hypothesis_text === "string" ? p.hypothesis_text : null;
+    const reason =
       (typeof p.why === "string" && p.why) ||
       (typeof p.inconclusive_reason === "string" && p.inconclusive_reason) ||
       null;
-    return { kind, label, detail, note, verdict, meta, dotColor: verdictColor(verdict) };
+    return { kind, label, claim, reason, next: nextMove(p.action), verdict, meta, dotColor: verdictColor(verdict) };
   }
 
   if (kind === "literature") {
@@ -299,8 +321,9 @@ export function orchestratorView(e: PropabEvent): OrchestratorView {
     return {
       kind,
       label: "Reviewed the literature",
-      detail: status ? `Evidence so far: ${status.replace(/_/g, " ")}` : null,
-      note: null,
+      claim: null,
+      reason: status ? `Evidence so far: ${status.replace(/_/g, " ")}.` : null,
+      next: null,
       verdict: null,
       meta,
       dotColor: "var(--text3)",
@@ -320,8 +343,9 @@ export function orchestratorView(e: PropabEvent): OrchestratorView {
     return {
       kind,
       label,
-      detail: typeof p.text === "string" ? p.text : null,
-      note: null,
+      claim: typeof p.text === "string" ? p.text : null,
+      reason: null,
+      next: null,
       verdict: null,
       meta: [],
       dotColor: "var(--text2)",
@@ -333,8 +357,9 @@ export function orchestratorView(e: PropabEvent): OrchestratorView {
   return {
     kind,
     label: reasoningHeadline(decision, p),
-    detail: typeof p.detail === "string" ? p.detail : null,
-    note: null,
+    claim: null,
+    reason: typeof p.detail === "string" ? p.detail : null,
+    next: null,
     verdict: null,
     meta: [],
     dotColor: "var(--text)",

@@ -115,13 +115,22 @@ export function buildDemoEvents(): PropabEvent[] {
   for (const [i, id] of ["h2a", "h2b"].entries())
     e.push(ev(243 + i, "orchestrator", "orchestrator.hypothesis_written", "orchestrator.hypothesis_written", { node_id: id, parent_id: "h1a", text: HYPS[id].text, kind: "child", expansion_type: "deepen", generation: 2 }));
   for (const [i, id] of ["h2a", "h2b"].entries()) e.push(...workerEvents(id, 250 + i * 40, true, 2));
+  // Orchestrator judges the round-2 results centrally — a deepen and a retune.
+  e.push(ev(356, "orchestrator", "orchestrator.decision", "orchestrator.decision", { node_id: "h2a", hypothesis_text: HYPS.h2a.text, verdict: "confirmed", effective_verdict: "confirmed", worker_verdict: "confirmed", downgraded: false, action: "deepen", why: "The income×region interaction added a clean +0.03 lift with a permutation null p = 0.008 — the nonlinearity is real, so I'll deepen this line.", metric_name: "LOFO R²", metric_value: 0.712, null_p: 0.008, inconclusive_reason: null }));
+  e.push(ev(358, "orchestrator", "orchestrator.decision", "orchestrator.decision", { node_id: "h2b", hypothesis_text: HYPS.h2b.text, verdict: "inconclusive", effective_verdict: "inconclusive", worker_verdict: "inconclusive", downgraded: false, action: "retune", why: "Log-transforming balance moved R² by less than the noise band (null p = 0.22) — worth a retuned second pass before I rule it out.", metric_name: "LOFO R²", metric_value: 0.688, null_p: 0.22, inconclusive_reason: "effect within noise band" }));
   e.push(ev(360, "orchestrator", "synthesis.ledger_updated", "synthesis.ledger", { round: 2 }));
   e.push(ev(362, "orchestrator", "round.completed", "round.2.complete", { round: 2, confirmed: 1, refuted: 0, inconclusive: 1, marginal_return: 0.19 }));
 
   // Round 3 — in flight
   e.push(ev(370, "orchestrator", "round.started", "round.3.start", { round: 3, round_id: "r3" }));
   e.push(ev(372, "orchestrator", "campaign.progress", "campaign.phase", { phase: "pipelined_sub_agents", detail: "Dispatching 2 sub-agents for round 3 verification." }));
-  e.push(ev(374, "orchestrator", "hypothesis.generated", "hypothesis.generate", { hypotheses: [{}, {}] }));
+  e.push(ev(374, "orchestrator", "hypothesis.generated", "hypothesis.generate", { hypotheses: [{}, {}, {}] }));
+  // Orchestrator narrates its round-3 plan: chase the residual anomaly, deepen the
+  // winning line, and place one lateral bet.
+  e.push(ev(375, "orchestrator", "orchestrator.reasoning", "orchestrator.reasoning", { decision: "chase anomaly", detail: "Round 2 left an unexplained residual cluster in the high-balance tail — I'm chasing it with a monotonic-constraint probe before it biases the next round.", generation: 3 }));
+  e.push(ev(376, "orchestrator", "orchestrator.hypothesis_written", "orchestrator.hypothesis_written", { node_id: "h3a", parent_id: "h2a", text: HYPS.h3a.text, kind: "child", expansion_type: "deepen", generation: 3 }));
+  e.push(ev(377, "orchestrator", "orchestrator.hypothesis_written", "orchestrator.hypothesis_written", { node_id: "h3b", parent_id: "h2a", text: HYPS.h3b.text, kind: "child", expansion_type: "deepen", generation: 3 }));
+  e.push(ev(378, "orchestrator", "orchestrator.hypothesis_written", "orchestrator.hypothesis_written", { node_id: "h3c", parent_id: null, text: "Lateral bet: quantile-binning balance may capture the tail nonlinearity a monotonic constraint misses.", kind: "lateral", generation: 3 }));
   e.push(...workerEvents("h3a", 380, false, 3));
   e.push(...workerEvents("h3b", 395, false, 3));
   // an orchestrator LLM call in flight (unpaired prompt → in-flight LLM task)
