@@ -119,3 +119,71 @@ experiments still ran at n=200** and only **2** ever reached n≥1000.
 - **certified-but-not-record count** — honest rediscoveries (4 here) confirm the
   certifier works.
 - **confirmed/false-confirm** — must stay honest (0 false confirms here ✓).
+
+## 8. DEEP root cause (code-verified — supersedes the guesses in §4)
+Read the code, not just the data. Two of my earlier claims were wrong; here is the
+verified chain.
+
+### 8a. "0 worker think-act" is BY DESIGN — plugin-domain workers are NOT experimenters
+`services/worker/sub_agent_loop.py:1834-1879`: the worker resolves the domain
+plugin and, for **any** domain that has a plugin (all 12, incl. math), calls
+`domain_plugin.run_verification(...)` and **returns immediately** — it never reaches
+the think-act experimenter loop (line 1881+). The adaptive "design an experiment,
+write code, iterate" agent (`think_act.decide_next_action`) runs **only for domains
+WITHOUT a plugin**. So a math "worker" is a thin wrapper around a fixed domain
+verifier — it does not design, does not write code, cannot adapt to instructions.
+**This is the real answer to "why 0 think-act": the architecture routes plugin
+domains to a fixed verifier, not an agent.** (The user's mental model — workers
+design+code from an orchestrator instruction — holds only for non-plugin domains.)
+
+### 8b. Wrong object (sidon vs B_3): keyword routing, discovery IS wired but gated
+`math_combinatorics/plugin.run_verification` keyword-parses the hypothesis TEXT into
+a feature ∈ {cap_set, sumset, ap_free, **sidon_set_density (the else-default)**}.
+Then `verifier.run_combinatorics_experiment` (line 211) routes:
+`_is_b3_binary_cube_hypothesis(...)` → `_run_b3_binary_cube_experiment` →
+**`find_max_b3` (the real ILS discovery search + `certify_b3_record`)**; else →
+`_run_sidon_experiment` (density). So the discovery search **IS wired** (my "not
+wired" guess in §6 was wrong) — but it only fires when the hypothesis text trips the
+B_3 keyword. **Quantified: ~4/37 tripped it (→ 4 certified size-16 sets); ~33/37
+LLM-phrased "Sidon/greedy/product/density" hypotheses defaulted to Sidon density**
+(the wrong object for A396704).
+
+### 8c. Scale no-op (n stayed 200): the regex can't read the orchestrator's phrasing
+`verifier._extract_n` (line 244) is `re.search(r"n\s*=\s*(\d+)", statement)`, default
+**200**. It matches `n=500` but **NOT** the orchestrator's retune phrasing
+`"n >= 500"`, `"n≥500"`, or `"multi-n sweep for n≥500"`. And it reads the *statement*,
+while the retune hint is appended to *test_methodology*. So the retune scale change
+**never reaches the computation** — n stayed at the 200 default. (The 2 runs at
+n=1000/2500 came from LLM hypothesis text that literally wrote `n=NNN`, not from
+retunes.)
+
+### 8d. The instruction question (directly answered)
+There is **no worker prompt** for a plugin domain — nothing "sent to the worker to
+interpret." The orchestrator's rich intent/retune is compressed into the hypothesis
+`text` + `test_methodology`, then **lossily regex/keyword-parsed** by the verifier
+(object via `_is_b3_binary_cube_hypothesis`, scale via a `n=(\d+)` regex). The intent
+was clear and correct; the execution layer simply cannot consume natural-language
+instructions. **So it is NOT "the orchestrator's instructions lacked context" and NOT
+"the workers misunderstood" — it is that there is no interpreter between them.** The
+fix is a *structured params channel*, or making plugin-domain workers real LLM
+experimenters for discovery.
+
+## 9. Fixes (revised, code-verified, ranked)
+1. **Structured orchestrator→worker→verifier param channel.** `orchestrator_reason_next`
+   must emit structured retune/strategy params `{target_object, n, construction, budget}`
+   → dispatch payload → `run_verification(hypothesis, params)` → the verifier uses them
+   directly. Stop relying on the verifier regex-parsing free text.
+2. **Route by campaign target, not per-hypothesis keyword.** For an A396704 question,
+   drive `find_max_b3`/CP-SAT at the target n regardless of how each hypothesis is
+   phrased, so the discovery search actually runs.
+3. **Quick: fix `_extract_n`** to accept `n≥/>=/<= N`, ranges, and to read
+   `test_methodology` — and generally make the verifier's text parsing robust (or
+   remove it in favor of #1).
+4. **Decide the worker model for DISCOVERY.** A fixed verifier is right for "test this
+   specific construction"; an open-problem *record search* likely needs an adaptive
+   worker (think-act / construction-synthesis that writes+runs search code at scale).
+   Currently plugin domains never get that. This is the strategic call.
+
+**Correction log:** §4/§6 earlier claimed (a) "sandbox timeouts at large n" — FALSE
+(experiments completed; they never ran at large n) and (b) "discovery apparatus not
+wired" — FALSE (`find_max_b3` is wired but keyword-gated). §8 supersedes them.
