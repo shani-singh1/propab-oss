@@ -1494,6 +1494,11 @@ async def _maybe_run_campaign_synthesis(
     lifetime_context_ref: list[str] | None = None,
 ) -> bool:
     """Tier-2 synthesis if triggered. Returns True if candidates were added."""
+    if bool(getattr(settings, "orchestrator_reasoning_enabled", False)):
+        # C3b: when the LLM reasoning step drives expansion, the mechanical Tier-2
+        # synthesis is disabled so the two never double-expand the frontier. With the
+        # flag OFF (default) this guard is inert and the synthesis path is unchanged.
+        return False
     ctx = lifetime_context_ref[0] if lifetime_context_ref else lifetime_context
     if not bool(getattr(settings, "campaign_synthesis_enabled", True)):
         return False
@@ -1537,6 +1542,91 @@ async def _maybe_run_campaign_synthesis(
             source="synthesis",
         )
     return len(added) > 0
+
+
+async def _run_orchestrator_reasoning_step(
+    *,
+    emitter: EventEmitter,
+    campaign: ResearchCampaign,
+    node: Any,
+    evidence_obj: Any,
+    verdict: str,
+    confidence: float,
+    llm: LLMClient,
+    generation: int,
+    hypothesis_id: str | None = None,
+) -> Any:
+    """C3b (flag-gated): reason about the just-judged ``node`` and mutate the tree per
+    the chosen STRATEGIC action (deepen / retune / spawn_related / drop).
+
+    The deterministic honesty verdict is already final and is NOT touched here — this
+    only decides what to TEST NEXT. Rationale + any new hypotheses are narrated via the
+    existing C3a events. Fully failure-isolated: any error (reasoning call, parse, tree
+    mutation, emit) is swallowed so telemetry/strategy can never break a campaign.
+    Returns the ``ReasoningOutcome`` (or ``None`` when skipped/failed).
+    """
+    if node is None:
+        return None
+    from services.orchestrator.orchestrator_reasoning import (
+        apply_reasoning_decision,
+        orchestrator_reason_next,
+    )
+
+    max_retune = int(getattr(settings, "max_retune_rounds_per_hypothesis", 3) or 3)
+    max_depth = int(getattr(settings, "campaign_max_tree_depth", 8) or 8)
+
+    decision = await orchestrator_reason_next(
+        campaign=campaign,
+        node=node,
+        evidence=evidence_obj if isinstance(evidence_obj, dict) else None,
+        verdict=verdict,
+        confidence=confidence,
+        llm=llm,
+        max_retune_rounds=max_retune,
+        hypothesis_id=hypothesis_id,
+    )
+
+    if decision.parse_error:
+        # No usable strategy — narrate it, but leave the tree UNTOUCHED.
+        await _emit_orchestrator_reasoning(
+            emitter,
+            campaign_id=campaign.id,
+            decision="reasoning unavailable",
+            detail=decision.rationale or "no strategic decision produced",
+            node_id=str(getattr(node, "id", "") or ""),
+            parse_error=True,
+        )
+        return None
+
+    try:
+        outcome = apply_reasoning_decision(
+            campaign.hypothesis_tree,
+            node,
+            decision,
+            generation=generation,
+            max_retune_rounds=max_retune,
+            max_depth=max_depth,
+        )
+    except Exception:  # noqa: BLE001 — a tree-mutation error must not break the campaign
+        logger.debug("orchestrator reasoning apply failed", exc_info=True)
+        return None
+
+    # One reasoning event (+ one hypothesis-written per new node), plain-language.
+    await _emit_orchestrator_generation(
+        emitter,
+        campaign_id=campaign.id,
+        generation=generation,
+        decision=outcome.action,
+        detail=decision.rationale or f"strategic action: {outcome.action}",
+        nodes=outcome.new_nodes,
+        source="reasoning",
+        requested_action=outcome.requested_action,
+        node_id=str(getattr(node, "id", "") or ""),
+        retuned=outcome.retuned or None,
+        dropped=outcome.dropped or None,
+        note=outcome.note or None,
+    )
+    return outcome
 
 
 async def generate_seed_hypotheses(
@@ -2229,6 +2319,20 @@ async def run_campaign_loop(
         emitter=emitter,
         session_factory=session_factory,
     )
+    # C3b: a SEPARATE reasoning client on the (frontier) orchestrator model, built ONLY
+    # when the reasoning step is enabled. With orchestrator_reasoning_enabled=False (the
+    # default) nothing is constructed and the campaign behaves byte-for-byte as the
+    # mechanical frontier/synthesis path. ``effective_orchestrator_model`` falls back to
+    # ``llm_model`` when unset, so the model id is unchanged unless an operator splits it.
+    reasoning_llm: LLMClient | None = None
+    if bool(getattr(settings, "orchestrator_reasoning_enabled", False)):
+        reasoning_llm = LLMClient(
+            provider=settings.llm_provider,
+            model=settings.effective_orchestrator_model,
+            api_key=settings.llm_api_secret,
+            emitter=emitter,
+            session_factory=session_factory,
+        )
     # Defined inside the try below, but referenced by the fatal-error salvage path —
     # initialize so an early crash can still attempt paper salvage without NameError.
     prior_dict: dict[str, Any] | None = None
@@ -2988,6 +3092,27 @@ async def run_campaign_loop(
                         event_type=EventType.CAMPAIGN_PROGRESS,
                         step="campaign.frontier_snapshot",
                         payload=snap,
+                    )
+
+                # C3b (flag-gated): with the FINAL deterministic verdict and all
+                # verdict-dependent processing (recount, breakthrough, best-metric,
+                # checkpoint) already done above, let the orchestrator REASON about the
+                # strategic next move for this node and mutate the tree (deepen / retune /
+                # spawn_related / drop). ``reasoning_llm`` is None unless
+                # orchestrator_reasoning_enabled is True, so with the flag OFF this is
+                # skipped entirely and the mechanical Tier-2 synthesis (in refill_slots)
+                # drives expansion exactly as before.
+                if reasoning_llm is not None:
+                    await _run_orchestrator_reasoning_step(
+                        emitter=emitter,
+                        campaign=campaign,
+                        node=node,
+                        evidence_obj=evidence_obj,
+                        verdict=verdict,
+                        confidence=confidence,
+                        llm=reasoning_llm,
+                        generation=generation,
+                        hypothesis_id=str(result.get("hypothesis_id") or "") or None,
                     )
 
                 if campaign.hypothesis_cap_reached():
