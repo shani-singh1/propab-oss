@@ -205,7 +205,9 @@ class MaterialsAdapter:
 
     def run_experiment(self, spec: MaterialsExperimentSpec) -> dict[str, Any]:
         df = self.load_frame()
-        cols = [c for c in spec.feature_subset if c in df.columns]
+        # Never let the target leak in as its own predictor (trivial R²=1.0). Guard
+        # against a hypothesis/plan that lists the target in feature_subset.
+        cols = [c for c in spec.feature_subset if c in df.columns and c != spec.target_column]
         if not cols:
             raise ValueError(f"No usable features: {spec.feature_subset}")
         sub = df[[spec.target_column, spec.family_column, *cols]].copy()
