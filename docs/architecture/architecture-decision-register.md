@@ -168,7 +168,8 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 - **Assessment/tradeoff:** this is genuinely good design and Propab's honesty backbone. Keep — just relocate its *invocation* to the orchestrator (one place).
 - **Action:** keep the pipeline; centralize where it runs.
 
-### E4. `classify_verification_method` substring-matches (mislabels `symbolic_identity`) — FIX
+### E4. `classify_verification_method` substring-matches (mislabels `symbolic_identity`) — ✅ DONE
+> **Fixed (E4 commit):** now decides from the parsed integer `verified_true_steps`/`verified_false_steps`, not substrings (`"verified_true"` matched `..._steps": 0`). Falls back to the `"verified": true/false` literal only when no structured counters exist. `tests/test_classify_verification_method.py` (5 cases); no campaign-path regression.
 - **What:** telemetry classifier returns `symbolic_identity` on any `"verified_true"` substring — matches `"verified_true_steps": 0`.
 - **Why:** cheap string heuristic.
 - **Assessment/tradeoff:** cosmetic but wrong; pollutes telemetry/UX. Parse structured evidence, not substrings.
