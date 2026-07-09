@@ -116,65 +116,6 @@ export function eventLabel(e: PropabEvent): string {
   }
 }
 
-// Event types that represent campaign milestones (the "Milestones" filter and
-// the emphasized timeline dots). Everything else is fine-grained activity.
-const MILESTONE_TYPES = new Set<string>([
-  "campaign.started",
-  "campaign.baseline_measured",
-  "campaign.breakthrough",
-  "campaign.budget_exhausted",
-  "campaign.completed",
-  "campaign.progress",
-  "hypothesis.generated",
-  "hypothesis.tree_expanded",
-  "hypothesis.tree_frontier_empty",
-  "hypothesis.promoted",
-  "hypothesis.retired",
-  "agent.completed",
-  "synthesis.result_received",
-  "synthesis.ledger_updated",
-  "synthesis.breakthrough",
-  "synthesis.dead_end",
-  "synthesis.all_inconclusive",
-  "finding.best_updated",
-  "finding.certified",
-  "paper.ready",
-  "session.completed",
-  "session.failed",
-]);
-
-export function isMilestone(t: string): boolean {
-  return MILESTONE_TYPES.has(t);
-}
-
-// Color of the timeline dot for an event: verdict-driven when present, else a
-// coarse tone (errors red, milestones ink, otherwise muted).
-export function eventDotColor(e: PropabEvent): string {
-  const v = (e.payload?.verdict as Verdict | undefined) || undefined;
-  if (v) return verdictColor(v);
-  const t = e.event_type;
-  if (isErrorEvent(t)) return "var(--red)";
-  if (t === "campaign.breakthrough" || t === "synthesis.breakthrough") return "var(--green)";
-  if (t === "finding.best_updated") return "var(--green)";
-  if (t === "finding.certified")
-    return e.payload?.certified === false ? "var(--text)" : "var(--green)";
-  if (t === "campaign.budget_exhausted" || t === "synthesis.dead_end" || t === "session.failed")
-    return "var(--red)";
-  if (t === "synthesis.result_received" || t === "synthesis.ledger_updated") return "var(--green)";
-  if (isMilestone(t)) return "var(--text)";
-  return "var(--text3)";
-}
-
-export function isErrorEvent(t: string): boolean {
-  return t.endsWith(".error") || t.endsWith(".timeout") || t.endsWith(".failed");
-}
-
-// Short, monospace-friendly hypothesis id for display.
-export function shortId(id: string | null | undefined): string {
-  if (!id) return "";
-  return id.length > 8 ? id.slice(0, 8) : id;
-}
-
 // ── Orchestrator activity (the mid-panel lane) ───────────────────────────────
 // The backend now narrates its own reasoning via four `orchestrator.*` events
 // (redesign §4/§5). The UI renders these as the orchestrator's activity feed —
@@ -196,10 +137,6 @@ export function orchestratorKind(t: string): OrchestratorKind | null {
     default:
       return null;
   }
-}
-
-export function isOrchestratorEvent(t: string): boolean {
-  return t.startsWith("orchestrator.");
 }
 
 export interface OrchestratorView {
@@ -364,19 +301,4 @@ export function orchestratorView(e: PropabEvent): OrchestratorView {
     meta: [],
     dotColor: "var(--text)",
   };
-}
-
-// A one-line summary of a run of orchestrator entries, for the group header.
-export function orchestratorGroupSummary(views: OrchestratorView[]): string {
-  const n = { literature: 0, reasoning: 0, hypothesis: 0, decision: 0 };
-  for (const v of views) n[v.kind] += 1;
-  const parts: string[] = [];
-  if (n.literature) parts.push("reviewed the literature");
-  if (n.hypothesis) parts.push(`${n.hypothesis} ${n.hypothesis > 1 ? "hypotheses" : "hypothesis"} written`);
-  if (n.decision) parts.push(`${n.decision} ${n.decision > 1 ? "results reviewed" : "result reviewed"}`);
-  if (n.reasoning && !parts.length) {
-    // A pure-reasoning run reads best as its own first headline.
-    return views.find((v) => v.kind === "reasoning")?.label ?? "Reasoning";
-  }
-  return parts.length ? parts.join(" · ") : "Orchestrator activity";
 }
