@@ -39,13 +39,13 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 | core: verdict_pipeline/significance | 0.4k | ✅ (§E, §K) |
 | core: artifact_verification | 0.8k | ✅ (§O1) |
 | core: campaign_synthesis | 1.0k | 🟡 |
-| core: campaign / campaign_db / campaign_snapshot | ~1k | ⬜ |
+| core: campaign / campaign_db / campaign_snapshot | ~1k | ✅ (§Q1) |
 | core: research_quality / evidence_binding / scoped_claim / claim_grounding | ~2k | ✅ (§O) |
-| core: paper_compiler / paper_narrative / paper_sections / paper_gate | ~1.9k | 🟡 (paper_gate ✅ §O6; compiler/narrative/sections ⬜) |
-| core: telemetry / telemetry_db / health_metrics / knowledge_graph / numerical_seeds | ~1.5k | ⬜ |
+| core: paper_compiler / paper_narrative / paper_sections / paper_gate | ~1.9k | ✅ (§O6 + §Q2) |
+| core: telemetry (§Q3 LIVE moat) / telemetry_db / health_metrics / knowledge_graph / numerical_seeds | ~1.5k | 🟡 (telemetry ✅; db/health/kg/seeds ⬜) |
 | domain_modules (12 domains) | 14.7k | 🟡 (genomics ✅; pattern known; rest ⬜) |
 | domain_adapters / domain_profiles | ~2.1k | ⬜ |
-| anomaly_engine | 1.9k | ⬜ |
+| anomaly_engine | 1.9k | ✅ (§Q4) |
 | tools (registry ✅; tool impls ⬜) | 4.3k | 🟡 |
 | skills | 0.3k | ✅ |
 | operator_credit / layer05 | ~8.4k | ✅ (traced → SHELVED §I) |
@@ -537,6 +537,31 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 
 ### P4. Public surface = thin `main.py` over `LiteraturePipeline` — KEEP
 - **Assessment:** no business logic in routes; clean. **Action:** KEEP; this is the surface the orchestrator's `literature_search` tool (M3) wraps.
+
+---
+
+## Q. Remaining core modules (grounded — code read 2026-07-09)
+
+### Q1. `campaign.py` — `ResearchCampaign` state primitive — KEEP
+- **What:** the persistent long-running research object = HypothesisTree + `BreakthroughCriteria` + measured baseline + checkpoint/resume via `research_campaigns`; `should_stop()` (budget/breakthrough).
+- **Why:** one durable primitive for a campaign's lifecycle.
+- **Assessment:** central, well-defined, resume-safe (baseline "never assumed"). **Maintainable/Testable:** good. **Action:** KEEP. (Its `should_stop`/breakthrough scoring is where the `direction` validation matters — already regex-guarded.)
+
+### Q2. Paper chain (`paper_compiler` + `paper_narrative` + `paper_sections`) — KEEP
+- **What:** compile evidence → LaTeX paper (`parse_evidence`, `latex_tabular_from_jsonish`, `format_stats`, `_effective_verdict`).
+- **Why:** the campaign's publishable output.
+- **Assessment:** uses `_effective_verdict` (consistent with the C1 single-verdict-authority) and is gated by `paper_gate.session_merits_paper` (O6) + `claim_grounding` (O) so a nothing-campaign doesn't get a fabricated paper. Honest-output path is sound. **Action:** KEEP; audit that `_effective_verdict` here matches the orchestrator's post-C1 effective verdict (avoid a 3rd verdict notion).
+
+### Q3. `telemetry.py` — `HypothesisTrajectory` (the LIVE moat data) — KEEP
+- **What:** persists one structured trajectory per hypothesis; `build_trajectories` DERIVES records from tree + event stream; **pure instrumentation** (never mutates verdict/honesty). Wired into campaign finalize.
+- **Why:** the "dataset nobody else has" — cross-campaign meta-learning corpus.
+- **Assessment/tradeoff (important nuance):** this is the LIVE, valuable half of the "moat" and is cleanly non-invasive. It is **distinct from the SHELVED `operator_credit`/`layer05` (§I)**, which is the *analysis/credit layer on top* and is dead. So: **data collection = alive + good; the analytics on top = shelved**. **Action:** KEEP telemetry; when C3 lands, wire the (revived) analytics on top of this existing dataset.
+
+### Q4. `anomaly_engine` — sweep→detect→induce→seed — KEEP-WATCH
+- **What:** an anomaly-detection pipeline (sweep_engine, anomaly_detector, mechanism_inducer, competing_mechanisms) feeding `anomaly_seeds` (orchestrator) — the 3rd seed source (B4).
+- **Why:** surface surprising effects as hypothesis seeds.
+- **Assessment/tradeoff:** wired (via `anomaly_seeds` in campaign_loop). Real machinery (1.9k LOC) whose value depends on how often anomaly seeds beat LLM seeds — measure it. Overlaps the generation concern the orchestrator agent will own (B4).
+- **Action:** KEEP-WATCH; under the C3 agent, decide whether anomaly-seeding is a tool the brain calls vs an always-on parallel source.
 
 ---
 
