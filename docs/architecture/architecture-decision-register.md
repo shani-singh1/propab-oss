@@ -33,7 +33,7 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 | services/orchestrator/campaign_loop.py | 2.9k | 🟡 (verdict/dispatch/apply read; full ⬜) |
 | services/orchestrator (hypotheses/prior_builder/answer_gate/question_domain/lifetime/policy_analyst/ranking/seed_validation/research_loop/diagnostics/budget/ledger) | ~4k | 🟡 (design surface mapped → §M; literature.py/literature_client/retrieval/literature_cache/literature_quality full ⬜) |
 | services/worker/sub_agent_loop.py | 3.0k | 🟡 (verdict/confidence/routing/return read; full ⬜) |
-| services/worker (think_act/permutation_null/sandbox/domain_router/failure_classify/sandbox_code_rewrite/peer_findings) | ~1.5k | 🟡 (think_act/sandbox/domain_router/peer_findings/significance read → §L; permutation_null/failure_classify/sandbox_code_rewrite ⬜) |
+| services/worker (think_act/permutation_null/sandbox/domain_router/failure_classify/sandbox_code_rewrite/peer_findings) | ~1.5k | 🟡 (think_act/sandbox/domain_router/peer_findings/significance/permutation_null read → §L; failure_classify/sandbox_code_rewrite ⬜) |
 | services/literature (65 files) | 9.2k | ✅ design surface → §P (KEEP; own Gemini egress §P2) |
 | core: hypothesis_tree | 0.9k | 🟡 |
 | core: verdict_pipeline/significance | 0.4k | ✅ (§E, §K) |
@@ -362,6 +362,11 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 - **Maintainable:** ⚠ a **second** sandbox exists in `math_combinatorics/discovery/sandbox_exec.py` (AST screen + restricted builtins + subprocess). Two security models = two things to keep correct.
 - **Assessment/tradeoff:** the Docker approach is the stronger boundary; the AST/subprocess one is lighter but weaker.
 - **Action:** KEEP the Docker sandbox; INVESTIGATE consolidating the math_combinatorics subprocess sandbox onto it (one security model).
+
+### L6. `worker/permutation_null.py` — two-sample label-permutation null — KEEP (correct)
+- **What:** genuine label-permutation null for a two-group significance comparison (`results_a` vs `results_b`): pools the arrays, permutes group labels, recomputes `|mean(a)-mean(b)|`, unbiased `(#≥+1)/(n+1)` p-value; vectorized; fail-closed (returns `None` unless both real arrays present) with a degenerate-guard.
+- **Why it's correct (and NOT the LOFO bug):** here the labels *define the compared groups*, so permuting them IS the exact classic two-sample null. This is the opposite case from the LOFO verifiers (genomics/enzyme/materials §R), where the "groups" are just a CV split for a predictive R² and the target must be permuted instead. Both are now correct.
+- **Assessment:** exemplary honesty design (no self-report, deterministic under seed, never fabricates a null). **Action:** KEEP.
 
 ### L5. Significance gate lives in the worker think-loop — FIX(clarify split)
 - **What:** the worker forbids `stop` until a significance tool ran (correction prompts + a forced fallback significance call).
