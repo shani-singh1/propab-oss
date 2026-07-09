@@ -8,7 +8,6 @@ import { breakthroughMeter, buildCampaignModel, discoverySummary } from "../lib/
 import NarrativeStream from "../components/campaign/NarrativeStream";
 import { useFollowEdge, JumpToLivePill } from "../components/campaign/followEdge";
 import CampaignHud from "../components/campaign/CampaignHud";
-import DiscoveryHero from "../components/campaign/DiscoveryHero";
 import Composer from "../components/campaign/Composer";
 import RightPanel from "../components/campaign/RightPanel";
 import type { PropabEvent } from "../types";
@@ -60,7 +59,7 @@ export default function Campaign() {
 
   // Follow-the-live-edge: the center scroll container auto-scrolls while pinned to
   // the bottom; scrolling up reveals a "jump to live (N new)" pill.
-  const edge = useFollowEdge(events.length, model.narrative.length);
+  const edge = useFollowEdge(events.length, model.timeline.length);
 
   if (!campaign && error) {
     return (
@@ -99,23 +98,18 @@ export default function Campaign() {
           </div>
         )}
 
-        {/* narrative — center column owns the follow-the-live-edge scroll */}
+        {/* narrative — the center zone owns the follow-the-live-edge scroll. The
+            ZONE spans the available width; the PROSE inside is capped to a
+            readable measure and left-aligned with the timestamp gutter. */}
         <div className="relative flex min-h-0 flex-1 flex-col">
           <div
             ref={edge.ref}
             onScroll={edge.onScroll}
-            className="pp-scroll min-h-0 flex-1 overflow-y-auto px-[26px] pb-2 pt-5"
+            className="pp-scroll min-h-0 flex-1 overflow-y-auto px-[26px] pb-2 pt-4"
           >
-            {/* §B — Discovery Hero pinned atop the center column */}
-            {campaign && (
-              <div className="mx-auto max-w-[720px]">
-                <DiscoveryHero discovery={discovery} />
-              </div>
-            )}
             <NarrativeStream
-              narrative={model.narrative}
+              timeline={model.timeline}
               start={c?.started_at ?? null}
-              now={now}
               live={{ active, label }}
               discovery={discovery}
               campaignId={id}

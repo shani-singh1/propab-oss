@@ -130,7 +130,9 @@ export default function RightPanel({
       </div>
 
       <div className="min-h-0 flex-1">
-        {tab === "workers" && <WorkersPanel workers={model.workers} now={now} />}
+        {tab === "workers" && (
+          <WorkersPanel workers={model.workers} now={now} tree={tree} question={question} />
+        )}
         {tab === "tasks" && (
           <TasksPanel tasks={model.inFlight} workers={model.workers} now={now} active={active} />
         )}

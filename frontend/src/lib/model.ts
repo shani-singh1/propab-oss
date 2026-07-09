@@ -17,6 +17,7 @@
 // recomputed cheaply on each streamed event (single O(n) pass).
 
 import type { CampaignState, CampaignSummary, PropabEvent, Verdict } from "../types";
+import { orchestratorView } from "./events";
 
 export type WorkerStatus = "running" | "confirmed" | "refuted" | "inconclusive" | "failed";
 
@@ -87,25 +88,76 @@ export interface RoundView {
   errors: number;
 }
 
-// A run of consecutive orchestrator.* events, shown as one collapsible block in
-// the mid-panel (the orchestrator's activity lane).
-export interface OrchestratorGroup {
+// ── The flat narrative timeline (redesign §2/§4) ─────────────────────────────
+// The center panel is ONE continuous, ranked timeline — not a stack of labeled
+// group-cards. Every item carries a `tier` so the UI can render it at the right
+// weight: findings LOUD, reasoning plain prose, decisions inline, generation
+// boundaries as hairlines, and mechanics (tools/dispatches/marks) folded into a
+// single dim collapsed line. The nested round/orchestrator-group objects are
+// gone from the main flow; round *stats* still live on `rounds` for the rail.
+export type TimelineTier = "finding" | "reasoning" | "decision" | "generation" | "mechanics";
+
+interface TimelineBase {
+  /** stable across rebuilds so React preserves per-item local state. */
   key: string;
-  events: PropabEvent[];
-  startedAt: string;
-  endedAt: string;
+  /** ISO timestamp used for the dim left gutter offset. */
+  at: string;
 }
 
-export type NarrativeItem =
-  | { kind: "round"; round: RoundView }
-  | { kind: "milestone"; event: PropabEvent }
-  | { kind: "orchestrator"; group: OrchestratorGroup };
+/** A plain prose sentence in the orchestrator's voice (Tier 2). */
+export interface ReasoningItem extends TimelineBase {
+  tier: "reasoning";
+  text: string;
+  /** a just-written hypothesis, rendered as a quiet quoted clause. */
+  quote: string | null;
+}
+
+/** A verdict, rendered inline: colored dot + one line + quiet claim (Tier 2). */
+export interface DecisionItem extends TimelineBase {
+  tier: "decision";
+  verdict: Verdict | null;
+  dotColor: string;
+  label: string;
+  /** the judged hypothesis, as a quiet quoted clause. */
+  claim: string | null;
+  /** tiny metric / p-value chips. */
+  chips: string[];
+  /** the decided next move ("Deepening this line"). */
+  next: string | null;
+}
+
+/** A new-round boundary — a hairline divider with a tiny gutter label. */
+export interface GenerationItem extends TimelineBase {
+  tier: "generation";
+  label: string;
+}
+
+/** ≥2 folded mechanic events (tools / dispatches / marks), collapsed (Tier 3). */
+export interface MechanicsItem extends TimelineBase {
+  tier: "mechanics";
+  summary: string;
+  events: PropabEvent[];
+}
+
+/** The ONE prominent block: a milestone / finding / breakthrough (Tier 1). */
+export interface FindingItem extends TimelineBase {
+  tier: "finding";
+  event: PropabEvent;
+}
+
+export type TimelineItem =
+  | ReasoningItem
+  | DecisionItem
+  | GenerationItem
+  | MechanicsItem
+  | FindingItem;
 
 export interface CampaignModel {
   rounds: RoundView[];
   workers: Worker[];
   inFlight: InFlightTask[];
-  narrative: NarrativeItem[];
+  /** the flat, ranked center-panel narrative (replaces the old group cards). */
+  timeline: TimelineItem[];
   counts: {
     llm: number;
     tool: number;
@@ -428,11 +480,7 @@ function firstCodeLine(code: unknown): string | null {
 // that occur during a round are captured even though they don't carry a round
 // number). Lifecycle milestones break out as standalone narrative rows.
 
-function buildRounds(events: PropabEvent[], workers: Map<string, Worker>): {
-  rounds: RoundView[];
-  narrative: NarrativeItem[];
-} {
-  const narrative: NarrativeItem[] = [];
+function buildRounds(events: PropabEvent[], workers: Map<string, Worker>): RoundView[] {
   const rounds: RoundView[] = [];
 
   let current: RoundView = newRound(0, true);
@@ -441,29 +489,15 @@ function buildRounds(events: PropabEvent[], workers: Map<string, Worker>): {
   const pushCurrent = () => {
     if (current.isSetup && !hasSetupContent) return;
     rounds.push(current);
-    narrative.push({ kind: "round", round: current });
   };
 
   for (const e of events) {
     const t = e.event_type;
 
-    // Orchestrator activity is its own mid-panel lane: coalesce a consecutive
-    // run of orchestrator.* events into one collapsible group and keep them OUT
-    // of the round buckets (so they surface as the orchestrator narrating the
-    // campaign, not buried in a round's raw-event reveal).
-    if (t.startsWith("orchestrator.")) {
-      const last = narrative[narrative.length - 1];
-      if (last && last.kind === "orchestrator") {
-        last.group.events.push(e);
-        last.group.endedAt = e.timestamp;
-      } else {
-        narrative.push({
-          kind: "orchestrator",
-          group: { key: `orch-${e.event_id}`, events: [e], startedAt: e.timestamp, endedAt: e.timestamp },
-        });
-      }
-      continue;
-    }
+    // Orchestrator reasoning/decision events are the flat timeline's job, not a
+    // round bucket's — keep them out so they never pollute the per-round compute
+    // tallies the rail (Compute / Metrics) reads.
+    if (t.startsWith("orchestrator.")) continue;
 
     if (t === "round.started") {
       pushCurrent();
@@ -475,8 +509,8 @@ function buildRounds(events: PropabEvent[], workers: Map<string, Worker>): {
     }
 
     if (MILESTONE_STANDALONE.has(t)) {
-      narrative.push({ kind: "milestone", event: e });
-      // campaign.started still counts as setup context but is shown standalone.
+      // Lifecycle milestones surface in the flat timeline as Tier-1 blocks, not
+      // in the round buckets.
       continue;
     }
 
@@ -538,7 +572,122 @@ function buildRounds(events: PropabEvent[], workers: Map<string, Worker>): {
     if (!r.hypothesesGenerated && r.workers.length) r.hypothesesGenerated = r.workers.length;
   }
 
-  return { rounds, narrative };
+  return rounds;
+}
+
+// ── The flat timeline builder (redesign §2/§4) ───────────────────────────────
+// One O(n) pass over the ordered stream that emits the ranked TimelineItem list:
+//   • orchestrator.reasoning/literature/hypothesis_written → a `reasoning` prose
+//     line (a written hypothesis carries a quoted clause);
+//   • orchestrator.decision → a `decision` (verdict inline);
+//   • round.started → a `generation` hairline boundary;
+//   • standalone lifecycle milestones → a Tier-1 `finding` block;
+//   • everything else (tool/code/llm/agent/hypothesis/synthesis bookkeeping) is a
+//     MECHANIC — buffered and folded into ONE dim `mechanics` line when ≥2 of them
+//     with real activity sit between two narrative beats (single strays dropped).
+function buildTimeline(events: PropabEvent[]): TimelineItem[] {
+  const items: TimelineItem[] = [];
+  let buf: PropabEvent[] = [];
+
+  const flush = () => {
+    const b = buf;
+    buf = [];
+    if (b.length < 2) return; // a single stray mechanic is noise — drop it
+    let hyps = 0,
+      exps = 0,
+      tools = 0,
+      code = 0,
+      llm = 0,
+      errors = 0;
+    for (const e of b) {
+      const t = e.event_type;
+      if (t === "tool.called") tools += 1;
+      else if (t === "agent.started") exps += 1;
+      else if (t === "code.result") code += 1;
+      else if (t === "llm.prompt") llm += 1;
+      else if (t === "hypothesis.generated") {
+        const p = e.payload || {};
+        const n = Array.isArray(p.hypotheses) ? p.hypotheses.length : Number(p.count ?? 0);
+        hyps += n || 0;
+      }
+      if (isErr(t)) errors += 1;
+    }
+    // Purely-bookkeeping runs (ledger/best_updated/round.completed/progress) carry
+    // no interesting activity — drop them entirely so the stream stays calm.
+    if (!(hyps || exps || tools || code || llm || errors)) return;
+    const parts: string[] = [];
+    if (hyps) parts.push(`generated ${hyps} hypothes${hyps === 1 ? "is" : "es"}`);
+    if (exps) parts.push(`dispatched ${exps} experiment${exps === 1 ? "" : "s"}`);
+    if (tools) parts.push(`ran ${tools} tool${tools === 1 ? "" : "s"}`);
+    if (code) parts.push(`${code} code run${code === 1 ? "" : "s"}`);
+    if (!parts.length && llm) parts.push(`${llm} model call${llm === 1 ? "" : "s"}`);
+    if (errors) parts.push(`${errors} error${errors === 1 ? "" : "s"}`);
+    items.push({
+      tier: "mechanics",
+      key: `mech-${b[0].event_id}`,
+      at: b[b.length - 1].timestamp,
+      summary: parts.join(" · "),
+      events: b,
+    });
+  };
+
+  for (const e of events) {
+    const t = e.event_type;
+
+    if (t.startsWith("orchestrator.")) {
+      flush();
+      const v = orchestratorView(e);
+      if (v.kind === "decision") {
+        items.push({
+          tier: "decision",
+          key: e.event_id,
+          at: e.timestamp,
+          verdict: v.verdict,
+          dotColor: v.dotColor,
+          label: v.label,
+          claim: v.claim,
+          chips: v.meta,
+          next: v.next,
+        });
+      } else {
+        let text: string;
+        let quote: string | null = null;
+        if (v.kind === "hypothesis") {
+          text = v.label;
+          quote = v.claim;
+        } else if (v.kind === "literature") {
+          text = v.reason ? `${v.label} — ${v.reason}` : v.label;
+        } else {
+          text = v.reason || v.label;
+        }
+        items.push({ tier: "reasoning", key: e.event_id, at: e.timestamp, text, quote });
+      }
+      continue;
+    }
+
+    if (t === "round.started") {
+      flush();
+      const num = payloadRound(e.payload) ?? Number(e.payload?.round) ?? 0;
+      items.push({
+        tier: "generation",
+        key: `gen-${e.event_id}`,
+        at: e.timestamp,
+        label: num ? `round ${num}` : "next round",
+      });
+      continue;
+    }
+
+    if (MILESTONE_STANDALONE.has(t)) {
+      flush();
+      items.push({ tier: "finding", key: e.event_id, at: e.timestamp, event: e });
+      continue;
+    }
+
+    buf.push(e);
+  }
+  flush();
+
+  return items;
 }
 
 function newRound(number: number, isSetup: boolean): RoundView {
@@ -590,7 +739,8 @@ function truncate(s: string, n: number): string {
 export function buildCampaignModel(events: PropabEvent[]): CampaignModel {
   const workerMap = buildWorkers(events);
   const inFlight = buildInFlight(events, workerMap);
-  const { rounds, narrative } = buildRounds(events, workerMap);
+  const rounds = buildRounds(events, workerMap);
+  const timeline = buildTimeline(events);
 
   const workers = Array.from(workerMap.values());
   // Running first, then most-recent activity.
@@ -619,7 +769,7 @@ export function buildCampaignModel(events: PropabEvent[]): CampaignModel {
     rounds,
     workers,
     inFlight,
-    narrative,
+    timeline,
     counts: {
       llm,
       tool,

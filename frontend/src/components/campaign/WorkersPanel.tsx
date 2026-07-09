@@ -1,8 +1,80 @@
 import { useMemo, useState } from "react";
 import type { Worker, WorkerStatus } from "../../lib/model";
+import type { HypothesisTree } from "../../types";
 import { useScrollRef, useVirtual } from "../../lib/useVirtual";
+import { layoutGraph } from "../../lib/treeGraph";
+import { verdictColor } from "../../lib/status";
 import WorkerCard from "./WorkerCard";
 import { StatusDot, workerAccent } from "./bits";
+
+// A compact, non-interactive tree mini-map (redesign §5): nodes colored by
+// verdict so the user sees the shape of the search at a glance, right beside the
+// workers. The full zoom/pan tree lives in its own tab.
+function MiniTree({ tree, question }: { tree: HypothesisTree | undefined; question: string }) {
+  const layout = useMemo(
+    () => layoutGraph(tree, question, { toggled: new Set() }),
+    [tree, question],
+  );
+  const nodeCount = layout.nodes.length - 1; // minus synthetic root
+  if (nodeCount <= 0) return null;
+  const rFor = (depth: number, isRoot: boolean) => (isRoot ? 6 : depth === 1 ? 5 : 4);
+
+  return (
+    <div className="shrink-0 border-t border-line px-[12px] pb-[11px] pt-[9px]">
+      <div className="mb-[7px] flex items-center gap-[8px]">
+        <span className="font-mono text-[9.5px] font-semibold uppercase tracking-[0.12em] text-ink-3">
+          Search tree
+        </span>
+        <span className="font-mono text-[9.5px] text-ink-4">
+          {nodeCount} node{nodeCount === 1 ? "" : "s"}
+        </span>
+      </div>
+      <svg
+        viewBox={`0 0 ${Math.max(1, layout.width)} ${Math.max(1, layout.height)}`}
+        preserveAspectRatio="xMidYMid meet"
+        width="100%"
+        height={124}
+        style={{ display: "block" }}
+        aria-label="Hypothesis search tree, nodes colored by verdict"
+      >
+        {layout.edges.map((e) => (
+          <line
+            key={`${e.from}->${e.to}`}
+            x1={e.x1}
+            y1={e.y1}
+            x2={e.x2}
+            y2={e.y2}
+            stroke="var(--divider)"
+            strokeWidth={1.4}
+          />
+        ))}
+        {layout.nodes.map((n) => {
+          const stroke = n.isRoot ? "var(--text)" : verdictColor(n.verdict);
+          const fill =
+            n.verdict === "confirmed"
+              ? "var(--greenDim)"
+              : n.verdict === "refuted"
+                ? "var(--redDim)"
+                : n.isRoot
+                  ? "var(--text)"
+                  : "var(--rightBg)";
+          return (
+            <circle
+              key={n.id}
+              cx={n.x}
+              cy={n.y}
+              r={rFor(n.depth, n.isRoot)}
+              fill={fill}
+              stroke={stroke}
+              strokeWidth={2}
+              className={n.isFrontier ? "animate-ppulse motion-reduce:animate-none" : ""}
+            />
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
 
 type Row =
   | { type: "header"; key: string; label: string; count: number; live?: boolean }
@@ -73,7 +145,17 @@ function FilterBar({
   );
 }
 
-export default function WorkersPanel({ workers, now }: { workers: Worker[]; now: number }) {
+export default function WorkersPanel({
+  workers,
+  now,
+  tree,
+  question,
+}: {
+  workers: Worker[];
+  now: number;
+  tree: HypothesisTree | undefined;
+  question: string;
+}) {
   const [statusFilter, setStatusFilter] = useState<Set<WorkerStatus>>(new Set());
   const [query, setQuery] = useState("");
   const [openIds, setOpenIds] = useState<Set<string>>(new Set());
@@ -118,15 +200,18 @@ export default function WorkersPanel({ workers, now }: { workers: Worker[]; now:
   const { virtualItems, totalSize } = useVirtual({
     count: rows.length,
     getScrollElement: getScroll,
-    estimateHeight: 150,
+    estimateHeight: 40,
     resetKey,
   });
 
   if (!workers.length) {
     return (
-      <div className="px-[16px] py-6 text-[12px] leading-relaxed text-ink-3">
-        No sub-agents yet. Workers appear here once the orchestrator dispatches
-        hypotheses for experimentation.
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="flex-1 px-[16px] py-6 text-[12px] leading-relaxed text-ink-3">
+          No sub-agents yet. Workers appear here once the orchestrator dispatches
+          hypotheses for experimentation.
+        </div>
+        <MiniTree tree={tree} question={question} />
       </div>
     );
   }
@@ -196,6 +281,7 @@ export default function WorkersPanel({ workers, now }: { workers: Worker[]; now:
           </div>
         )}
       </div>
+      <MiniTree tree={tree} question={question} />
     </div>
   );
 }
