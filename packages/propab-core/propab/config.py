@@ -267,9 +267,9 @@ def _apply_profile(s: Settings) -> None:
             "research_max_hypotheses": 12,
             "research_max_hours": 1.0,
             "research_max_seconds_per_round": 400,
-            "agent_max_steps": 14,
+            "agent_max_steps": 8,
             "agent_min_steps": 2,
-            "agent_max_seconds": 400,
+            "agent_max_seconds": 240,
             "agent_max_tool_calls": 20,
             "agent_tool_n_steps_cap": 80,
             "sandbox_timeout_sec": 90,
@@ -277,7 +277,7 @@ def _apply_profile(s: Settings) -> None:
             "sandbox_code_max_retries": 1,
             "sandbox_after_timeout_llm_rewrite": False,
             "n_steps_default": 80,
-            "max_code_steps_per_hypothesis": 5,
+            "max_code_steps_per_hypothesis": 1,
             "classification_default_dataset": "mnist",
             "llm_http_timeout_sec": 120.0,
             "campaign_compute_budget_seconds": 1800,
@@ -312,7 +312,10 @@ def _apply_profile(s: Settings) -> None:
             # train_model defaults must fit wall clock; agent_tool_n_steps_cap clamps LLM params.
             "n_steps_default": 120,
             "agent_tool_n_steps_cap": 96,
-            "max_code_steps_per_hypothesis": 2,
+            # Research is iterative: allow several construction/search attempts per hypothesis
+            # (attempt -> see the gap -> stronger attempt). Bounded by agent_max_seconds (1800)
+            # + sandbox_timeout_sec, so this does not blow the budget. Was 1 (one-shot).
+            "max_code_steps_per_hypothesis": 5,
             "classification_default_dataset": "mnist",
             "llm_http_timeout_sec": 300.0,
             "campaign_compute_budget_seconds": 14400,
