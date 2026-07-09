@@ -512,6 +512,277 @@ async def _persist_effective_verdict(
     return True
 
 
+# ── Orchestrator observability (C3a) ────────────────────────────────────────
+# Turn decisions the orchestrator ALREADY makes into first-class, plain-language
+# events so the frontend can show the brain thinking (fixes "worker cards but no
+# orchestrator thinking"). This is PURELY ADDITIVE: nothing here changes any
+# verdict, expansion, or control-flow decision — it only DESCRIBES them. The
+# payload builders below are pure + unit-tested; the async emit wrappers are
+# failure-isolated so a telemetry write can never break a campaign.
+
+# Plain-language explanation for each inconclusive subtype (research_quality
+# constants). The human-readable ``why`` field never carries raw jargon; the raw
+# code travels alongside in ``inconclusive_reason`` for machines/debugging.
+_INCONCLUSIVE_WHY: dict[str, str] = {
+    "duplicate_evidence": "duplicate evidence — this finding was already confirmed",
+    "control_calibration": "control calibration — a control node cannot count as a discovery",
+    "metric_missing": "no metric was produced by the experiment",
+    "metric_direction_ambiguous": "the metric's direction was ambiguous",
+    "replication_failed": "the result did not replicate across folds/samples",
+    "code_timeout": "the experiment code timed out before producing a metric",
+    "sample_budget_exhausted": "the sample budget ran out before a decisive result",
+    "experiment_conflict": "the experiment produced conflicting evidence",
+    "claim_not_affirmed": "a metric was computed but it did not affirm the claim",
+}
+
+
+def _short_text(text: Any, limit: int = 160) -> str:
+    """Collapse whitespace and truncate to a short, human-readable snippet."""
+    t = " ".join(str(text or "").split())
+    if len(t) <= limit:
+        return t
+    return t[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _null_p_from_evidence(evidence_obj: Any) -> float | None:
+    """Best-effort extraction of the null-test p-value from parsed evidence."""
+    if not isinstance(evidence_obj, dict):
+        return None
+    for key in ("p_value", "permutation_p", "label_shuffle_permutation_p", "label_shuffle_null_p"):
+        val = evidence_obj.get(key)
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            return float(val)
+    return None
+
+
+def _verdict_action_and_why(
+    effective_verdict: str,
+    worker_verdict: str,
+    inconclusive_reason: str | None,
+) -> tuple[str, str]:
+    """Plain-language (action, why) for a resolved node verdict."""
+    ev = str(effective_verdict or "").lower()
+    if ev == "confirmed":
+        action, why = "confirmed", "evidence passed the honesty gate"
+    elif ev == "refuted":
+        action, why = "refuted", "no signal beyond the null"
+    elif ev == "inconclusive":
+        action = "marked inconclusive"
+        why = _INCONCLUSIVE_WHY.get(
+            str(inconclusive_reason or ""), "insufficient evidence to decide"
+        )
+    else:
+        action, why = (ev or "recorded"), "result recorded"
+    if worker_verdict and str(worker_verdict).lower() != ev and ev:
+        why = f"{why} (downgraded from the worker's '{worker_verdict}')"
+    return action, why
+
+
+def _decision_event_payload(
+    *,
+    node: Any,
+    worker_verdict: str,
+    verdict: str,
+    effective_verdict: str,
+    inconclusive_reason: str | None,
+    evidence_obj: Any,
+    metric_name: str | None,
+    metric_value: Any = None,
+) -> dict[str, Any]:
+    """Structured, plain-language payload for ``ORCHESTRATOR_DECISION``."""
+    action, why = _verdict_action_and_why(effective_verdict, worker_verdict, inconclusive_reason)
+    mv = metric_value
+    if mv is None and isinstance(evidence_obj, dict):
+        mv = evidence_obj.get("metric_value")
+    return {
+        "node_id": str(getattr(node, "id", "") or ""),
+        "hypothesis_text": _short_text(getattr(node, "text", "")),
+        "verdict": str(verdict or ""),
+        "effective_verdict": str(effective_verdict or ""),
+        "worker_verdict": str(worker_verdict or ""),
+        "downgraded": bool(
+            worker_verdict
+            and str(worker_verdict).lower() != str(effective_verdict or "").lower()
+        ),
+        "action": action,
+        "why": why,
+        "metric_name": metric_name or None,
+        "metric_value": mv if isinstance(mv, (int, float)) and not isinstance(mv, bool) else None,
+        "null_p": _null_p_from_evidence(evidence_obj),
+        "inconclusive_reason": inconclusive_reason or None,
+    }
+
+
+def _reasoning_event_payload(*, decision: str, detail: str, **extra: Any) -> dict[str, Any]:
+    """Structured payload for ``ORCHESTRATOR_REASONING`` / ``ORCHESTRATOR_LITERATURE``."""
+    payload: dict[str, Any] = {
+        "decision": str(decision or ""),
+        "detail": _short_text(detail, 240),
+    }
+    for key, val in extra.items():
+        if val is not None:
+            payload[key] = val
+    return payload
+
+
+def _hypothesis_node_kind(node: Any) -> str:
+    """Classify a new node as seed | child | lateral for the UI tree view."""
+    if not getattr(node, "parent_id", None):
+        return "seed"
+    et = str(getattr(node, "expansion_type", "") or "").lower()
+    if et in ("alternative", "generalization"):
+        return "lateral"
+    return "child"
+
+
+def _hypothesis_written_payload(node: Any, *, kind: str | None = None) -> dict[str, Any]:
+    """Structured payload for ``ORCHESTRATOR_HYPOTHESIS_WRITTEN`` (one per new node)."""
+    return {
+        "node_id": str(getattr(node, "id", "") or ""),
+        "parent_id": getattr(node, "parent_id", None) or None,
+        "text": _short_text(getattr(node, "text", "")),
+        "kind": kind or _hypothesis_node_kind(node),
+        "expansion_type": getattr(node, "expansion_type", None) or None,
+        "generation": getattr(node, "generation", None),
+    }
+
+
+async def _safe_emit(emitter: EventEmitter, **kwargs: Any) -> None:
+    """Emit an event, swallowing ANY error — telemetry must never break the loop."""
+    try:
+        await emitter.emit(**kwargs)
+    except Exception:  # noqa: BLE001 — an observability emit must never break the campaign
+        logger.debug("orchestrator observability emit failed", exc_info=True)
+
+
+async def _emit_orchestrator_decision(
+    emitter: EventEmitter,
+    *,
+    campaign_id: str,
+    node: Any,
+    worker_verdict: str,
+    verdict: str,
+    diagnostics: DiagnosticsOutcome,
+    evidence_obj: Any,
+    metric_name: str | None,
+    metric_value: Any = None,
+) -> None:
+    try:
+        inc = getattr(diagnostics, "inconclusive_reason", None) or getattr(
+            node, "inconclusive_reason", None
+        )
+        payload = _decision_event_payload(
+            node=node,
+            worker_verdict=worker_verdict,
+            verdict=verdict,
+            effective_verdict=getattr(diagnostics, "verdict", verdict),
+            inconclusive_reason=inc,
+            evidence_obj=evidence_obj,
+            metric_name=metric_name,
+            metric_value=metric_value,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("orchestrator decision payload build failed", exc_info=True)
+        return
+    await _safe_emit(
+        emitter,
+        session_id=campaign_id,
+        event_type=EventType.ORCHESTRATOR_DECISION,
+        step="orchestrator.decision",
+        payload=payload,
+        hypothesis_id=_node_row_id(campaign_id, payload["node_id"]) if payload.get("node_id") else None,
+    )
+
+
+async def _emit_orchestrator_reasoning(
+    emitter: EventEmitter, *, campaign_id: str, decision: str, detail: str, **extra: Any
+) -> None:
+    try:
+        payload = _reasoning_event_payload(decision=decision, detail=detail, **extra)
+    except Exception:  # noqa: BLE001
+        logger.debug("orchestrator reasoning payload build failed", exc_info=True)
+        return
+    await _safe_emit(
+        emitter,
+        session_id=campaign_id,
+        event_type=EventType.ORCHESTRATOR_REASONING,
+        step="orchestrator.reasoning",
+        payload=payload,
+    )
+
+
+async def _emit_orchestrator_generation(
+    emitter: EventEmitter,
+    *,
+    campaign_id: str,
+    generation: int,
+    decision: str,
+    detail: str,
+    nodes: list[Any] | None,
+    **reasoning_extra: Any,
+) -> None:
+    """Emit ONE reasoning event + one hypothesis-written event per new node."""
+    node_list = list(nodes or [])
+    await _emit_orchestrator_reasoning(
+        emitter,
+        campaign_id=campaign_id,
+        decision=decision,
+        detail=detail,
+        generation=generation,
+        count=len(node_list),
+        **reasoning_extra,
+    )
+    for node in node_list:
+        try:
+            payload = _hypothesis_written_payload(node)
+        except Exception:  # noqa: BLE001
+            logger.debug("orchestrator hypothesis_written payload build failed", exc_info=True)
+            continue
+        await _safe_emit(
+            emitter,
+            session_id=campaign_id,
+            event_type=EventType.ORCHESTRATOR_HYPOTHESIS_WRITTEN,
+            step="orchestrator.hypothesis_written",
+            payload=payload,
+            hypothesis_id=_node_row_id(campaign_id, payload["node_id"]) if payload.get("node_id") else None,
+        )
+
+
+async def _emit_orchestrator_literature(
+    emitter: EventEmitter, *, campaign_id: str, prior_dict: dict[str, Any] | None
+) -> None:
+    try:
+        pd = prior_dict or {}
+        facts = len(pd.get("established_facts") or [])
+        gaps = len(pd.get("open_gaps") or [])
+        contested = len(pd.get("contested_claims") or [])
+        papers = len(pd.get("key_papers") or [])
+        status = str(pd.get("evidence_status") or "")
+        detail = (
+            f"reviewed the literature — {facts} established fact(s), "
+            f"{gaps} open gap(s), {contested} contested claim(s)"
+        )
+        payload = _reasoning_event_payload(
+            decision="reviewed literature",
+            detail=detail,
+            established_facts=facts,
+            open_gaps=gaps,
+            contested_claims=contested,
+            key_papers=papers,
+            evidence_status=status or None,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("orchestrator literature payload build failed", exc_info=True)
+        return
+    await _safe_emit(
+        emitter,
+        session_id=campaign_id,
+        event_type=EventType.ORCHESTRATOR_LITERATURE,
+        step="orchestrator.literature",
+        payload=payload,
+    )
+
+
 def build_campaign_synthesis_payload(campaign: ResearchCampaign) -> dict[str, Any]:
     """Synthesis dict for paper generation — single source of truth with tree ledger."""
     ledger = _campaign_ledger_from_tree(campaign.hypothesis_tree)
@@ -1250,6 +1521,21 @@ async def _maybe_run_campaign_synthesis(
         domain_id=_resolve_synthesis_domain_id(campaign),
         lifetime_context=ctx,
     )
+    if added:
+        # C3a observability: Tier-2 synthesis expanded the frontier — narrate it.
+        _confirmed_n = len(campaign.hypothesis_tree.confirmed)
+        await _emit_orchestrator_generation(
+            emitter,
+            campaign_id=campaign.id,
+            generation=generation,
+            decision="synthesize follow-ups",
+            detail=(
+                f"queue running low — synthesizing {len(added)} follow-up "
+                f"hypotheses from {_confirmed_n} confirmed finding(s) so far"
+            ),
+            nodes=added,
+            source="synthesis",
+        )
     return len(added) > 0
 
 
@@ -1384,7 +1670,26 @@ async def generate_seed_hypotheses(
         question=campaign.question,
         generation=generation,
     )
-    return campaign.hypothesis_tree.add_seeds(seed_dicts, generation=generation)
+    seeds = campaign.hypothesis_tree.add_seeds(seed_dicts, generation=generation)
+    # C3a observability: describe the generation decision + each new seed node.
+    from propab.seed_source import SeedSource as _SeedSource
+
+    _is_anomaly = campaign.seed_source == _SeedSource.ANOMALY.value
+    await _emit_orchestrator_generation(
+        emitter,
+        campaign_id=campaign.id,
+        generation=generation,
+        decision="anomaly seeds" if _is_anomaly else "seed hypotheses",
+        detail=(
+            f"frontier empty — generating {len(seeds)} "
+            + ("anomaly-mechanism seed hypotheses" if _is_anomaly else "seed hypotheses")
+            + " from the question"
+            + (" and prior" if not _is_anomaly else " and detected mechanisms")
+        ),
+        nodes=seeds,
+        source="anomaly" if _is_anomaly else "seed",
+    )
+    return seeds
 
 
 # ── Sub-agent dispatch (pipelined campaign pool) ────────────────────────────
@@ -2174,6 +2479,10 @@ async def run_campaign_loop(
         await db_set_research_session_prior(
             campaign.id, session_factory, json.dumps(prior_dict),
         )
+        # C3a observability: the orchestrator consulted the literature prior.
+        await _emit_orchestrator_literature(
+            emitter, campaign_id=campaign.id, prior_dict=prior_dict,
+        )
         if prior_dict.get("evidence_status") == "INSUFFICIENT_EVIDENCE":
             await emitter.emit(
                 session_id=campaign.id,
@@ -2234,6 +2543,23 @@ async def run_campaign_loop(
                     "baseline_value": campaign.baseline_metric,
                     "baseline_failed": baseline_failed,
                 },
+            )
+            # C3a observability: baseline decision, in plain language.
+            _bl_metric = campaign.breakthrough_criteria.metric_name or "metric"
+            await _emit_orchestrator_reasoning(
+                emitter,
+                campaign_id=campaign.id,
+                decision="baseline measured",
+                detail=(
+                    f"baseline measurement failed — proceeding without a numeric "
+                    f"baseline for {_bl_metric}"
+                    if baseline_failed
+                    else f"measured baseline {_bl_metric} = {campaign.baseline_metric:.4g}; "
+                    f"starting experiments"
+                ),
+                metric_name=_bl_metric,
+                baseline_value=campaign.baseline_metric,
+                baseline_failed=baseline_failed,
             )
             await asyncio.to_thread(write_campaign_snapshot, "post_baseline", campaign, prior_dict)
 
@@ -2313,6 +2639,22 @@ async def run_campaign_loop(
                             diversity_reset_instruction=reset_prompt,
                             lifetime_context=lifetime_seed_context,
                         )
+                        if added:
+                            # C3a observability: frontier-empty Tier-2 expansion.
+                            await _emit_orchestrator_generation(
+                                emitter,
+                                campaign_id=campaign.id,
+                                generation=generation,
+                                decision="synthesize follow-ups",
+                                detail=(
+                                    f"frontier exhausted — synthesizing {len(added)} "
+                                    f"follow-up hypotheses from "
+                                    f"{len(campaign.hypothesis_tree.confirmed)} confirmed "
+                                    f"finding(s) to keep exploring"
+                                ),
+                                nodes=added,
+                                source="synthesis",
+                            )
                         from propab.numerical_seeds import classify_hypothesis_bucket
 
                         # NOTE: no deterministic diversity-fallback seed injection.
@@ -2558,6 +2900,21 @@ async def run_campaign_loop(
                         "verified_true_steps": int(evidence_obj.get("verified_true_steps") or 0),
                         "verified_false_steps": int(evidence_obj.get("verified_false_steps") or 0),
                     },
+                )
+
+                # C3a observability: the orchestrator's per-result JUDGMENT, in
+                # plain language (action + why). Describes the verdict already
+                # decided above (C2 recompute + diagnostics) — changes nothing.
+                await _emit_orchestrator_decision(
+                    emitter,
+                    campaign_id=campaign.id,
+                    node=node,
+                    worker_verdict=worker_verdict,
+                    verdict=verdict,
+                    diagnostics=diagnostics,
+                    evidence_obj=evidence_obj,
+                    metric_name=campaign.breakthrough_criteria.metric_name,
+                    metric_value=result.get("metric_value"),
                 )
 
                 effective_verdict = node.verdict if node else verdict
@@ -2852,6 +3209,21 @@ async def run_campaign_loop(
                         campaign.id,
                     )
                 await asyncio.sleep(1.0 * (attempt + 1))
+        # C3a observability: the orchestrator's closing summary, plain language.
+        _breakthrough = campaign.status == STATUS_BREAKTHROUGH
+        await _emit_orchestrator_reasoning(
+            emitter,
+            campaign_id=campaign.id,
+            decision="finalize campaign",
+            detail=(
+                f"finalizing — {n_confirmed_findings} confirmed finding(s), "
+                f"breakthrough={'yes' if _breakthrough else 'no'} "
+                f"(stop reason: {campaign.stop_reason})"
+            ),
+            confirmed_findings=n_confirmed_findings,
+            breakthrough=_breakthrough,
+            stop_reason=campaign.stop_reason,
+        )
         await emitter.emit(
             session_id=campaign.id,
             event_type=EventType.CAMPAIGN_COMPLETED,

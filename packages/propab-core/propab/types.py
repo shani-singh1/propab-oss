@@ -104,6 +104,14 @@ class EventType(str, Enum):
     HYPO_TREE_EXPANDED = "hypothesis.tree_expanded"
     HYPO_TREE_PRUNED = "hypothesis.tree_pruned"
     HYPO_TREE_FRONTIER_EMPTY = "hypothesis.tree_frontier_empty"
+    # Orchestrator reasoning / activity (C3a — make the brain visible).
+    # Internal enum names only; the UI maps these to plain-language labels (C5).
+    # Purely additive observability: they DESCRIBE decisions the orchestrator
+    # already makes — they never change any verdict, expansion, or control flow.
+    ORCHESTRATOR_DECISION = "orchestrator.decision"
+    ORCHESTRATOR_REASONING = "orchestrator.reasoning"
+    ORCHESTRATOR_HYPOTHESIS_WRITTEN = "orchestrator.hypothesis_written"
+    ORCHESTRATOR_LITERATURE = "orchestrator.literature"
 
 
 @dataclass(slots=True)
