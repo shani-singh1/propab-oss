@@ -26,9 +26,19 @@ def infer_hypothesis_theme(text: str) -> str:
 def classify_verification_method(evidence_summary: str) -> str:
     raw = evidence_summary or ""
     low = raw.lower()
-    if "counterexample" in low or "verified_false" in low or '"verified": false' in low:
+    # Decide verified-true/false from the PARSED INTEGER counters, not substrings:
+    # the old ``"verified_true" in low`` matched ``"verified_true_steps": 0`` (which
+    # actually means NOT verified) and mislabeled refuted/statistical nodes as
+    # ``symbolic_identity``. Fall back to the ``"verified": true/false`` literal only
+    # when the evidence has no structured counters.
+    ev = parse_evidence_obj(raw)
+    vt = int(ev.get("verified_true_steps") or 0)
+    vf = int(ev.get("verified_false_steps") or 0)
+    has_counters = ("verified_true_steps" in ev) or ("verified_false_steps" in ev)
+
+    if vf > 0 or "counterexample" in low or '"verified": false' in low:
         return "counterexample"
-    if "verified_true" in low or '"verified": true' in low:
+    if vt > 0 or (not has_counters and '"verified": true' in low):
         if any(k in low for k in ("certificate", "identity", "parametric", "identically")):
             return "symbolic_identity"
         if any(k in low for k in ("exhaust", "scan", "range", "up to", "for n in", "for n ≤")):
