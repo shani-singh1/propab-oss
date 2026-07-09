@@ -109,14 +109,39 @@ def _candidate_from_stdout(parsed, expected: set[str]) -> tuple[dict | None, str
     return None, ""
 
 
+# General computational-genomics rigor (methodology scaffold — NOT per-problem answers).
+# Encodes the standard corrections a domain expert applies for each analysis TYPE, which the
+# bare base model reaches for but executes imprecisely. Applies to any genomics analysis.
+_RIGOR = """Work as a rigorous computational geneticist. Before coding, STATE THE ESTIMAND
+precisely (what quantity, in which population/subset, on what scale). Then use the estimator
+the field standardises on for that estimand — not a convenient shortcut:
+- Single-cell / expression / eQTL: subtract AMBIENT background (empty-droplet profile) from
+  counts, RESTRICT to the exact cell state/subpopulation named, model counts with a
+  library-size OFFSET (Poisson / negative-binomial GLM), and report the effect on the stated
+  (usually natural-log) rate scale — a per-allele log rate ratio is a GLM coefficient, not a
+  ratio of raw means.
+- Mapping in related/structured samples (QTL, multi-founder): reconstruct latent
+  haplotypes/ancestry (HMM) FIRST, then test association with a mixed model (LMM) that
+  controls relatedness/structure; report the estimate at the likelihood peak.
+- Instrumental-variable / Mendelian-randomisation and selected effects: correct WINNER'S CURSE
+  on discovery estimates and be LD-aware when combining instruments.
+- Demographic / admixture inference: fit the explicit generative model; sex-biased processes
+  need autosome-vs-X (or parent-specific) contrasts, not a single pooled estimate.
+Handle messy data honestly: drop or mask zero-coverage / QC-fail rows, check units and allele
+polarity (ancestral vs derived), and never silently ignore a provided covariate or file.
+Before finalising, SANITY-CHECK the estimate: is its sign and magnitude plausible? If a naive
+and a rigorous estimate disagree, trust the rigorous one and say why. Do not take shortcuts.
+"""
+
 # ── Prompt ────────────────────────────────────────────────────────────────────
 _SYS = """You are a computational-biology research agent solving a GeneBench-Pro problem.
 You work in a Python sandbox (NO network). The problem's data files are staged at
 /work/data_files/. Available libraries: numpy, scipy, pandas, statsmodels, scikit-learn.
 
-Work iteratively like a scientist: first INSPECT the data (shapes, columns, head, dtypes),
-then choose and run the appropriate rigorous analysis, checking your assumptions. Do not
-take shortcuts. When (and only when) you are confident, give the final answer.
+{rigor}
+Work iteratively: first INSPECT the data (shapes, columns, head, dtypes), then run the
+appropriate rigorous analysis, checking your assumptions. When (and only when) your estimate
+is trustworthy, give the final answer.
 
 TASK:
 {task}
@@ -153,11 +178,18 @@ _HISTORY_STEP = """
 
 _FINALIZE = """You have used your analysis budget. You MUST produce an answer now. Choose ONE:
 - If your best numeric estimate is already computed above, output it directly:
-  {{"action": "final", "answer": {{<exact fields>}}, "reasoning": "<method + QC>"}}
+  {"action": "final", "answer": {<exact fields>}, "reasoning": "<method + QC>"}
 - Otherwise write ONE complete Python program that computes the answer from the data and
-  PRINTS as its final stdout line exactly: {{"answer": {{<exact fields>}}, "reasoning": "..."}}
-  as {{"action": "code", "code": "..."}}.
+  PRINTS as its final stdout line exactly: {"answer": {<exact fields>}, "reasoning": "..."}
+  as {"action": "code", "code": "..."}.
 Do NOT ask for more inspection. Use your best estimate even if imperfect. Output ONLY the JSON.
+"""
+
+_LAST_RESORT = """FINAL CHANCE. Output your best numeric estimate NOW as a single JSON object.
+Code is NOT allowed. Use the analysis above; if a value is uncertain, give your best guess
+rather than nothing:
+{"action": "final", "answer": {<exact fields>}, "reasoning": "<brief basis>"}
+Output ONLY the JSON object.
 """
 
 
@@ -175,7 +207,7 @@ async def solve_problem(llm, prob_dir: Path, max_steps: int, code_timeout: int) 
     files = "\n".join(f"  - /work/data_files/{f}" for f in
                        [str(p.relative_to(data_dir)).replace(chr(92), "/")
                         for p in sorted(data_dir.rglob("*")) if p.is_file()])
-    base = _SYS.format(task=task, files=files, max_steps=max_steps,
+    base = _SYS.format(task=task, files=files, max_steps=max_steps, rigor=_RIGOR,
                        expected=", ".join(sorted(expected)) or "(see task)")
 
     history = ""
@@ -251,6 +283,17 @@ async def solve_problem(llm, prob_dir: Path, max_steps: int, code_timeout: int) 
     # Fall back to an answer the code printed if the model never emitted a clean final.
     if final_answer is None and printed_answer is not None:
         final_answer, reasoning = printed_answer, printed_reasoning
+
+    # Guarantee a non-null answer: force a direct best-guess (no code allowed) as the last
+    # resort, so a hard problem yields a real attempt instead of null harness noise.
+    if final_answer is None:
+        try:
+            raw = await _ask(llm, base + _bounded(history) + "\n\n" + _LAST_RESORT)
+            act = _extract_json(raw) or {}
+            final_answer = act.get("answer")
+            reasoning = str(act.get("reasoning", ""))
+        except Exception:  # noqa: BLE001
+            pass
 
     passed, grade = _grade(prob_dir, final_answer, reasoning)
     if os.environ.get("GENEBENCH_DEBUG"):
