@@ -132,6 +132,9 @@ services:
       - EMBED_MODEL=${EMBED_MODEL:-text-embedding-3-small}
       - PROPAB_PROFILE=${PROPAB_PROFILE:-campaign}
       - LITERATURE_SERVICE_URL=${LITERATURE_SERVICE_URL:-http://literature:8020}
+      # General-agent redesign (S0): dissolve the plugin path — every hypothesis runs
+      # the general think-act experimenter with the full tool catalog. Default false.
+      - WORKER_GENERAL_AGENT_MODE=${WORKER_GENERAL_AGENT_MODE:-false}
       # Sandbox reuses the worker image so free-form code has numpy/scipy/torch (network off).
       - SANDBOX_IMAGE=${SANDBOX_IMAGE:-propab-oss-worker:latest}
     restart: unless-stopped

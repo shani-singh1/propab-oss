@@ -143,10 +143,40 @@ honest via tools, no plugin. This validates the design before any teardown.
    The honesty is perfect; the SEARCH needs more budget / stronger moves to match or
    beat known bounds at larger n — a real-discovery concern, not an honesty one.
 
-**Next — S0 (flag-gated, in the dispatch hot path):** add a default-off flag so a real
-campaign skips the plugin-verification bypass, runs think-act, and exposes these tools;
-then run a real B_3 campaign and trace one hypothesis orchestrator→worker→gate (the
-full-pipe proof). Open S0 design tension found: the worker's significance gate (won't
-`stop` until a significance tool ran) is ML-shaped; a math record search's evidence is
-a certified witness, not a p-value — the gate must become evidence-shape-aware (the
-certifier tool should satisfy it for a discovery evidence shape).
+**S0 (flag-gated) — BUILT (commits 8a49aff gate, bfede09 dispatch):** default-off
+`worker_general_agent_mode`. When on, run_sub_agent skips every plugin/dedicated
+verification bypass, forces plan_source=llm (think-act), gives the FULL worker-audience
+catalog (get_for("worker")), skips the plugin confirmation_criteria. The stop-gate was
+generalised (evidence-shape-aware, spec-driven `verification_capable`): a certified
+witness satisfies it the same way a p-value does — resolving the ML-gate tension.
+
+## 7. FULL-PIPE S0 proof + the verdict-pipeline gap (2026-07-09)
+
+Rebuilt the worker image with all of today's code, set the flag ON, and ran the REAL
+`run_sub_agent_async` on a B_3 hypothesis (n=8) end-to-end (the orchestrator's own
+hypothesis generation was stalled on external LLM latency, so the proof drove the exact
+worker dispatch path the S0 changes touch, through the real container + DB). Traced:
+
+| postmortem failure | full-pipe result |
+|---|---|
+| 0 worker think-act calls | **4** `agent.decide_next_step` (real experimenter) |
+| plugin bypass, no agent | `plan_origin=think_act`, **39-tool** full catalog, extremal in tools |
+| wrong object (Sidon density) | used `extremal_set_search` (b3_binary_cube) |
+| scale stuck at n=200 | ran **n=7→size16** AND **n=8→size18** (explicit scales) |
+| honesty | both certified, correctly `is_record=false` (16=known, 18<known 19) |
+
+So the general-agent design works through the real dispatch: the worker designs, runs
+at the requested scale via the trusted tools, certifies, and stays honest — no plugin.
+
+**GAP FOUND (the next fix, BEFORE S3):** the final verdict came back `inconclusive`,
+reason **"no metric-bearing steps executed"**, `n_metric_steps=0`, `metric_value=null`.
+The worker's metric-extraction + verdict assembly (and the orchestrator's central
+verdict_pipeline / classify_evidence_type) is still ML-shaped: it never maps the
+certified witness (`size`, `is_record`) to a metric_value/verdict. Honesty holds (no
+false positive), BUT **this machinery would MISS a true record even if found** — a
+false NEGATIVE, fatal for the discovery goal. The stop-gate fix (S0) correctly let the
+agent STOP after certifying; the missing half is scoring that certified-witness
+evidence. **S2/next must extend evidence-shape awareness from the stop-gate into (a)
+worker metric extraction (metric_value = certified size; record flag) and (b) the
+central verdict_pipeline / classify_evidence_type, so a certified B_3 record maps to
+`confirmed`.** Deployed worker reverted to flag OFF (proven default) until this lands.
