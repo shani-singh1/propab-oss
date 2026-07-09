@@ -595,6 +595,15 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 
 ---
 
+## S. Tools layer (grounded — sampled 2026-07-09)
+
+### S1. Tool clusters + significance tools — KEEP (honesty guards present)
+- **What:** `propab/tools/` clusters by area (statistics, ml_research, deep_learning, mathematics, data_analysis, algorithm_optimization, general_computation, materials, mandrake) + `registry.py` (auto-scan, audience-scoped now) + `model_registry.py`. Each tool module exposes `TOOL_SPEC` + a callable.
+- **Sampled `statistical_significance` (ml_research):** rejects known spec-leak placeholder vectors (`_SPEC_LEAK_VECTORS` — same anti-cheat as think_act L2); **rejects zero-within-group variance** (bitwise-constant replicates ⇒ memoized/stale measurements ⇒ refuses to emit a fake p-value); auto-selects wilcoxon/t-test/mannwhitney; Cohen's d; paired-zero guard. Honest and defensive.
+- **Assessment:** the tools layer matches the core's strong honesty posture (fail-closed, anti-cheat, no fabricated stats). **Action:** KEEP. Remaining: a full per-tool read (esp. `deep_learning/train_model` real-data handling, `data_analysis`, `general_computation`) — sampled, not exhaustive; no bug found in the sample.
+
+---
+
 ## Loop protocol
 1. Pick the highest-severity non-`INVESTIGATE` entry.
 2. For `INVESTIGATE`, do the trace first → assign a real status here (with rationale/tradeoff).
