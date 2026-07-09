@@ -1,9 +1,11 @@
 import type { PropabEvent, Verdict } from "../types";
 import { verdictColor } from "./status";
+import { fmtMetric } from "./format";
 
 // Coarse phase for an event type, used to group the stream and color it.
 export type Phase =
   | "campaign"
+  | "orchestrator"
   | "literature"
   | "hypothesis"
   | "experiment"
@@ -15,6 +17,7 @@ export type Phase =
   | "other";
 
 export function phaseOf(t: string): Phase {
+  if (t.startsWith("orchestrator.")) return "orchestrator";
   if (t.startsWith("campaign.") || t === "session.started" || t === "session.completed")
     return "campaign";
   if (t.startsWith("literature.")) return "literature";
@@ -30,6 +33,7 @@ export function phaseOf(t: string): Phase {
 
 export const PHASE_LABEL: Record<Phase, string> = {
   campaign: "Campaign",
+  orchestrator: "Orchestrator",
   literature: "Literature",
   hypothesis: "Hypothesis",
   experiment: "Experiment",
@@ -102,6 +106,11 @@ export function eventLabel(e: PropabEvent): string {
       return "Paper ready";
     case "paper.section_completed":
       return `Paper section: ${p.section ?? ""}`.trim();
+    case "orchestrator.literature":
+    case "orchestrator.reasoning":
+    case "orchestrator.hypothesis_written":
+    case "orchestrator.decision":
+      return orchestratorView(e).label;
     default:
       return t.replace(/[._]/g, " ");
   }
@@ -164,4 +173,185 @@ export function isErrorEvent(t: string): boolean {
 export function shortId(id: string | null | undefined): string {
   if (!id) return "";
   return id.length > 8 ? id.slice(0, 8) : id;
+}
+
+// ── Orchestrator activity (the mid-panel lane) ───────────────────────────────
+// The backend now narrates its own reasoning via four `orchestrator.*` events
+// (redesign §4/§5). The UI renders these as the orchestrator's activity feed —
+// ALWAYS in plain language, never the raw enum/`decision` string. These helpers
+// turn a raw event into a friendly, color-coded view row.
+
+export type OrchestratorKind = "literature" | "reasoning" | "hypothesis" | "decision";
+
+export function orchestratorKind(t: string): OrchestratorKind | null {
+  switch (t) {
+    case "orchestrator.literature":
+      return "literature";
+    case "orchestrator.reasoning":
+      return "reasoning";
+    case "orchestrator.hypothesis_written":
+      return "hypothesis";
+    case "orchestrator.decision":
+      return "decision";
+    default:
+      return null;
+  }
+}
+
+export function isOrchestratorEvent(t: string): boolean {
+  return t.startsWith("orchestrator.");
+}
+
+export interface OrchestratorView {
+  kind: OrchestratorKind;
+  /** plain-language headline — never a raw enum. */
+  label: string;
+  /** primary supporting line (hypothesis text / the orchestrator's own detail). */
+  detail: string | null;
+  /** tertiary line (e.g. the "why" behind a decision). */
+  note: string | null;
+  /** set only for a decision, drives the row's verdict color. */
+  verdict: Verdict | null;
+  /** small monospace chips (metric, p-value, counts). */
+  meta: string[];
+  /** color of the row's status dot. */
+  dotColor: string;
+}
+
+const num = (v: unknown): number | null =>
+  typeof v === "number" && isFinite(v) ? v : null;
+
+// A p-value against the null, formatted plainly.
+function fmtNullP(v: number): string {
+  if (v < 0.001) return "p < 0.001";
+  const s = v.toFixed(3).replace(/0+$/, "").replace(/\.$/, "");
+  return `p = ${s}`;
+}
+
+// Title-case a plain phrase for the rare unmapped `decision` fallback (the
+// backend already authors these as prose, so this only tidies capitalization).
+function humanize(s: string): string {
+  const t = s.replace(/_/g, " ").trim();
+  return t ? t.charAt(0).toUpperCase() + t.slice(1) : "";
+}
+
+// Friendly headline for a reasoning/generation `decision` string.
+function reasoningHeadline(decision: string, p: Record<string, any>): string {
+  const d = decision.toLowerCase();
+  const count = num(p.count);
+  if (d.includes("baseline")) return "Measured the baseline";
+  if (d.includes("anomaly")) return "Chasing an anomaly";
+  if (d.includes("seed")) return "Planning the first hypotheses";
+  if (d.includes("synthes") || d.includes("follow") || d.includes("expan"))
+    return count != null ? `Generating ${count} follow-up hypotheses` : "Generating follow-up hypotheses";
+  if (d.includes("finaliz")) {
+    const n = num(p.confirmed_findings);
+    return n != null ? `Finalizing — ${n} confirmed` : "Finalizing the campaign";
+  }
+  return decision ? humanize(decision) : "Thinking it through";
+}
+
+export function orchestratorView(e: PropabEvent): OrchestratorView {
+  const p = e.payload || {};
+  const kind = orchestratorKind(e.event_type) ?? "reasoning";
+
+  if (kind === "decision") {
+    const verdict = ((p.effective_verdict || p.verdict) as Verdict) || null;
+    let label: string;
+    switch (verdict) {
+      case "confirmed":
+        label = "Confirmed a hypothesis";
+        break;
+      case "refuted":
+        label = "Refuted a hypothesis";
+        break;
+      case "inconclusive":
+        label = "Marked a hypothesis inconclusive";
+        break;
+      default:
+        label = "Reviewed a result";
+    }
+    const meta: string[] = [];
+    const mv = num(p.metric_value);
+    if (p.metric_name && mv != null) meta.push(`${p.metric_name} ${fmtMetric(mv)}`);
+    const np = num(p.null_p);
+    if (np != null) meta.push(fmtNullP(np));
+    if (p.downgraded) meta.push("adjusted");
+    const detail = typeof p.hypothesis_text === "string" ? p.hypothesis_text : null;
+    const note =
+      (typeof p.why === "string" && p.why) ||
+      (typeof p.inconclusive_reason === "string" && p.inconclusive_reason) ||
+      null;
+    return { kind, label, detail, note, verdict, meta, dotColor: verdictColor(verdict) };
+  }
+
+  if (kind === "literature") {
+    const facts = num(p.established_facts) ?? 0;
+    const gaps = num(p.open_gaps) ?? 0;
+    const contested = num(p.contested_claims) ?? 0;
+    const papers = num(p.key_papers) ?? 0;
+    const meta: string[] = [];
+    if (facts) meta.push(`${facts} facts`);
+    if (gaps) meta.push(`${gaps} gaps`);
+    if (contested) meta.push(`${contested} contested`);
+    if (papers) meta.push(`${papers} papers`);
+    const status = typeof p.evidence_status === "string" ? p.evidence_status : null;
+    return {
+      kind,
+      label: "Reviewed the literature",
+      detail: status ? `Evidence so far: ${status.replace(/_/g, " ")}` : null,
+      note: null,
+      verdict: null,
+      meta,
+      dotColor: "var(--text3)",
+    };
+  }
+
+  if (kind === "hypothesis") {
+    const k = String(p.kind || "").toLowerCase();
+    const label =
+      k === "seed"
+        ? "Wrote a seed hypothesis"
+        : k === "lateral"
+          ? "Wrote a lateral hypothesis"
+          : k === "child"
+            ? "Wrote a follow-up hypothesis"
+            : "Wrote a new hypothesis";
+    return {
+      kind,
+      label,
+      detail: typeof p.text === "string" ? p.text : null,
+      note: null,
+      verdict: null,
+      meta: [],
+      dotColor: "var(--text2)",
+    };
+  }
+
+  // reasoning
+  const decision = typeof p.decision === "string" ? p.decision : "";
+  return {
+    kind,
+    label: reasoningHeadline(decision, p),
+    detail: typeof p.detail === "string" ? p.detail : null,
+    note: null,
+    verdict: null,
+    meta: [],
+    dotColor: "var(--text)",
+  };
+}
+
+// A one-line summary of a run of orchestrator entries, for the group header.
+export function orchestratorGroupSummary(views: OrchestratorView[]): string {
+  const n = { literature: 0, reasoning: 0, hypothesis: 0, decision: 0 };
+  for (const v of views) n[v.kind] += 1;
+  const parts: string[] = [];
+  if (n.literature) parts.push("reviewed the literature");
+  if (n.hypothesis) parts.push(`${n.hypothesis} ${n.hypothesis > 1 ? "hypotheses" : "hypothesis"} written`);
+  if (n.decision) parts.push(`${n.decision} ${n.decision > 1 ? "results reviewed" : "result reviewed"}`);
+  if (n.reasoning && !parts.length) {
+    // A pure-reasoning run reads best as its own first headline.
+    return views.find((v) => v.kind === "reasoning")?.label ?? "Reasoning";
+  }
+  return parts.length ? parts.join(" · ") : "Orchestrator activity";
 }

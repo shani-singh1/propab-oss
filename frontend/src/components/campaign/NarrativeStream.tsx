@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { DiscoverySummary, NarrativeItem, RoundStat, RoundView, Worker } from "../../lib/model";
+import type { DiscoverySummary, NarrativeItem, OrchestratorGroup, RoundStat, RoundView, Worker } from "../../lib/model";
 import { roundPhaseNotes, roundStats } from "../../lib/model";
 import type { PropabEvent } from "../../types";
-import { eventLabel } from "../../lib/events";
+import { eventLabel, orchestratorGroupSummary, orchestratorView, type OrchestratorView } from "../../lib/events";
 import { fmtElapsed, fmtMetric, fmtOffset } from "../../lib/format";
 import { StatusDot, WorkerStatusMeta } from "./bits";
 import { usePrefersReducedMotion } from "./followEdge";
@@ -361,6 +361,75 @@ function LiveEdge({ label }: { label?: string }) {
   );
 }
 
+// ── Orchestrator activity lane (redesign §4) ─────────────────────────────────
+// The mid-panel's headline content: the orchestrator narrating the campaign in
+// plain language. A consecutive run of orchestrator.* events collapses into one
+// block (open by default so its thinking is never hidden), each entry a row
+// color-coded by kind — literature review, reasoning, a hypothesis written, or a
+// verdict decision. Worker chatter lives in the right panel; this lane stays the
+// orchestrator's voice.
+
+function OrchestratorRow({ v, e, start }: { v: OrchestratorView; e: PropabEvent; start: string | null }) {
+  return (
+    <div className="flex items-start gap-[9px] border-t border-line px-[15px] py-[9px] first:border-t-0">
+      <span className="mt-[4px]">
+        <StatusDot color={v.dotColor} size={6} />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-x-[8px] gap-y-[4px]">
+          <span className="text-[12px] font-semibold leading-[1.35] text-ink">{v.label}</span>
+          {v.meta.map((m, i) => (
+            <span
+              key={i}
+              className="rounded bg-chip px-[6px] py-[2px] font-mono text-[9.5px] leading-none text-ink-3"
+            >
+              {m}
+            </span>
+          ))}
+        </div>
+        {v.detail && (
+          <div className="mt-[3px] text-[11.5px] leading-[1.45] text-ink-2">{v.detail}</div>
+        )}
+        {v.note && <div className="mt-[3px] text-[11px] leading-[1.4] text-ink-3">{v.note}</div>}
+      </div>
+      <span className="shrink-0 font-mono text-[10px] leading-[1.6] text-ink-4">
+        {fmtOffset(start, e.timestamp)}
+      </span>
+    </div>
+  );
+}
+
+function OrchestratorGroupCard({ group, start }: { group: OrchestratorGroup; start: string | null }) {
+  const [open, setOpen] = useState(true);
+  const views = useMemo(() => group.events.map(orchestratorView), [group]);
+  const summary = useMemo(() => orchestratorGroupSummary(views), [views]);
+
+  return (
+    <div className="mb-[14px] animate-ptick overflow-hidden rounded-[10px] border border-edge bg-rail/30 motion-reduce:animate-none">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="pp-row flex w-full items-center gap-[10px] px-[15px] py-[11px] text-left"
+      >
+        <StatusDot color="var(--text)" size={8} />
+        <span className="shrink-0 font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-ink-3">
+          Orchestrator
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[12px] leading-none text-ink-2">{summary}</span>
+        <span className="shrink-0 font-mono text-[10px] text-ink-4">{group.events.length}</span>
+        <span className="shrink-0 text-[11px] text-ink-4">{open ? "▾" : "▸"}</span>
+      </button>
+      {open && (
+        <div className="flex flex-col border-t border-line">
+          {views.map((v, i) => (
+            <OrchestratorRow key={group.events[i].event_id} v={v} e={group.events[i]} start={start} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── The stream ───────────────────────────────────────────────────────────────
 // Standalone milestone events are dispatched through the special-event card
 // registry (EventCards) — a breakthrough, a confirmed finding, a paper, and the
@@ -411,16 +480,20 @@ export default function NarrativeStream({
         </div>
       )}
 
-      {narrative.map((it, i) =>
-        it.kind === "milestone" ? (
-          <EventCard
-            key={it.event.event_id}
-            e={it.event}
-            start={start}
-            discovery={discovery}
-            campaignId={campaignId}
-          />
-        ) : (
+      {narrative.map((it, i) => {
+        if (it.kind === "milestone")
+          return (
+            <EventCard
+              key={it.event.event_id}
+              e={it.event}
+              start={start}
+              discovery={discovery}
+              campaignId={campaignId}
+            />
+          );
+        if (it.kind === "orchestrator")
+          return <OrchestratorGroupCard key={it.group.key} group={it.group} start={start} />;
+        return (
           <RoundGroup
             key={it.round.key}
             round={it.round}
@@ -430,8 +503,8 @@ export default function NarrativeStream({
             discovery={discovery}
             defaultOpen={it.round.status === "running" ? i === lastRoundIdx : it.round.isSetup && narrative.length === 1}
           />
-        ),
-      )}
+        );
+      })}
 
       {live?.active && <LiveEdge label={live.label} />}
     </div>

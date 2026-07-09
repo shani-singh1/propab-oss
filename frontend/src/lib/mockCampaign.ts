@@ -86,12 +86,22 @@ export function buildDemoEvents(): PropabEvent[] {
   e.push(ev(2, "orchestrator", "campaign.progress", "campaign.phase", { phase: "prior_build", detail: "Building literature prior (LLM + retrieval) over 41 papers." }));
   e.push(ev(4, "orchestrator", "llm.prompt", "llm.prior", { purpose: "prior_synthesis", model: "claude-opus", call_id: "demo-prior" }));
   e.push(ev(30, "orchestrator", "llm.response", "llm.prior", { purpose: "prior_synthesis", model: "claude-opus", call_id: "demo-prior", duration_ms: 26000, tokens_in: 14200, tokens_out: 3100 }));
+  // Orchestrator narrates its opening moves (redesign §5 orchestrator.* events).
+  e.push(ev(34, "orchestrator", "orchestrator.literature", "orchestrator.literature", { decision: "reviewed literature", detail: "reviewed the literature — 5 established fact(s), 3 open gap(s), 1 contested claim(s)", established_facts: 5, open_gaps: 3, contested_claims: 1, key_papers: 41, evidence_status: "mixed" }));
   e.push(ev(60, "orchestrator", "campaign.baseline_measured", "campaign.baseline_measured", { baseline_metric: 0.612 }));
+  e.push(ev(62, "orchestrator", "orchestrator.reasoning", "orchestrator.reasoning", { decision: "baseline measured", detail: "baseline LOFO R² = 0.612 on the held-out split — the bar every hypothesis must clear." }));
 
   // Round 1
   e.push(ev(70, "orchestrator", "round.started", "round.1.start", { round: 1, round_id: "r1" }));
   e.push(ev(72, "orchestrator", "hypothesis.generated", "hypothesis.generate", { hypotheses: [{}, {}, {}] }));
+  e.push(ev(73, "orchestrator", "orchestrator.reasoning", "orchestrator.reasoning", { decision: "seed hypotheses", detail: "drafted 3 falsifiable seed hypotheses spanning feature scaling, collinearity, and categorical encoding.", generation: 1, count: 3 }));
+  for (const [i, id] of ["h1a", "h1b", "h1c"].entries())
+    e.push(ev(74 + i, "orchestrator", "orchestrator.hypothesis_written", "orchestrator.hypothesis_written", { node_id: id, parent_id: null, text: HYPS[id].text, kind: "seed", generation: 1 }));
   for (const [i, id] of ["h1a", "h1b", "h1c"].entries()) e.push(...workerEvents(id, 80 + i * 40, true, 1));
+  // Orchestrator judges each returned result centrally (redesign §3.5).
+  e.push(ev(224, "orchestrator", "orchestrator.decision", "orchestrator.decision", { node_id: "h1a", hypothesis_text: HYPS.h1a.text, verdict: "confirmed", effective_verdict: "confirmed", worker_verdict: "confirmed", downgraded: false, action: "deepen", why: "LOFO R² rose to 0.68 with a permutation null p = 0.004 — a real, significant lift.", metric_name: "LOFO R²", metric_value: 0.681, null_p: 0.004, inconclusive_reason: null }));
+  e.push(ev(226, "orchestrator", "orchestrator.decision", "orchestrator.decision", { node_id: "h1b", hypothesis_text: HYPS.h1b.text, verdict: "refuted", effective_verdict: "refuted", worker_verdict: "refuted", downgraded: false, action: "drop", why: "Dropping the collinear pair left R² unchanged (null p = 0.61) — no support.", metric_name: "LOFO R²", metric_value: 0.61, null_p: 0.61, inconclusive_reason: null }));
+  e.push(ev(228, "orchestrator", "orchestrator.decision", "orchestrator.decision", { node_id: "h1c", hypothesis_text: HYPS.h1c.text, verdict: "inconclusive", effective_verdict: "inconclusive", worker_verdict: "confirmed", downgraded: true, action: "retune", why: "Worker read it as a win, but the gain sits inside the noise band (null p = 0.14) — not yet decisive.", metric_name: "LOFO R²", metric_value: 0.63, null_p: 0.14, inconclusive_reason: "effect within noise band" }));
   e.push(ev(230, "orchestrator", "synthesis.ledger_updated", "synthesis.ledger", { round: 1 }));
   e.push(ev(232, "orchestrator", "synthesis.breakthrough", "synthesis.breakthrough", { round: 1, finding: "Income scaling lifts R² to 0.68" }, "h1a"));
   // First-class discovery event: a new best-so-far (feeds the Discovery Hero).
@@ -100,7 +110,10 @@ export function buildDemoEvents(): PropabEvent[] {
 
   // Round 2
   e.push(ev(240, "orchestrator", "round.started", "round.2.start", { round: 2, round_id: "r2" }));
+  e.push(ev(241, "orchestrator", "orchestrator.reasoning", "orchestrator.reasoning", { decision: "synthesize follow-ups", detail: "the scaling result is promising — synthesizing 2 follow-up hypotheses to probe interactions and residual structure.", generation: 2, count: 2, source: "synthesis" }));
   e.push(ev(242, "orchestrator", "hypothesis.generated", "hypothesis.generate", { hypotheses: [{}, {}] }));
+  for (const [i, id] of ["h2a", "h2b"].entries())
+    e.push(ev(243 + i, "orchestrator", "orchestrator.hypothesis_written", "orchestrator.hypothesis_written", { node_id: id, parent_id: "h1a", text: HYPS[id].text, kind: "child", expansion_type: "deepen", generation: 2 }));
   for (const [i, id] of ["h2a", "h2b"].entries()) e.push(...workerEvents(id, 250 + i * 40, true, 2));
   e.push(ev(360, "orchestrator", "synthesis.ledger_updated", "synthesis.ledger", { round: 2 }));
   e.push(ev(362, "orchestrator", "round.completed", "round.2.complete", { round: 2, confirmed: 1, refuted: 0, inconclusive: 1, marginal_return: 0.19 }));

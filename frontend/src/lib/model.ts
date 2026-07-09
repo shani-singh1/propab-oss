@@ -87,9 +87,19 @@ export interface RoundView {
   errors: number;
 }
 
+// A run of consecutive orchestrator.* events, shown as one collapsible block in
+// the mid-panel (the orchestrator's activity lane).
+export interface OrchestratorGroup {
+  key: string;
+  events: PropabEvent[];
+  startedAt: string;
+  endedAt: string;
+}
+
 export type NarrativeItem =
   | { kind: "round"; round: RoundView }
-  | { kind: "milestone"; event: PropabEvent };
+  | { kind: "milestone"; event: PropabEvent }
+  | { kind: "orchestrator"; group: OrchestratorGroup };
 
 export interface CampaignModel {
   rounds: RoundView[];
@@ -175,6 +185,11 @@ function buildWorkers(events: PropabEvent[]): Map<string, Worker> {
   };
 
   for (const e of events) {
+    // Orchestrator reasoning/decision events carry a node row id but are NOT
+    // worker activity — they belong to the mid-panel lane, not a worker card
+    // (routing them here would spawn phantom "running" workers for undispatched
+    // nodes and pollute the trace). Keep workers = dispatched sub-agents only.
+    if (e.event_type.startsWith("orchestrator.")) continue;
     const hid = e.hypothesis_id;
     if (!hid) continue;
     const w = ensure(hid);
@@ -431,6 +446,24 @@ function buildRounds(events: PropabEvent[], workers: Map<string, Worker>): {
 
   for (const e of events) {
     const t = e.event_type;
+
+    // Orchestrator activity is its own mid-panel lane: coalesce a consecutive
+    // run of orchestrator.* events into one collapsible group and keep them OUT
+    // of the round buckets (so they surface as the orchestrator narrating the
+    // campaign, not buried in a round's raw-event reveal).
+    if (t.startsWith("orchestrator.")) {
+      const last = narrative[narrative.length - 1];
+      if (last && last.kind === "orchestrator") {
+        last.group.events.push(e);
+        last.group.endedAt = e.timestamp;
+      } else {
+        narrative.push({
+          kind: "orchestrator",
+          group: { key: `orch-${e.event_id}`, events: [e], startedAt: e.timestamp, endedAt: e.timestamp },
+        });
+      }
+      continue;
+    }
 
     if (t === "round.started") {
       pushCurrent();
