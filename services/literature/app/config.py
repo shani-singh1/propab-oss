@@ -97,14 +97,37 @@ class Settings(BaseSettings):
     dedup_similarity_threshold: float = 0.95
 
     # Latency budgets, enforced as soft deadlines in pipeline.py.
+    # ``standard`` is the cold campaign-startup path — it must stay snappy so a
+    # beta campaign starts producing hypotheses fast. It was 60s, which (added
+    # to the 30s frontier-gap augmentation below) let a slow/degraded upstream
+    # push a single /prior to ~90s before the campaign saw anything. The
+    # deadline is a SOFT budget that only bites when sources are slow (a healthy
+    # abstract-only build finishes well inside it), so tightening it does not
+    # change fast-path output — it just makes a degraded build return its
+    # partial prior sooner. deep/exhaustive (offline/seed use) are unchanged.
+    # Tunable via LITERATURE_DEPTH_TIMEOUT_SEC.
     depth_timeout_sec: dict[str, int] = Field(
-        default_factory=lambda: {"standard": 60, "deep": 300, "exhaustive": 900}
+        default_factory=lambda: {"standard": 40, "deep": 300, "exhaustive": 900}
     )
     # Separate, additive deadline for the post-prior frontier-gap search
     # (pipeline.build_prior). Runs AFTER the core prior is built, so it extends
     # total /prior latency by at most this much but can never blank the core
-    # response by eating the depth_timeout_sec budget.
-    gap_augment_timeout_sec: float = 30.0
+    # response by eating the depth_timeout_sec budget. The open_gaps it adds are
+    # strictly additive, so a tighter budget can only drop *extra* gaps, never
+    # core content — was 30s (the second half of the observed ~90s startup),
+    # cut to keep total /prior startup low. Tunable via
+    # LITERATURE_GAP_AUGMENT_TIMEOUT_SEC.
+    gap_augment_timeout_sec: float = 8.0
+
+    # In-process result cache for /prior. Repeated identical builds within a run
+    # (e.g. a campaign restart, an orchestrator retry, or two campaigns on the
+    # same question) return the previously-built prior instead of re-hitting
+    # every upstream. Keyed by (research_question, domain_id, depth, profile);
+    # only non-empty priors are cached so a degraded/empty result is never
+    # pinned and a retry can still recover. TTL keeps it fresh across a run
+    # without ever being a durable store.
+    prior_cache_ttl_sec: float = 300.0
+    prior_cache_max_entries: int = 128
 
     artifacts_dir: str = "./artifacts"
 

@@ -48,8 +48,14 @@ class BaseSource:
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
+            # Split the budget so an *unreachable* upstream fails fast on connect
+            # rather than burning the full read timeout: a dead host should cost
+            # ~10s, not 30s, so a degraded source can never stall campaign start
+            # for the whole read window. The read/write/pool budget stays at the
+            # configured timeout so a healthy-but-large full-text download (deep
+            # mode) is unaffected.
             self._client = httpx.AsyncClient(
-                timeout=self._timeout,
+                timeout=httpx.Timeout(self._timeout, connect=min(10.0, self._timeout)),
                 headers={"User-Agent": self._user_agent},
                 follow_redirects=True,
             )

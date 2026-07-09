@@ -30,8 +30,11 @@ class Settings(BaseSettings):
     # Optional: campaigns fall back to each domain plugin's literature_prior() when unset.
     literature_service_url: str = ""
     # httpx timeout (seconds) for calls to the literature service /prior endpoint.
-    # Prior-building can be slow (fetch + extract + synthesize), so this is generous.
-    literature_service_timeout_sec: float = 600.0
+    # The service self-bounds /prior to ~50-55s (soft depth deadline + grace + the
+    # bounded frontier-gap augmentation), so this client ceiling only matters when the
+    # service itself is UNREACHABLE (process down). 90s fails fast to the orchestrator's
+    # honest embedded-prior fallback instead of hanging a campaign start for minutes.
+    literature_service_timeout_sec: float = 90.0
     # Retrieval depth requested from the literature service (standard|deep|exhaustive).
     literature_service_depth: str = "standard"
     # httpx timeout (seconds) for calls to the literature service /novelty endpoint.

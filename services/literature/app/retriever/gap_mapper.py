@@ -13,6 +13,7 @@ Ranking (agent3.md):
 """
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from typing import Any
@@ -42,7 +43,7 @@ def _rank_key(op: OpenProblem, search_terms: list[str]) -> tuple:
     )
 
 
-async def _scrape_open_problem_source(url: str, *, timeout: float = 15.0) -> list[OpenProblem]:
+async def _scrape_open_problem_source(url: str, *, timeout: float = 8.0) -> list[OpenProblem]:
     """Best-effort generic extraction from a domain-listed open-problem page
     (e.g. an Erdős-problems-style list). Uses the same marker regex as
     ``OpenProblemsExtractor`` — if the page doesn't use those markers, this
@@ -65,7 +66,11 @@ async def _scrape_open_problem_source(url: str, *, timeout: float = 15.0) -> lis
 
 
 async def scrape_declared_open_problem_sources(
-    profile: dict[str, Any], *, seen_statements: set[str] | None = None, timeout: float = 15.0
+    profile: dict[str, Any],
+    *,
+    seen_statements: set[str] | None = None,
+    timeout: float = 8.0,
+    concurrency: int = 4,
 ) -> list[OpenProblem]:
     """Scrape every ``open_problem_sources[].url`` declared in the domain
     profile, de-duplicated against ``seen_statements``. This is the *cheap*
@@ -75,15 +80,38 @@ async def scrape_declared_open_problem_sources(
     domain's curated frontier list even when fetched abstracts carry no
     ``Problem:``/conjecture markers of their own.
 
+    URLs are scraped concurrently (bounded by ``concurrency``) so N declared
+    lists cost ~one round-trip, not N serialized ones — this runs *inside* the
+    core-prior deadline, so a slow declared URL that was previously scraped
+    serially could push synthesis past the hard cap and blank the whole prior.
+    Dedup against ``seen_statements`` is applied deterministically after the
+    gather (in declared order), so the result is identical to the old serial
+    version modulo which duplicate URL "wins" a shared statement.
+
     Domain-general: the URLs come entirely from the profile; this function
     knows nothing about any specific domain."""
     seen = seen_statements if seen_statements is not None else set()
+    urls = [
+        entry.get("url", "")
+        for entry in (profile.get("open_problem_sources", []) or [])
+        if isinstance(entry, dict) and entry.get("url", "")
+    ]
+    if not urls:
+        return []
+
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def _scrape(url: str) -> list[OpenProblem]:
+        async with sem:
+            try:
+                return await _scrape_open_problem_source(url, timeout=timeout)
+            except Exception:
+                return []
+
+    per_url = await asyncio.gather(*(_scrape(u) for u in urls))
     out: list[OpenProblem] = []
-    for entry in profile.get("open_problem_sources", []) or []:
-        url = entry.get("url", "") if isinstance(entry, dict) else ""
-        if not url:
-            continue
-        for op in await _scrape_open_problem_source(url, timeout=timeout):
+    for problems in per_url:  # declared order preserved for stable dedup
+        for op in problems:
             if op.statement not in seen:
                 seen.add(op.statement)
                 out.append(op)
@@ -98,6 +126,8 @@ async def search_open_problems(
     max_terms: int = 5,
     max_docs_per_source: int = 5,
     source_names: list[str] | None = None,
+    concurrency: int = 4,
+    fetch_timeout: float = 8.0,
 ) -> list[OpenProblem]:
     """Fresh search across relevant sources for "<search term> open problem"
     queries, extracting explicit open problems via ``OpenProblemsExtractor``.
@@ -109,7 +139,16 @@ async def search_open_problems(
 
     ``source_names`` restricts which relevant sources are queried (used by the
     prior path to hit only the single fastest/primary source); ``None`` = all
-    relevant sources."""
+    relevant sources.
+
+    The (term × source) units run concurrently (bounded by ``concurrency``)
+    instead of the old fully-serial nested loop, and each full-text fetch is
+    capped by ``fetch_timeout`` so one slow PDF/LaTeX download can't consume the
+    whole (already tight) augmentation budget. Same-source requests still
+    serialize behind that source's polite rate limiter; the win is across
+    sources (``/gaps``) and in never letting a single stalled fetch hold the
+    budget. Dedup is applied deterministically after the gather, so the set of
+    unique open problems is unchanged from the serial version."""
     seen = seen_statements if seen_statements is not None else set()
     search_terms = list(profile.get("search_terms", []) or [])
     extractor = ctx.open_problems_extractor
@@ -117,23 +156,43 @@ async def search_open_problems(
     if source_names is not None:
         relevant_sources = {n: s for n, s in relevant_sources.items() if n in source_names}
 
-    out: list[OpenProblem] = []
-    for term in search_terms[:max_terms]:
-        query = f"{term} open problem"
-        for _name, source in relevant_sources.items():
+    sem = asyncio.Semaphore(max(1, concurrency))
+
+    async def _unit(query: str, source) -> list[OpenProblem]:
+        async with sem:
             try:
                 docs = await source.search(query, profile)
             except Exception:
-                continue
+                return []
+            found: list[OpenProblem] = []
             for raw in docs[:max_docs_per_source]:
                 try:
-                    full_doc: FullTextDocument = await source.fetch_full_text(raw)
+                    full_doc: FullTextDocument = await asyncio.wait_for(
+                        source.fetch_full_text(raw), timeout=fetch_timeout
+                    )
                 except Exception:
                     continue
-                for op in await extractor.extract(full_doc):
-                    if op.statement not in seen:
-                        seen.add(op.statement)
-                        out.append(op)
+                try:
+                    found.extend(await extractor.extract(full_doc))
+                except Exception:
+                    continue
+            return found
+
+    units = [
+        _unit(f"{term} open problem", source)
+        for term in search_terms[:max_terms]
+        for source in relevant_sources.values()
+    ]
+    results = await asyncio.gather(*units, return_exceptions=True)
+
+    out: list[OpenProblem] = []
+    for res in results:
+        if isinstance(res, BaseException):
+            continue
+        for op in res:
+            if op.statement not in seen:
+                seen.add(op.statement)
+                out.append(op)
     return out
 
 

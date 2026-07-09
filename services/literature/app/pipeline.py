@@ -7,7 +7,10 @@ that constructs concrete source/store instances — everything downstream
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import re
+import time
 from typing import Any
 
 from services.literature.app.config import Settings
@@ -43,6 +46,8 @@ from services.literature.app.sources.oeis import OeisSource
 from services.literature.app.sources.pubmed import PubmedSource
 from services.literature.app.sources.semantic_scholar import SemanticScholarSource
 from services.literature.app.sources.zbmath import ZbmathSource
+
+logger = logging.getLogger(__name__)
 
 _ARXIV_ID_RE = re.compile(r"^\d{4}\.\d{4,5}(v\d+)?$")
 
@@ -106,6 +111,11 @@ class LiteraturePipeline:
     def __init__(self, settings: Settings, ctx: PipelineContext) -> None:
         self.settings = settings
         self.ctx = ctx
+        # In-process /prior result cache (see Settings.prior_cache_*). Instance-
+        # scoped: there is exactly one pipeline per running service, so this
+        # serves "repeated identical builds within a run" while a fresh pipeline
+        # (tests, restart) always starts empty. Values are (stored_at, prior).
+        self._prior_cache: dict[str, tuple[float, PriorResponse]] = {}
 
     @classmethod
     async def create(cls, settings: Settings) -> "LiteraturePipeline":
@@ -149,7 +159,15 @@ class LiteraturePipeline:
     async def build_prior(
         self, *, research_question: str, domain_id: str, profile: dict[str, Any], depth: str = "standard"
     ) -> PriorResponse:
-        timeout = self.settings.depth_timeout_sec.get(depth, 60)
+        # Serve a recent identical build straight from cache (campaign restart,
+        # orchestrator retry, two campaigns on the same question) — a repeated
+        # /prior then costs ~0 instead of re-hitting every upstream.
+        cache_key = self._prior_cache_key(research_question, domain_id, profile, depth)
+        cached = self._prior_cache_get(cache_key)
+        if cached is not None:
+            return cached.model_copy(deep=True)
+
+        timeout = self.settings.depth_timeout_sec.get(depth, 40)
         # The budget is passed INTO the pipeline as a soft deadline: when it is
         # hit, the pipeline synthesizes a prior from whatever docs/claims it has
         # gathered so far instead of throwing everything away. A slightly-slow
@@ -174,13 +192,25 @@ class LiteraturePipeline:
             # Hard net tripped (synthesis itself stalled past the grace margin):
             # never fail the whole request — return an empty-but-valid prior and
             # let the caller fall back to the domain plugin's built-in prior.
-            from services.literature.app.models import NoveltyBar
-
-            return PriorResponse(
-                novelty_bar=NoveltyBar(criteria=profile.get("novelty_criteria", "")),
-                sources_consulted=[],
-                papers_indexed=0,
+            logger.warning(
+                "literature build_prior hard-timed out after %.0fs (depth=%s, domain=%s); "
+                "returning empty prior so the caller can fall back",
+                timeout + 5,
+                depth,
+                domain_id,
             )
+            return self._empty_prior(profile)
+        except Exception:
+            # Any unexpected failure inside the core build must degrade to an
+            # empty prior too — a /prior call must never raise into the caller
+            # and stall campaign start; the caller then falls back honestly.
+            logger.exception(
+                "literature build_prior failed unexpectedly (depth=%s, domain=%s); "
+                "returning empty prior so the caller can fall back",
+                depth,
+                domain_id,
+            )
+            return self._empty_prior(profile)
 
         # Frontier-gap augmentation: a bounded "<term> open problem" live search
         # runs *after* the core prior has already been built, under its own
@@ -199,7 +229,67 @@ class LiteraturePipeline:
                 prior.open_gaps = list(prior.open_gaps) + extra
         except Exception:
             pass
+
+        self._prior_cache_put(cache_key, prior)
         return prior
+
+    # -- /prior result cache --------------------------------------------------
+
+    def _empty_prior(self, profile: dict[str, Any]) -> PriorResponse:
+        from services.literature.app.models import NoveltyBar
+
+        return PriorResponse(
+            novelty_bar=NoveltyBar(criteria=profile.get("novelty_criteria", "")),
+            sources_consulted=[],
+            papers_indexed=0,
+        )
+
+    def _prior_cache_key(
+        self, research_question: str, domain_id: str, profile: dict[str, Any], depth: str
+    ) -> str | None:
+        try:
+            profile_repr = json.dumps(profile, sort_keys=True, default=str)
+        except Exception:
+            return None  # unserializable profile → skip caching, build fresh
+        return "\x1f".join((depth, domain_id, research_question.strip(), profile_repr))
+
+    def _prior_cache_get(self, key: str | None) -> PriorResponse | None:
+        if key is None or self.settings.prior_cache_ttl_sec <= 0:
+            return None
+        entry = self._prior_cache.get(key)
+        if entry is None:
+            return None
+        stored_at, prior = entry
+        if (time.monotonic() - stored_at) > self.settings.prior_cache_ttl_sec:
+            self._prior_cache.pop(key, None)  # expired
+            return None
+        return prior
+
+    def _prior_cache_put(self, key: str | None, prior: PriorResponse) -> None:
+        if key is None or self.settings.prior_cache_ttl_sec <= 0:
+            return
+        # Only cache priors that actually carry content: a degraded/empty result
+        # (upstream hiccup) must never be pinned for the TTL, so a later retry
+        # can still recover real evidence.
+        has_content = bool(
+            prior.established_facts
+            or prior.open_gaps
+            or prior.contradictions
+            or prior.dead_ends
+            or prior.tabulated_values
+            or prior.papers_indexed
+        )
+        if not has_content:
+            return
+        # Bound memory: drop the oldest entry once at capacity (dict preserves
+        # insertion order).
+        max_entries = max(1, int(self.settings.prior_cache_max_entries))
+        while len(self._prior_cache) >= max_entries:
+            oldest = next(iter(self._prior_cache), None)
+            if oldest is None:
+                break
+            self._prior_cache.pop(oldest, None)
+        self._prior_cache[key] = (time.monotonic(), prior.model_copy(deep=True))
 
     async def check_novelty(self, *, finding: Finding, profile: dict[str, Any]) -> NoveltyResponse:
         return await _check_novelty(self.ctx, finding, profile)
