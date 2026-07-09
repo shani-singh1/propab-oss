@@ -663,6 +663,35 @@ def attach_permutation_null_to_evidence(
     return evidence_obj
 
 
+# Raw adapter fields the mandrake/materials verdict classifiers
+# (classify_mandrake_verdict / classify_materials_verdict) read directly. The
+# structured evidence builders otherwise RENAME them (permutation_p -> p_value,
+# family_baseline_r2 -> baseline_value) and drop the rest, which would make the
+# ORCHESTRATOR's central re-derivation (verdict_pipeline.compute_authoritative_
+# verdict, C2) see fam_base=0 / p_perm=1 and diverge from the worker verdict.
+# Retaining them is additive and behaviour-preserving: the worker's OWN verdict is
+# computed from `output` before these builders run, and compute_evidence_hash keys
+# on a fixed field set, so no existing behaviour changes.
+_LOFO_ADAPTER_VERDICT_FIELDS = (
+    "mean_r2",
+    "family_baseline_r2",
+    "permutation_p",
+    "bootstrap_ci",
+    "confidence_interval",
+    "compare_result",
+    "within_family_r2",
+    "global_r2",
+)
+
+
+def _retain_lofo_adapter_fields(evidence_obj: dict[str, Any], output: dict[str, Any]) -> None:
+    """Copy the raw LOFO-adapter verdict inputs onto structured evidence (see above)."""
+    for key in _LOFO_ADAPTER_VERDICT_FIELDS:
+        value = output.get(key)
+        if value is not None and key not in evidence_obj:
+            evidence_obj[key] = value
+
+
 def _build_mandrake_evidence(
     *,
     output: dict[str, Any],
@@ -701,6 +730,7 @@ def _build_mandrake_evidence(
         "label_shuffle_permutation_p": output.get("label_shuffle_permutation_p"),
         "label_shuffle_null_p95": output.get("label_shuffle_null_p95"),
     }
+    _retain_lofo_adapter_fields(evidence_obj, output)
     if verdict == "confirmed":
         evidence_obj["verified_true_steps"] = 1
     elif verdict == "refuted":
@@ -768,6 +798,7 @@ def _build_materials_evidence(
         "label_shuffle_null_p95": output.get("label_shuffle_null_p95"),
         "family_leakage_confirmed": output.get("family_leakage_confirmed"),
     }
+    _retain_lofo_adapter_fields(evidence_obj, output)
     if verdict == "confirmed":
         evidence_obj["verified_true_steps"] = 1
     elif verdict == "refuted":

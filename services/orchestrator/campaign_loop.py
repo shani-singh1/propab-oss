@@ -2409,6 +2409,28 @@ async def run_campaign_loop(
                     ),
                 },
             )
+            # C2 — the ORCHESTRATOR is the single verdict authority. Resolve the
+            # campaign's domain plugin ONCE (same mechanism the worker uses:
+            # registry.resolve_domain_plugin over question + campaign domain), then
+            # recompute each worker result's verdict centrally from its RAW evidence
+            # (verdict_pipeline.compute_authoritative_verdict). Behaviour-preserving:
+            # the orchestrator reproduces the exact verdict the worker computed, but
+            # judgment now lives in one place with tree context available.
+            from propab.domain_modules.registry import resolve_domain_plugin
+            from propab.verdict_pipeline import (
+                compute_authoritative_verdict,
+                is_recomputable_evidence,
+            )
+
+            _verdict_plugin = resolve_domain_plugin(
+                question=campaign.question,
+                payload={
+                    "domain_profile": getattr(campaign, "domain_profile", None),
+                    "domain": domain,
+                },
+            )
+            _verdict_min_steps = int(getattr(settings, "min_metric_steps_for_confirm", 2) or 2)
+
             _lifetime_ctx = [lifetime_seed_context]
             async for result in _iter_campaign_pipelined_results(
                 campaign=campaign,
@@ -2424,10 +2446,47 @@ async def run_campaign_loop(
                 lifetime_context_ref=_lifetime_ctx,
             ):
                 node_id = str(result.get("campaign_node_id") or "")
-                verdict = result.get("verdict", "inconclusive")
-                confidence = float(result.get("confidence") or 0.0)
+                worker_verdict = result.get("verdict", "inconclusive")
+                worker_confidence = float(result.get("confidence") or 0.0)
                 evidence = result.get("evidence_summary") or ""
                 total_agent_seconds += float(result.get("duration_sec") or 0.0)
+
+                # C2 — recompute the verdict authoritatively from the worker's RAW
+                # evidence. Only override when the evidence is a genuine verification
+                # result; short-circuit/error payloads (off-topic, tool error, empty
+                # exception blobs) are NOT judgeable and keep the worker's verdict.
+                verdict, confidence = worker_verdict, worker_confidence
+                _raw_ev = parse_evidence_obj(evidence)
+                if is_recomputable_evidence(_raw_ev):
+                    _n = campaign.hypothesis_tree.nodes.get(node_id)
+                    _hyp = {
+                        "text": (_n.text if _n else "") or "",
+                        "test_methodology": (getattr(_n, "test_methodology", "") if _n else "") or "",
+                    }
+                    try:
+                        o_verdict, o_conf, o_reason = compute_authoritative_verdict(
+                            plugin=_verdict_plugin,
+                            hypothesis=_hyp,
+                            evidence=dict(_raw_ev),
+                            campaign_context={
+                                "question": campaign.question,
+                                "min_metric_steps": _verdict_min_steps,
+                            },
+                        )
+                        verdict, confidence = o_verdict, float(o_conf)
+                        if o_verdict != worker_verdict:
+                            logger.warning(
+                                "[campaign %s] orchestrator verdict %r != worker-reported %r "
+                                "for node %s; orchestrator is authoritative. reason=%s",
+                                campaign.id, o_verdict, worker_verdict, node_id,
+                                str(o_reason)[:200],
+                            )
+                    except Exception as exc:  # noqa: BLE001 — never crash the loop on a recompute
+                        logger.warning(
+                            "[campaign %s] authoritative verdict recompute failed for node %s "
+                            "(%s); falling back to worker-reported verdict.",
+                            campaign.id, node_id, exc,
+                        )
 
                 if not campaign.hypothesis_tree.update_node(
                     node_id, verdict, confidence, evidence,
@@ -2450,15 +2509,17 @@ async def run_campaign_loop(
                     failure_reason=str(result.get("failure_reason") or result.get("error") or ""),
                 )
 
-                # C1 split-brain fix: the tree is the single source of truth. If the
-                # diagnostics downgraded the effective verdict/confidence from what the
-                # worker already persisted, mirror the correction to the DB row so the
-                # paper/API can never read a stale "confirmed".
+                # C1 split-brain fix + C2: the tree is the single source of truth and
+                # the orchestrator owns the verdict. The worker persisted its OWN
+                # (worker_verdict, worker_confidence) to the DB row; the orchestrator's
+                # authoritative recompute + diagnostics downgrades may differ. Mirror
+                # the effective verdict to the DB row whenever it diverges from what the
+                # worker wrote, so the paper/API can never read a stale verdict.
                 await _persist_effective_verdict(
                     session_factory,
                     str(result.get("hypothesis_id") or ""),
-                    worker_verdict=verdict,
-                    worker_confidence=confidence,
+                    worker_verdict=worker_verdict,
+                    worker_confidence=worker_confidence,
                     diagnostics=diagnostics,
                 )
 
