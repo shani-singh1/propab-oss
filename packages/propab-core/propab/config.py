@@ -106,7 +106,11 @@ class Settings(BaseSettings):
     # exponential backoff: base * 2**attempt. Keeps long campaigns alive.
     llm_max_retries: int = 3
     llm_retry_base_delay_sec: float = 2.0
-    max_code_steps_per_hypothesis: int = 1
+    # Code attempts allowed per hypothesis. A research workflow is ITERATIVE — attempt a
+    # construction/search, see the gap to the target, write a stronger attempt, repeat — so
+    # a cap of 1 (one shot) blocks that entirely. Total compute stays bounded independently
+    # by agent_max_seconds + sandbox_timeout_sec, so allowing several iterations is safe.
+    max_code_steps_per_hypothesis: int = 5
     n_steps_default: int = 150
     classification_default_dataset: str = "mnist"
     # Verification bar: a hypothesis may only be "confirmed" if its supporting metric was observed
@@ -263,9 +267,9 @@ def _apply_profile(s: Settings) -> None:
             "research_max_hypotheses": 12,
             "research_max_hours": 1.0,
             "research_max_seconds_per_round": 400,
-            "agent_max_steps": 8,
+            "agent_max_steps": 14,
             "agent_min_steps": 2,
-            "agent_max_seconds": 240,
+            "agent_max_seconds": 400,
             "agent_max_tool_calls": 20,
             "agent_tool_n_steps_cap": 80,
             "sandbox_timeout_sec": 90,
@@ -273,7 +277,7 @@ def _apply_profile(s: Settings) -> None:
             "sandbox_code_max_retries": 1,
             "sandbox_after_timeout_llm_rewrite": False,
             "n_steps_default": 80,
-            "max_code_steps_per_hypothesis": 1,
+            "max_code_steps_per_hypothesis": 5,
             "classification_default_dataset": "mnist",
             "llm_http_timeout_sec": 120.0,
             "campaign_compute_budget_seconds": 1800,

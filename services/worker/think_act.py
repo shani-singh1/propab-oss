@@ -232,6 +232,11 @@ What should you do next? Rules:
    Python to compute, search, simulate, or verify whatever the hypothesis requires. This is the
    primary way to attack computational/mathematical problems (combinatorics, number theory,
    search/verification, constructions) where no domain tool applies.
+   ITERATE like a researcher — this is the core of the work: after a code run, compare your
+   result to the TARGET (the best-known / the frontier), diagnose WHY it fell short, then write a
+   STRONGER or genuinely DIFFERENT attempt and run it again. You have up to {max_code_steps} code
+   attempts this hypothesis; do NOT settle for your first attempt when it is below the target —
+   escalate effort (more restarts, a better search, a larger scale) each iteration.
    CODE OUTPUT CONTRACT (mandatory): the program MUST end by printing exactly one JSON line to
    stdout of the form: print(json.dumps({{"sandbox": "ok", ...your result fields...}}))
    Put your real measurements/values (e.g. counts, metrics, found constructions, verification
