@@ -638,6 +638,17 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 
 ---
 
+## U. Live validation of the honesty fixes (2026-07-09, redeployed)
+
+### U1. Three campaigns on the fixed+redeployed stack confirm honest behavior — VALIDATED
+- **Setup:** redeployed all services with tonight's fixes (health checks passed; qdrant healthcheck fix confirmed); cleared the genomics data cache so the corrected Yanai tau regenerates; launched genomics/enzyme_kinetics/math_combinatorics campaigns.
+- **genomics:** `lofo_r2 = -0.42` (was the degenerate `1.0` before the fix), null_p=1.0 → **refuted**. The null/leakage/tau fix works live — it honestly finds no cross-tissue signal instead of fabricating a perfect one.
+- **enzyme_kinetics:** `lofo_r2 ≈ -0.11` → **refuted** (negative R² = no real signal; the `lofo≥0.12` confirm gate correctly blocks confirming a negative-R² result). The corrected within-group target-shuffle null runs with power.
+- **math_combinatorics:** verified characterizations (ratios 0.27/0.78/0.90), no false confirm/breakthrough.
+- **Result:** none falsely confirmed; the genomics degenerate-`1.0` false-signal is gone. Tonight's honesty fixes are validated on live campaigns.
+
+---
+
 ## Loop protocol
 1. Pick the highest-severity non-`INVESTIGATE` entry.
 2. For `INVESTIGATE`, do the trace first → assign a real status here (with rationale/tradeoff).
