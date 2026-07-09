@@ -211,3 +211,82 @@ def test_invalid_breakthrough_direction_is_rejected():
     for bad in ("higher", "lower", "higher_is_worse", "maximize", ""):
         with pytest.raises(ValidationError):
             research.BreakthroughCriteriaRequest(direction=bad)
+
+
+# ── Beta hardening: input validation + malformed-id handling ─────────────────
+
+def test_malformed_uuid_path_param_is_404_not_500():
+    """A malformed campaign/session id must 404 at the boundary, not raise a DB error.
+
+    Path params address rows keyed by a Postgres ``uuid`` column; a non-uuid string
+    would otherwise reach ``CAST(:id AS uuid)`` and surface as a 500. ``validate_uuid``
+    rejects it as 'not found' before any DB access.
+    """
+    from fastapi import HTTPException
+    from services.api.app.deps import validate_uuid
+
+    good = "00000000-0000-0000-0000-00000000c0de"
+    assert validate_uuid(good) == good
+    for bad in ("not-a-uuid", "123", "", "'; DROP TABLE events;--"):
+        with pytest.raises(HTTPException) as ei:
+            validate_uuid(bad)
+        assert ei.value.status_code == 404
+
+
+def test_get_campaign_state_shortcircuits_before_db_on_bad_id():
+    """A malformed id must 404 without touching the DB (fails loudly if it does)."""
+    from fastapi import HTTPException
+
+    class _BoomFactory:
+        def __call__(self, *a, **k):
+            raise AssertionError("DB must not be touched for a malformed id")
+
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(
+            research.get_campaign_state(campaign_id="not-a-uuid", session_factory=_BoomFactory())
+        )
+    assert ei.value.status_code == 404
+
+
+def test_campaign_request_rejects_unknown_and_oversized_fields():
+    """Typo'd/unknown fields 422 (extra=forbid); oversized question is bounded."""
+    from pydantic import ValidationError as PydValidationError
+
+    # Frontend happy-path body still validates unchanged.
+    ok = research.CampaignRequest(
+        question="Which construction maximizes X? [domain_profile:math_combinatorics]",
+        compute_budget_hours=3.0,
+        breakthrough_criteria={
+            "metric_name": "val_accuracy",
+            "improvement_threshold": 0.05,
+            "direction": "higher_is_better",
+            "min_confidence": 0.85,
+            "min_replications": 3,
+        },
+    )
+    assert ok.compute_budget_hours == 3.0
+
+    # A mistyped field name is rejected instead of silently ignored.
+    with pytest.raises(PydValidationError):
+        research.CampaignRequest(question="a valid question", budget_hours=3.0)
+
+    # Oversized free-text is bounded.
+    with pytest.raises(PydValidationError):
+        research.CampaignRequest(question="x" * 8001)
+
+    # Unbounded list input is capped.
+    with pytest.raises(PydValidationError):
+        research.CampaignRequest(
+            question="a valid question here",
+            closed_beliefs=[{"statement": "s", "reason": "r"}] * 201,
+        )
+
+
+def test_resume_request_rejects_unknown_fields_but_allows_frontend_body():
+    """Empty body + the frontend's {orchestrator_directive} still validate; typos 422."""
+    from pydantic import ValidationError as PydValidationError
+
+    research.CampaignResumeRequest()
+    research.CampaignResumeRequest(orchestrator_directive="go")
+    with pytest.raises(PydValidationError):
+        research.CampaignResumeRequest(compute_budget_hourz=2.0)

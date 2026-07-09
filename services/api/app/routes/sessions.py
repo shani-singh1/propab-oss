@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from services.api.app.deps import get_session_factory
+from services.api.app.deps import get_session_factory, validate_uuid
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -14,6 +14,7 @@ async def get_session_state(
     session_id: str,
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> dict:
+    session_id = validate_uuid(session_id, not_found_detail="Session not found")
     async with session_factory() as session:
         row = (
             await session.execute(
@@ -43,6 +44,7 @@ async def get_session_events(
     ),
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> dict:
+    session_id = validate_uuid(session_id, not_found_detail="Session not found")
     async with session_factory() as session:
         exists = (
             await session.execute(
@@ -93,6 +95,7 @@ async def get_session_prior(
     session_id: str,
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> dict:
+    session_id = validate_uuid(session_id, not_found_detail="Session or prior not found")
     async with session_factory() as session:
         prior = (
             await session.execute(
@@ -110,6 +113,7 @@ async def get_session_hypotheses(
     session_id: str,
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> dict:
+    session_id = validate_uuid(session_id, not_found_detail="Session not found")
     async with session_factory() as session:
         rows = (
             await session.execute(
@@ -132,6 +136,7 @@ async def get_session_trace(
     session_id: str,
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> dict:
+    session_id = validate_uuid(session_id, not_found_detail="Session not found")
     async with session_factory() as session:
         rows = (
             await session.execute(
@@ -155,6 +160,7 @@ async def get_session_paper(
     session_id: str,
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> dict:
+    session_id = validate_uuid(session_id, not_found_detail="Paper not ready or session not found")
     async with session_factory() as session:
         row = (
             await session.execute(
@@ -180,6 +186,7 @@ async def get_session_llm_calls(
     session_id: str,
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> dict:
+    session_id = validate_uuid(session_id, not_found_detail="Session not found")
     async with session_factory() as session:
         rows = (
             await session.execute(

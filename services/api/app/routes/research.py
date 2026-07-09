@@ -36,7 +36,7 @@ from propab.config import settings
 from propab.domain_modules.registry import resolve_domain_plugin
 from propab.events import EventEmitter
 from propab.types import EventType
-from services.api.app.deps import get_emitter, get_session_factory
+from services.api.app.deps import get_emitter, get_session_factory, validate_uuid
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,11 @@ async def _dispatch_campaign(
 # ── Campaign endpoints ────────────────────────────────────────────────────────
 
 class BreakthroughCriteriaRequest(BaseModel):
-    metric_name: str = Field(default="val_accuracy")
+    # Reject unknown keys so a typo'd criterion field (e.g. "treshold") fails loudly
+    # with a 422 instead of being silently dropped and running with the default.
+    model_config = ConfigDict(extra="forbid")
+
+    metric_name: str = Field(default="val_accuracy", min_length=1, max_length=128)
     improvement_threshold: float = Field(default=0.05, ge=0.001, le=1.0)
     # Constrain to the two values the scoring logic recognizes. campaign.py treats
     # ANY non-"higher_is_better" string as lower_is_better in some paths (sort key)
@@ -110,6 +114,10 @@ class BreakthroughCriteriaRequest(BaseModel):
 
 class CampaignRequest(BaseModel):
     model_config = ConfigDict(
+        # Reject unknown top-level keys: a mistyped field name (e.g. "budget_hours"
+        # for "compute_budget_hours") would otherwise be silently ignored and the
+        # campaign would launch with an unintended default. Fail with a clear 422.
+        extra="forbid",
         json_schema_extra={
             "examples": [
                 {
@@ -134,6 +142,7 @@ class CampaignRequest(BaseModel):
 
     question: str = Field(
         min_length=8,
+        max_length=8000,
         description="Campaign question; include `[domain_profile:<id>]` for explicit domain routing",
     )
     compute_budget_hours: float = Field(default=4.0, ge=0.1, le=168.0)
@@ -144,7 +153,7 @@ class CampaignRequest(BaseModel):
     policy_mode: str = Field(default="accepted", pattern="^(accepted|candidate)$")
     # Anomaly engine integration (Phase 7–8)
     seed_source: str = Field(default="default", pattern="^(default|anomaly)$")
-    anomaly_artifacts_dir: str | None = Field(default=None)
+    anomaly_artifacts_dir: str | None = Field(default=None, max_length=1024)
     max_hypotheses: int | None = Field(default=None, ge=1, le=500)
     literature_prior: dict[str, Any] | None = Field(
         default=None,
@@ -152,10 +161,12 @@ class CampaignRequest(BaseModel):
     )
     closed_beliefs: list[dict[str, str]] | None = Field(
         default=None,
+        max_length=200,
         description="Belief subspaces to close at launch (statement + reason)",
     )
     orchestrator_directive: str | None = Field(
         default=None,
+        max_length=8000,
         description="Pinned human message for belief_state at campaign start",
     )
 
@@ -168,24 +179,27 @@ class CampaignResponse(BaseModel):
 
 class CampaignResumeRequest(BaseModel):
     model_config = ConfigDict(
+        # Reject unknown keys so a mistyped resume field fails with a clear 422
+        # rather than being silently ignored.
+        extra="forbid",
         json_schema_extra={
             "examples": [
                 {"compute_budget_hours": 4.0, "clear_hypothesis_cap": True},
                 {"belief_reset": "contrarian", "orchestrator_directive": "Test the opposite direction."},
             ]
-        }
+        },
     )
 
     max_hypotheses_cap: int | None = Field(default=None, ge=1, le=500)
     compute_budget_hours: float | None = Field(default=None, ge=0.1, le=168.0)
     clear_hypothesis_cap: bool = False
-    question: str | None = Field(default=None, min_length=8)
+    question: str | None = Field(default=None, min_length=8, max_length=8000)
     belief_reset: str | None = Field(
         default=None,
         pattern="^(contrarian)$",
         description="Replace active beliefs without discarding tree/evidence (fixes.md contrarian run)",
     )
-    orchestrator_directive: str | None = None
+    orchestrator_directive: str | None = Field(default=None, max_length=8000)
 
 
 @router.post(
@@ -372,6 +386,7 @@ async def get_campaign_state(
     campaign_id: str,
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> dict:
+    campaign_id = validate_uuid(campaign_id, not_found_detail="Campaign not found")
     campaign = await db_load_campaign(campaign_id, session_factory)
     if campaign is None:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -437,6 +452,7 @@ async def resume_campaign(
     emitter: EventEmitter = Depends(get_emitter),
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> CampaignResponse:
+    campaign_id = validate_uuid(campaign_id, not_found_detail="Campaign not found")
     req = request
 
     launch_meta: dict | None = None
@@ -553,6 +569,7 @@ async def get_resume_readiness(
     session_factory: async_sessionmaker = Depends(get_session_factory),
 ) -> dict:
     """Pre-resume validation: beliefs, cap persistence, stale status detection."""
+    campaign_id = validate_uuid(campaign_id, not_found_detail="Campaign not found")
     campaign = await db_load_campaign(campaign_id, session_factory)
     if campaign is None:
         raise HTTPException(status_code=404, detail="Campaign not found")

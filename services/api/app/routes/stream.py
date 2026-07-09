@@ -9,7 +9,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from propab.db import load_events_after
-from services.api.app.deps import get_redis, get_session_factory
+from services.api.app.deps import get_redis, get_session_factory, validate_uuid
 
 router = APIRouter(tags=["stream"])
 
@@ -66,8 +66,17 @@ async def event_stream(
             payload = message.get("data")
             yield _sse_frame(payload)
     finally:
-        await pubsub.unsubscribe(channel)
-        await pubsub.close()
+        # Best-effort teardown: if Redis dropped mid-stream, unsubscribe/close can
+        # themselves raise — swallow so the generator exits cleanly and the client
+        # can reconnect (with Last-Event-ID) rather than seeing a crashed connection.
+        try:
+            await pubsub.unsubscribe(channel)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await pubsub.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 @router.get(
@@ -90,6 +99,9 @@ async def stream_session_events(
     session_factory: async_sessionmaker = Depends(get_session_factory),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
 ) -> StreamingResponse:
+    # Reject a malformed id up front (404) instead of opening an SSE connection that
+    # subscribes to a garbage Redis channel and would only ever deliver empty frames.
+    session_id = validate_uuid(session_id, not_found_detail="Session not found")
     # A ``?last_event_id=`` query param is honored as a fallback for clients (e.g.
     # EventSource polyfills) that cannot set the standard header.
     resume_from = last_event_id or request.query_params.get("last_event_id")
