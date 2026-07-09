@@ -120,6 +120,8 @@ TOOL_SPEC = {
         "certified": "bool — holds AND elements distinct (a valid witness of this size)",
         "beats_best_known": "bool — size strictly exceeds published_best (if supplied)",
         "is_record": "bool — certified AND beats an supplied best-known",
+        "best_known_source": "str — 'agent_supplied' (published_best is the CALLER's value, so a "
+                             "record must be corroborated by an independent oeis_lookup before it counts)",
         "violation": "dict|None — a self-certifying counterexample when holds is False",
         "note": "str",
     },
@@ -216,6 +218,12 @@ def certify_witness(
         "beats_best_known": beats,
         "is_record": is_record,
         "best_known": bk,
+        # The reference this record is judged against was SUPPLIED BY THE CALLER, not
+        # derived from a trusted registry. So is_record here is only as trustworthy as
+        # published_best: the verdict layer must corroborate it against an independent
+        # reference (oeis_lookup) before treating it as a discovery — otherwise an agent
+        # fabricates a low published_best and manufactures a false record.
+        "best_known_source": "agent_supplied",
         "violation": violation,
         "note": note,
     })

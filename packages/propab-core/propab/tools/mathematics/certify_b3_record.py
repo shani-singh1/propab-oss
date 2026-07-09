@@ -128,6 +128,9 @@ def certify_b3_record(
                 "is_record": is_record,
                 "n": int(cert.get("n", n_int)),
                 "best_known": bk,
+                # best_known comes from the TRUSTED internal A396704 registry, not a
+                # caller-supplied value — so this record needs no external corroboration.
+                "best_known_source": f"reference:{_A396704}",
                 "record_status": status,
                 "certification": cert,
             },

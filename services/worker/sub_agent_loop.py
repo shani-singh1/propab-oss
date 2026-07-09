@@ -632,6 +632,43 @@ def _as_int_or_none(v: Any) -> int | None:
         return None
 
 
+def _record_reference_corroborated(
+    successful_outputs: list[dict[str, Any]], best_known: int | None
+) -> bool:
+    """True iff a certifier's ``published_best`` is backed by an INDEPENDENT reference
+    lookup in the same run: an ``oeis_lookup`` that returned status 'ok' with
+    ``best_known`` among a matched OEIS sequence's known terms.
+
+    A record claim is only trustworthy if the best-known value it beats came from a
+    REAL reference, not from the agent. certify_witness computes ``is_record`` by
+    trusting the agent-supplied ``published_best``; without this corroboration an agent
+    fabricates a low ``published_best`` (observed: 11 for a size-12 witness),
+    certify_witness dutifully returns ``is_record=true``, and a non-discovery is FALSELY
+    confirmed. Requiring an OEIS-corroborated reference mirrors the
+    ``stat_input_provenance`` guard on the significance path (agent-literal inputs never
+    establish a finding). Conservative by design: if OEIS is unavailable/unmatched the
+    record is treated as unverifiable, per the recognizing-a-novel-record skill.
+    """
+    if best_known is None:
+        return False
+    for o in successful_outputs:
+        if not isinstance(o, dict) or o.get("status") != "ok":
+            continue
+        results = o.get("results")
+        if not isinstance(results, list):
+            continue
+        for r in results:
+            # OEIS-specific shape: an A-numbered sequence with integer terms.
+            if (
+                isinstance(r, dict)
+                and str(r.get("anum") or "").startswith("A")
+                and isinstance(r.get("terms"), list)
+                and best_known in r["terms"]
+            ):
+                return True
+    return False
+
+
 def enrich_certified_witness_evidence(
     evidence_obj: dict[str, Any], successful_outputs: list[dict[str, Any]]
 ) -> None:
@@ -689,11 +726,40 @@ def enrich_certified_witness_evidence(
         evidence_obj["metric_value"] = float(size)
         evidence_obj["n_metric_steps"] = max(1, int(evidence_obj.get("n_metric_steps") or 0))
 
-    if is_record and certified:
+    # A record is only discovery-worthy if the best-known it beats is TRUSTWORTHY. That
+    # holds when either (a) best_known came from a trusted internal reference registry
+    # (certify_b3_record / extremal_set_search read A396704 — best_known_source
+    # "reference:..."), or (b) a caller-supplied best_known (certify_witness,
+    # best_known_source "agent_supplied") is corroborated by an INDEPENDENT oeis_lookup.
+    # Without this an agent fabricates a low published_best and manufactures a false
+    # confirm (observed: certify_witness published_best=11, no oeis_lookup, is_record=true
+    # → confirmed 0.92).
+    best_known_source = str(best.get("best_known_source") or "")
+    trusted_reference = best_known_source.startswith("reference:")
+    reference_corroborated = trusted_reference or _record_reference_corroborated(
+        successful_outputs, best_known
+    )
+    evidence_obj["record_reference_corroborated"] = bool(is_record and reference_corroborated)
+
+    if is_record and certified and reference_corroborated:
         evidence_obj["verified_true_steps"] = max(1, int(evidence_obj.get("verified_true_steps") or 0))
         evidence_obj["discovery_worthy"] = True
         evidence_obj["notes"] = (
-            f"certified record: B_3 set of size {size} strictly beats best-known {best_known}"
+            f"certified record: set of size {size} strictly beats reference-corroborated "
+            f"best-known {best_known}"
+        )
+    elif is_record and certified and not reference_corroborated:
+        # Witness is genuinely certified, but the best-known it 'beats' was NOT
+        # corroborated by an OEIS lookup — an agent-supplied published_best cannot itself
+        # establish a record. Downgrade to a certified-but-unverified claim: verified_true_steps
+        # is NOT set and discovery_worthy=False, so neither the plugin verdict (gated on both)
+        # nor the generic verdict can confirm it.
+        evidence_obj["is_record"] = False
+        evidence_obj["record_claim_unverified"] = True
+        evidence_obj["discovery_worthy"] = False
+        evidence_obj["notes"] = (
+            f"certified valid set of size {size}; claimed to beat best-known {best_known} but that "
+            f"reference was NOT corroborated by an OEIS lookup — record UNVERIFIED, not a discovery"
         )
     else:
         evidence_obj["discovery_worthy"] = False

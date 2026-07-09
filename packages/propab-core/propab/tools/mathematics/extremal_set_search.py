@@ -177,6 +177,9 @@ def extremal_set_search(
                 "is_record": is_record,
                 "beats_best_known": beats_known,
                 "best_known": bk,
+                # best_known is from the TRUSTED internal A396704 registry, not a
+                # caller-supplied value — so this record needs no external corroboration.
+                "best_known_source": f"reference:{_A396704}",
                 "target_to_beat": bk,
                 "record_status": status,
                 "method": res.get("method"),
