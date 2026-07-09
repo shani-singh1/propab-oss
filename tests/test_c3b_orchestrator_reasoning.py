@@ -203,6 +203,75 @@ def test_build_reasoning_prompt_is_pure_and_mentions_final_verdict() -> None:
     assert "Variance predicts specificity" in prompt  # parent text
 
 
+def test_prompt_guides_exploit_near_miss_via_retune_or_deepen() -> None:
+    # Principle 1: a refuted/inconclusive near-miss should steer toward retune (same
+    # hypothesis, changed params) or deepen (narrower child) rather than always spawning
+    # a brand-new hypothesis.
+    tree, parent, node = _tree_with_parent_child()
+    ctx = tree_context_for_reasoning(tree, node, question="Q?")
+    prompt = build_reasoning_prompt(ctx, verdict="refuted", confidence=0.2, max_retune_rounds=3)
+    lower = prompt.lower()
+    assert "near-miss" in lower                       # names the promising-partial-signal case
+    assert "not automatically a dead end" in lower    # refuted/inconclusive != abandon
+    assert 'prefer "retune"' in lower                 # bias to same-hypothesis retune
+    assert "brand-new hypothesis" in lower            # explicitly de-prioritized vs salvage
+
+
+def test_prompt_guides_anti_redundancy_via_tree_context() -> None:
+    # Principle 2: use siblings + confirmed set to avoid re-proposing a tried/known idea.
+    tree, parent, node = _tree_with_parent_child()
+    ctx = tree_context_for_reasoning(tree, node, question="Q?")
+    prompt = build_reasoning_prompt(ctx, verdict="refuted", confidence=0.2, max_retune_rounds=3)
+    assert "ALREADY tried — do NOT re-propose these" in prompt   # sibling block header
+    assert "ALREADY established, do NOT re-test" in prompt       # confirmed block header
+    assert "check the siblings and confirmed lists above" in prompt
+    # the actual sibling/confirmed content is present to be checked against
+    assert "Effect holds in tissue B" in prompt                 # the refuted sibling
+    assert "Variance predicts specificity" in prompt            # a confirmed finding
+
+
+def test_prompt_guides_convergence_on_research_question() -> None:
+    # Principle 3: strategy must converge on answering the campaign question.
+    tree, parent, node = _tree_with_parent_child()
+    ctx = tree_context_for_reasoning(
+        tree, node, question="Does expression variance predict tissue specificity?")
+    prompt = build_reasoning_prompt(ctx, verdict="inconclusive", confidence=0.4, max_retune_rounds=3)
+    assert "Does expression variance predict tissue specificity?" in prompt  # the question is present
+    assert "STAY ON THE QUESTION" in prompt
+    assert "toward answering" in prompt.lower()
+
+
+def test_prompt_guides_drop_on_repeated_failure() -> None:
+    # Principle 4: after repeated refutation with no signal (attempts spent), drop.
+    tree, parent, node = _tree_with_parent_child()
+    ctx = tree_context_for_reasoning(tree, node, question="Q?")
+    prompt = build_reasoning_prompt(ctx, verdict="refuted", confidence=0.1, max_retune_rounds=3)
+    lower = prompt.lower()
+    assert "know when to stop" in lower
+    assert "refuted repeatedly with no salvageable signal" in lower
+    assert "do not churn retunes" in lower
+
+
+def test_prompt_still_requests_strict_json_with_unchanged_action_vocab() -> None:
+    # The enriched guidance must NOT change the parser contract: same JSON keys, same
+    # four-action vocabulary, still parseable by parse_reasoning_decision.
+    tree, parent, node = _tree_with_parent_child()
+    ctx = tree_context_for_reasoning(tree, node, question="Q?")
+    prompt = build_reasoning_prompt(ctx, verdict="inconclusive", confidence=0.4, max_retune_rounds=3)
+    assert '"action": "deepen|retune|spawn_related|drop"' in prompt
+    assert '"child_hypothesis_text"' in prompt
+    assert '"retune_changes"' in prompt
+    assert '"rationale"' in prompt
+    assert "Return ONLY a JSON object" in prompt
+    # a response shaped exactly like the requested contract still parses to a real action
+    d = parse_reasoning_decision(
+        '{"action": "retune", "rationale": "metric near threshold", '
+        '"retune_changes": "increase sample size"}')
+    assert d.action == ACTION_RETUNE
+    assert d.parse_error is False
+    assert d.retune_changes == "increase sample size"
+
+
 # ── 4. parse_reasoning_decision (pure, defensive) ─────────────────────────────
 
 def test_parse_deepen_with_child() -> None:

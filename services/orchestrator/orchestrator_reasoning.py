@@ -272,9 +272,10 @@ _PROMPT_TEMPLATE = """\
 You are the ORCHESTRATOR of a scientific discovery campaign. A worker just finished \
 testing ONE hypothesis. Its honesty VERDICT has ALREADY been decided by a deterministic \
 pipeline and is FINAL — you do NOT re-judge it. Your job is to decide the single best \
-STRATEGIC next move for this line of inquiry, given the whole tree so far.
+STRATEGIC next move for this line of inquiry, so the campaign converges on ANSWERING THE \
+RESEARCH QUESTION with as little wasted work as possible.
 
-Research question:
+Research question (every move should push toward answering THIS):
 {question}
 
 This hypothesis (verdict is FINAL — do not change it):
@@ -285,29 +286,50 @@ This hypothesis (verdict is FINAL — do not change it):
 - depth in tree: {depth}
 
 Parent hypothesis: {parent_text}
-Sibling hypotheses under the same parent:
+Sibling hypotheses under the same parent (ALREADY tried — do NOT re-propose these):
 {siblings_block}
 
 What is working across the campaign: {whats_working}
-Confirmed findings so far ({confirmed_count}):
+Confirmed findings so far ({confirmed_count}) — ALREADY established, do NOT re-test:
 {confirmed_block}
 
+HOW TO DECIDE (read the evidence for signal, not just the verdict):
+1. MINE THE NEAR-MISS. A refuted/inconclusive verdict is NOT automatically a dead end. \
+Scan the evidence summary for a salvageable signal: a metric that landed CLOSE to its \
+threshold, an effect with the RIGHT SIGN but too weak/noisy to confirm, an underpowered \
+or confounded setup, or a methodology flaw the evidence itself hints at. When such a \
+signal exists, KEEP the hypothesis rather than abandoning it — prefer "retune" (same \
+hypothesis, fixed params/data) if the flaw is fixable and attempts remain, or "deepen" \
+(a narrower child that isolates where the effect is real). Only reach for a brand-new \
+hypothesis when the current one is genuinely spent.
+2. DO NOT REPEAT WORK. Before proposing any new hypothesis, check the siblings and \
+confirmed lists above. If your idea restates a sibling, a confirmed finding, or this same \
+node, it is redundant — pick a different action or a genuinely distinct child.
+3. STAY ON THE QUESTION. Every child hypothesis must move the campaign toward answering \
+the research question, not drift into adjacent-but-irrelevant territory.
+4. KNOW WHEN TO STOP. If this line has been refuted repeatedly with NO salvageable signal \
+(e.g. retune attempts exhausted, or a clean null with nothing nearby worth testing), \
+"drop" it — do not churn retunes or spawn look-alike hypotheses to avoid closing a dead end.
+
 Choose ONE action:
-- "deepen": write a NARROWER child hypothesis that converges on WHY / boundary / \
-mechanism of this result. Best when the verdict is confirmed and there is more to pin down.
+- "deepen": write a NARROWER child hypothesis that converges on WHY / boundary / mechanism \
+of this result. Best when the verdict is confirmed, OR when a refuted/inconclusive result \
+still shows a partial signal worth isolating in a tighter sub-case.
 - "retune": re-run the SAME hypothesis with changed params/data (more power, tighter \
-controls, a better null). Best when the result was inconclusive and a fixable setup issue \
-plausibly caused it. Only if attempts remain.
+controls, a better null, a cleaner metric). Best when the result was inconclusive or a \
+near-miss and a fixable setup issue plausibly caused it. Only if attempts remain.
 - "spawn_related": write a LATERAL, related-but-different hypothesis. Best when this line \
-is refuted or saturated but an adjacent idea is promising.
-- "drop": close this line. Best when it is a dead end and nothing nearby is worth testing.
+is truly saturated or refuted with no salvageable signal, but an adjacent idea — not \
+already among the siblings/confirmed above — is promising.
+- "drop": close this line. Best when it is a dead end: no near-miss signal, attempts spent, \
+and nothing distinct nearby is worth testing.
 
 Return ONLY a JSON object, no prose:
 {{
   "action": "deepen|retune|spawn_related|drop",
-  "rationale": "one sentence, plain language, why this move",
-  "child_hypothesis_text": "required for deepen/spawn_related — the new hypothesis, one sentence",
-  "retune_changes": "required for retune — what to change in params/data"
+  "rationale": "one sentence, plain language, why this move (name the signal or dead-end you saw)",
+  "child_hypothesis_text": "required for deepen/spawn_related — the new hypothesis, one sentence, distinct from siblings/confirmed",
+  "retune_changes": "required for retune — what to change in params/data to fix the flaw"
 }}
 """
 
