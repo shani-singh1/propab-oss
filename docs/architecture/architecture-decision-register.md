@@ -587,6 +587,11 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 
 ---
 
+### R4. `objective_spec(is_ml=False)` across ALL 12 domains — KEEP (verified — the val_accuracy-class bug is absent)
+- **What checked:** every domain plugin's `objective_spec` `is_ml` flag + `metric_name` (the honesty frame — `is_ml=False` makes core score against a deterministic baseline≈0 instead of an ML `val_accuracy` baseline; a wrong flag is the "val_accuracy class" false-breakthrough).
+- **Findings:** all 12 domains declare `is_ml=False` with domain-appropriate metrics — coding_theory=`code_minimum_distance`, math=`extremal_witness_ratio`, graph_invariants=`invariant_correlation`, network_diffusion=`cross_family_diffusion_correlation`, genomics/enzyme/materials/mandrake/proteomics=`lofo_r2`, qsar=`loso_r2`, transcriptomics=`loco_r2`, epitope=`laoo_r2`. None uses `val_accuracy` or a trained-ML metric.
+- **Assessment:** the honesty framing is consistent and correct across the whole domain layer — the class of bug that motivated the deterministic frame is not present anywhere. **Action:** KEEP.
+
 ### R3. Deterministic domain verifiers (coding_theory, math_combinatorics) — KEEP (verified)
 - **coding_theory** (deep-read): builds a real binary linear code, computes the TRUE minimum distance by exhaustive enumeration, and does an **independent witness re-check** (`recompute_distance_of_witness`) — if the witness fails independent recomputation it **refuses to certify** ("distance not certifiable"). Plus `is_table_lookup_evidence`/`trivial_rediscovery` guards so a known table value isn't confirmed as a discovery. This is the deterministic analog of the null (independent certification of the witness) and is correctly fail-closed. No bug.
 - **math_combinatorics** (per prior work + PLUGIN_WIRING): the discovery apparatus (`is_B3` → `certify_b3_record` as the sole record gate → `find_max_b3`/CP-SAT) uses an independent certifier re-verifying the witness before any record; `sandbox_exec` runs model-written construction code under an AST screen + restricted builtins + subprocess + timeout. Deterministic, exact.
