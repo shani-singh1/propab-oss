@@ -649,6 +649,17 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 
 ---
 
+## U2. C3b reasoning loop validated LIVE — the orchestrator reasons like a scientist — VALIDATED
+
+Redeployed with `ORCHESTRATOR_REASONING_ENABLED=true` (model gemini-3.1-pro-preview) and ran a genomics campaign. The reasoning loop ran end-to-end: **22 `orchestrator.reasoning`, 20 `orchestrator.decision`, 22 `orchestrator.hypothesis_written`, 1 `orchestrator.literature`** events. Sample transcript (real, coherent scientific reasoning driving strategy off accumulated results):
+- "Since skewness failed to predict held-out tissue expression, we should test if the tissue-specificity index (tau) and mean expression are more robust predictors of cross-tissue conservation."
+- "Since tissue-specific genes failed to show predictable expression in their non-dominant tissues (likely noisy off-target expression), we should test the other half of the research question regarding housekeeping genes."
+- "The initial hypothesis was refuted and appeared to suffer from a feature mismatch (variance instead of length), so we will pivot to directly testing the core research question."
+
+**Honesty preserved:** all verdicts refuted (genomics lofo_r2 = -0.42/-0.29), zero false confirms — the deterministic honesty verdict (C2) held under LLM reasoning; reasoning drove only strategy (which hypothesis to write next). The redesign works: orchestrator = reasoning brain, workers = experimenters, honesty = deterministic. Reasoning *quality* is good on this run (untuned prompt); left flag-gated for the user to tune/approve as the production default.
+
+---
+
 ## Loop protocol
 1. Pick the highest-severity non-`INVESTIGATE` entry.
 2. For `INVESTIGATE`, do the trace first → assign a real status here (with rationale/tradeoff).
