@@ -29,11 +29,11 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 | Subsystem | LOC | Status |
 |---|---|---|
 | Backbone: db/events/llm/celery/api-entry/config | ~1.5k | ✅ (§K) |
-| services/api routes (research/sessions/stream/tools) | 1.1k | 🟡 (research.py read; rest ⬜) |
+| services/api routes (research/sessions/stream/tools) | 1.1k | 🟡 (research.py + stream.py read → §K7; sessions/tools ⬜) |
 | services/orchestrator/campaign_loop.py | 2.9k | 🟡 (verdict/dispatch/apply read; full ⬜) |
 | services/orchestrator (hypotheses/prior_builder/answer_gate/question_domain/lifetime/policy_analyst/ranking/seed_validation/research_loop/diagnostics/budget/ledger) | ~4k | 🟡 (design surface mapped → §M; literature.py/literature_client/retrieval/literature_cache/literature_quality full ⬜) |
 | services/worker/sub_agent_loop.py | 3.0k | 🟡 (verdict/confidence/routing/return read; full ⬜) |
-| services/worker (think_act/permutation_null/sandbox/domain_router/failure_classify/sandbox_code_rewrite/peer_findings) | ~1.5k | 🟡 (think_act/sandbox/domain_router/peer_findings/significance/permutation_null read → §L; failure_classify/sandbox_code_rewrite ⬜) |
+| services/worker (think_act/permutation_null/sandbox/domain_router/failure_classify/sandbox_code_rewrite/peer_findings) | ~1.5k | 🟡 (think_act/sandbox/domain_router/peer_findings/significance/permutation_null/failure_classify read → §L,§K7; sandbox_code_rewrite ⬜) |
 | services/literature (65 files) | 9.2k | ✅ design surface → §P (KEEP; own Gemini egress §P2) |
 | core: hypothesis_tree | 0.9k | ✅ (§G1; from_dict rehydrates both dedup sets — resume-dedup bug fixed+verified; frontier_score policy to move in C3) |
 | core: verdict_pipeline/significance | 0.4k | ✅ (§E, §K) |
@@ -327,6 +327,10 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 - **Why:** keep Celery boundary thin; single significance impl in core.
 - **Assessment/tradeoff:** clean. Clears part of the first audit's E2 worry: significance is NOT duplicated in the worker — it's a re-export. (Open: does `propab.significance.classify_verdict` differ from `verdict_pipeline.classify_verdict`? — verify during the verdict-consolidation of C2.)
 - **Action:** KEEP; resolve the significance-vs-verdict_pipeline classifier question in C2.
+
+### K7. SSE stream (`api/routes/stream.py`) + failure classification — KEEP
+- **What:** `/stream/{session_id}` = redis pubsub → SSE with `id:` lines; on reconnect the client sends `Last-Event-ID` and the server replays the DB backlog (`load_events_after`), client de-dupes by event_id. `failure_classify.classify_exception` turns exceptions into structured `failure_kind` fields (celery/http/timeout/missing-dep) for `AGENT_FAILED` events.
+- **Assessment:** robust reconnection-safe streaming + clean observability. **Important for the redesign:** orchestrator reasoning events (G2/C3) flow through this SAME EventEmitter→events→redis→SSE bus, so C3 only needs to *emit* new event types and C5 to *render* them — no stream plumbing changes. **Action:** KEEP.
 
 ---
 
