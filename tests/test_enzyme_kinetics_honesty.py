@@ -138,18 +138,27 @@ def test_pure_noise_yields_large_p_and_is_not_confirmed(monkeypatch):
 
 # --- 1 & 2: the null must reject a broken / shuffled group signal -------------
 
-def test_shuffled_labels_are_not_confirmed(monkeypatch):
-    """Destroying the group→row alignment must never yield a confirmed verdict."""
+def test_shuffled_target_is_not_confirmed(monkeypatch):
+    """Breaking X→y (shuffling the TARGET) must never confirm — the honest negative
+    control.
+
+    NOTE: this previously shuffled the ``ec_class`` GROUP labels, but
+    ``_grouped_signal_frame`` has a genuine *global* signal (log_kcat = 1.2·mw),
+    which survives group-label shuffling. The old group-shuffle null (a bug — it
+    permuted the split instead of the target) masked this by also losing power on
+    shuffled groups. With the corrected target-permutation null, that data
+    legitimately confirms a real X→y relationship. The real negative control is to
+    destroy X→y itself, which we do here by permuting the target."""
     df = _grouped_signal_frame(seed=1)
     shuffled = df.copy()
     rng = np.random.default_rng(123)
-    shuffled["ec_class"] = rng.permutation(shuffled["ec_class"].to_numpy())
+    shuffled["log_kcat"] = rng.permutation(shuffled["log_kcat"].to_numpy())
     monkeypatch.setattr(EnzymeKineticsAdapter, "load_frame", lambda self: shuffled)
 
     result = run_enzyme_experiment(
         EnzymeExperimentSpec(feature_subset=["molecular_weight", "sequence_length"])
     )
-    verdict, _, _ = classify_enzyme_verdict("shuffled control", result)
+    verdict, _, _ = classify_enzyme_verdict("shuffled target control", result)
     assert verdict in {"refuted", "inconclusive"}, result
     assert result["verified_true_steps"] == 0
 

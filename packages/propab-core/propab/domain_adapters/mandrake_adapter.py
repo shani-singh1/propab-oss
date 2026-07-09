@@ -351,14 +351,25 @@ def _family_label_shuffle_null(
     n_perm: int = 300,
     seed: int = 42,
 ) -> tuple[float, float, list[float]]:
-    """Label-shuffle LOFO null (fixes.md artifact gate). Returns (observed, p_ge, null_samples)."""
+    """Label-shuffle LOFO null (fixes.md artifact gate). Returns (observed, p_ge, null_samples).
+
+    Permutes the TARGET (``y``) WITHIN each family — preserving every family's
+    marginal outcome distribution and the family partition while destroying the
+    X→y relationship. The previous version shuffled ``families`` (the split
+    variable), which left X→y intact so the null R² tracked the observed value and
+    the artifact gate's label-shuffle check had no power. This now matches the
+    correct within-family permutation used by ``_permutation_p_value``.
+    """
     observed = _leave_one_family_out_r2(X, y, families, model)
     rng = np.random.default_rng(seed)
+    unique = np.unique(families)
     null: list[float] = []
     for _ in range(n_perm):
-        perm_families = families.copy()
-        rng.shuffle(perm_families)
-        null.append(_leave_one_family_out_r2(X, y, perm_families, model))
+        perm_y = y.copy()
+        for fam in unique:
+            mask = families == fam
+            perm_y[mask] = rng.permutation(perm_y[mask])
+        null.append(_leave_one_family_out_r2(X, perm_y, families, model))
     arr = np.asarray(null, dtype=float)
     p_ge = float((np.sum(arr >= observed) + 1) / (len(arr) + 1))
     p95 = float(np.percentile(arr, 95))
