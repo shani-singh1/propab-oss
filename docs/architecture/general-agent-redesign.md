@@ -108,3 +108,45 @@ and trace one hypothesis through the whole pipe (the discipline missed before).
 - **Do NOT lose the honesty guarantees** during migration — they move into tools +
   the central gate, and must be tested at each stage (the null tool must have the
   within-group target-shuffle; the certifier must be the independent re-verify).
+
+## 6. S1 done + S0-proof RESULT (worker half validated, 2026-07-09)
+
+**S1 committed** (`b74067a`, additive): `extremal_set_search`, `certify_b3_record`,
+`label_shuffle_null` — faithful wrappers of the audited `find_max_b3` +
+`certify_b3_record` + within-group target-shuffle null. Full suite green (only the
+pre-existing env-only `/app/mandrake-data` path failure).
+
+**S0-proof (worker half):** drove the REAL experimenter (`services.worker.think_act.
+decide_next_action`, model `gemini-3.1-pro-preview`) on a B_3 discovery hypothesis at
+**n=8** (chosen ≠ the tool's example default 7 to expose a silent-default footgun),
+with the S1 tools as the available specs. Result — the exact gap the postmortem left
+is CLOSED:
+- Think-1: chose `tool=extremal_set_search {object:b3_binary_cube, n:8}` — **threaded
+  the requested scale explicitly** (no silent n=200/example default).
+- Executed via the real registry: `find_max_b3` ran 28.9s → **certified** size-18 B_3
+  set; best-known a(8)=19 → `is_record=false`, honest "gap 1" (no false record). The
+  independent certifier ran on the real witness.
+- Think-2: chose `certify_b3_record` on the witness — correctly chains to independent
+  certification.
+
+So a general think-act worker DOES design + run at the orchestrator's scale + stay
+honest via tools, no plugin. This validates the design before any teardown.
+
+**Findings to carry into S2 (structured instruction channel):**
+1. The model passed `time_budget` while the tool param is `time_budget_sec` — silently
+   dropped by `_filter_params` (fell back to default). Names/channel must be explicit.
+2. `n` was explicit here (good), BUT `ToolRegistry._filter_params` fills a missing
+   required param from the spec EXAMPLE — so an omitted `n` would silently run the
+   example default (7). S2 must make scale a required, explicit field in the dispatch
+   so it can never silently default (this is the postmortem's R1 in a new form).
+3. Finder strength: at n=8, 30s, `greedy+dls_climb` reached 18 vs known 19 (gap 1).
+   The honesty is perfect; the SEARCH needs more budget / stronger moves to match or
+   beat known bounds at larger n — a real-discovery concern, not an honesty one.
+
+**Next — S0 (flag-gated, in the dispatch hot path):** add a default-off flag so a real
+campaign skips the plugin-verification bypass, runs think-act, and exposes these tools;
+then run a real B_3 campaign and trace one hypothesis orchestrator→worker→gate (the
+full-pipe proof). Open S0 design tension found: the worker's significance gate (won't
+`stop` until a significance tool ran) is ML-shaped; a math record search's evidence is
+a certified witness, not a p-value — the gate must become evidence-shape-aware (the
+certifier tool should satisfy it for a discovery evidence shape).
