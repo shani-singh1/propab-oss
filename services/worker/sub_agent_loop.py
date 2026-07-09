@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Set as AbstractSet
 from typing import Any, TypedDict
 from uuid import uuid4
 
@@ -41,6 +42,7 @@ from services.worker.significance import (
     any_significance_tool_ran,
     check_significance,
     scan_verification,
+    verification_capable_tool_names,
 )
 from services.worker.think_act import (
     AgentContext,
@@ -264,6 +266,26 @@ class HypothesisEvidence(TypedDict):
     verdict_reason: str
     verified_true_steps: int
     verified_false_steps: int
+
+
+def _select_warm_start_seed(
+    heuristic_steps: list[tuple[str, dict]],
+    verify_names: AbstractSet[str],
+) -> tuple[str, dict] | None:
+    """Pick the warm-start seed step for a think-act agent, or None to skip seeding.
+
+    The seed exists to give the agent real tool-output DATA before it starts
+    reasoning. A ``verification_capable`` tool must NOT be the seed: its heuristic
+    params are the tool's own spec-EXAMPLE object (a placeholder witness the agent
+    never constructed), so auto-running it certifies a canned object AND — because a
+    verification tool satisfies the evidence stop-gate — lets the agent stop after one
+    step without ever searching. Return the first NON-verification step; if every
+    candidate is a verifier, return None (start the agent cold, let it construct).
+    """
+    return next(
+        ((tn, pr) for tn, pr in heuristic_steps if tn not in verify_names),
+        None,
+    )
 
 
 def _heuristic_tool_plan_merged(
@@ -2595,9 +2617,21 @@ async def run_sub_agent_async(payload: dict) -> dict:
                 tool_failures=[],
             )
 
-            # Run the first heuristic step immediately to seed the agent with data
-            if heuristic_steps:
-                first_tool, first_params = heuristic_steps[0]
+            # Warm-start seed: run one heuristic step so the agent has real tool-output
+            # DATA to reason from. But NEVER seed with a verification/certifier tool: its
+            # heuristic params are the tool's own spec-EXAMPLE object (a placeholder
+            # witness the agent never constructed). Auto-running a certifier on that
+            # placeholder both (a) certifies a canned object and (b) — because a
+            # verification tool satisfies the evidence stop-gate — lets the agent STOP
+            # after one step without ever searching (observed: n_tool_steps=1,
+            # inputs_from_sandbox=false, certified=false). A certifier must run on a
+            # witness the agent CONSTRUCTS via think-act, so seed with the first
+            # NON-verification step (or skip seeding entirely if none qualifies).
+            seed_step = _select_warm_start_seed(
+                heuristic_steps, verification_capable_tool_names(specs)
+            )
+            if seed_step is not None:
+                first_tool, first_params = seed_step
                 await emitter.emit(
                     session_id=session_id,
                     event_type=EventType.AGENT_STEP_STARTED,

@@ -124,7 +124,11 @@ TOOL_SPEC = {
         "note": "str",
     },
     "example": {
-        "params": {"witness": [1, 2, 5, 11, 22, 33, 40], "property": "sidon"},
+        # A genuinely valid Sidon set (Mian–Chowla prefix): all pairwise sums are
+        # distinct. The previous example [1,2,5,11,22,33,40] was NOT Sidon
+        # (11+33 = 22+22 = 44), so it certified False — a broken example that agents
+        # copied verbatim. An example must be a valid instance of what it demonstrates.
+        "params": {"witness": [1, 2, 4, 8, 13, 21, 31], "property": "sidon"},
         "output": {"holds": True, "size": 7, "certified": True},
     },
 }

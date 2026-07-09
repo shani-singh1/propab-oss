@@ -122,6 +122,27 @@ def test_think_prompt_renders_with_all_fields():
     assert "<hypothesis_text>" in rendered
 
 
+def test_warm_start_seed_skips_verification_tools():
+    # A certifier seeded with its spec-EXAMPLE witness both certifies a placeholder and
+    # short-circuits the evidence stop-gate (agent stops after 1 step, never searching).
+    # The warm-start seed must skip verification tools and pick the first non-verifier,
+    # or return None so the agent starts cold and constructs its own witness.
+    from services.worker.sub_agent_loop import _select_warm_start_seed
+
+    verify = {"certify_witness", "constraint_solve"}
+    # certify_witness first -> skip it, seed with oeis_lookup.
+    steps = [("certify_witness", {"witness": [1, 2]}), ("oeis_lookup", {"terms": [1, 2]})]
+    assert _select_warm_start_seed(steps, verify) == ("oeis_lookup", {"terms": [1, 2]})
+    # All verification tools -> no seed (start cold).
+    only_verify = [("certify_witness", {"witness": [1]}), ("constraint_solve", {"x": 1})]
+    assert _select_warm_start_seed(only_verify, verify) is None
+    # A non-verification tool first -> seed with it unchanged.
+    normal = [("train_model", {"epochs": 1}), ("certify_witness", {"witness": [1]})]
+    assert _select_warm_start_seed(normal, verify) == ("train_model", {"epochs": 1})
+    # Empty plan -> None.
+    assert _select_warm_start_seed([], verify) is None
+
+
 def test_should_stop_at_max_steps():
     ctx = _make_ctx(steps_taken=10, max_steps=10)
     assert should_stop(ctx) is True

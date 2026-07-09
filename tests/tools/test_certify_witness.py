@@ -19,6 +19,20 @@ def test_registers_verification_capable():
     assert spec.get("verification_capable") is True
 
 
+def test_spec_example_is_a_valid_instance():
+    # Invariant: a certifier's spec EXAMPLE witness must actually certify. A broken
+    # example ([1,2,5,11,22,33,40] certified False — 11+33=22+22=44) was copied
+    # verbatim by agents into placeholder certifications. Re-run the example through
+    # the tool and require it matches the claimed output.
+    spec = next(s for s in _R.get_all_specs() if s["name"] == "certify_witness")
+    ex = spec["example"]
+    r = call(**ex["params"])
+    assert r.success
+    assert r.output["certified"] is True, "certify_witness ships a non-certifying example"
+    assert r.output["holds"] == ex["output"]["holds"]
+    assert r.output["size"] == ex["output"]["size"]
+
+
 # ── sidon (B_2) ───────────────────────────────────────────────────────────────
 def test_sidon_valid():
     r = call(witness=[1, 2, 5, 11], property="sidon")
