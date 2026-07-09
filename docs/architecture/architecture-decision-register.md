@@ -43,7 +43,7 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 | core: research_quality / evidence_binding / scoped_claim / claim_grounding | ~2k | ✅ (§O) |
 | core: paper_compiler / paper_narrative / paper_sections / paper_gate | ~1.9k | ✅ (§O6 + §Q2) |
 | core: telemetry (§Q3 LIVE moat) / telemetry_db / health_metrics / knowledge_graph / numerical_seeds | ~1.5k | 🟡 (telemetry ✅; db/health/kg/seeds ⬜) |
-| domain_modules (12 domains) | 14.7k | 🟡 (genomics ✅; pattern known; rest ⬜) |
+| domain_modules (12 domains) | 14.7k | 🟡 (genomics ✅ deep; new-biology ✅; cross-domain null scan ✅ §R; per-verifier leakage deep-read of 7 remaining ⬜) |
 | domain_adapters / domain_profiles | ~2.1k | ⬜ |
 | anomaly_engine | 1.9k | ✅ (§Q4) |
 | tools (registry ✅; tool impls ⬜) | 4.3k | 🟡 |
@@ -562,6 +562,16 @@ Legend: ✅ code-read + grounded · 🟡 partially read · ⬜ not yet read.
 - **Why:** surface surprising effects as hypothesis seeds.
 - **Assessment/tradeoff:** wired (via `anomaly_seeds` in campaign_loop). Real machinery (1.9k LOC) whose value depends on how often anomaly seeds beat LLM seeds — measure it. Overlaps the generation concern the orchestrator agent will own (B4).
 - **Action:** KEEP-WATCH; under the C3 agent, decide whether anomaly-seeding is a tool the brain calls vs an always-on parallel source.
+
+---
+
+## R. Domain layer — cross-domain honesty consistency (partial — scan 2026-07-09)
+
+### R1. No cross-domain replication of the genomics null bug — KEEP (verified shallow)
+- **What checked:** whether any domain verifier shuffles the split/group variable instead of the target (the genomics §I / verdict bug), and whether the null pattern matches verification type.
+- **Findings:** a scan for `shuffle(groups|tissues|split|…)` across all domains found **zero** — no domain permutes the split instead of the label. Statistical domains (materials, mandrake, enzyme_kinetics, graph_invariants, network_diffusion) carry null/shuffle machinery (expected); deterministic domains (coding_theory=0, math_combinatorics=2 exact) correctly have no distributional null. The 4 new biology domains were already verified to shuffle the target within-group; mandrake/materials permutation p-value was verified correct earlier.
+- **Assessment/tradeoff:** the genomics bug was domain-specific, not systemic. **But this is a shallow (pattern-count) scan, not a per-verifier read** — a full target-in-features leakage audit of each of the 7 non-genomics/non-new-biology domains is still pending (genomics leaked via feature==target, which a shuffle-scan would NOT catch).
+- **Action:** KEEP; do a per-domain verifier deep read (leakage + null + degenerate-metric guard, like the genomics fix) as the remaining domain-layer audit. Status `🟡` until each verifier is read.
 
 ---
 
