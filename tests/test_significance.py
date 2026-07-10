@@ -191,11 +191,18 @@ def test_empty_results():
     assert sig.gate_definitively_failed is False
 
 
-def test_multiple_outputs_takes_best_p():
-    results = [{"p_value": 0.15}, {"p_value": 0.03}]
-    sig = check_significance(results)
-    assert sig.gate_passed is True
+def test_multiple_outputs_bonferroni_corrects_min_p():
+    # C3 fix: the held p_value is the MINIMUM across outputs, but the gate now
+    # Bonferroni-corrects for the number of p-bearing comparisons so an adaptive run
+    # can't cherry-pick the smallest p from N attempts.
+    # Two comparisons, min p=0.03 -> 0.03 > 0.05/2=0.025 -> NOT significant after correction.
+    sig = check_significance([{"p_value": 0.15}, {"p_value": 0.03}])
     assert sig.p_value == pytest.approx(0.03)
+    assert sig.gate_passed is False
+    # A single comparison at p=0.03 is uncorrected (0.05/1) -> significant.
+    assert check_significance([{"p_value": 0.03}]).gate_passed is True
+    # Two comparisons but the min survives correction (0.01 < 0.025) -> significant.
+    assert check_significance([{"p_value": 0.2}, {"p_value": 0.01}]).gate_passed is True
 
 
 def test_any_significance_tool_ran_true():

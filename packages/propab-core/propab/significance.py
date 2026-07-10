@@ -55,6 +55,7 @@ def check_significance(results: list[dict[str, Any]]) -> SignificanceResult:
     effect_size: float | None = None
     ci: list[float] | None = None
     n_obs = 0
+    n_p_comparisons = 0  # how many outputs reported a p-value (adaptive attempts)
     stat_test_ran = False
 
     for out in results:
@@ -64,6 +65,7 @@ def check_significance(results: list[dict[str, Any]]) -> SignificanceResult:
         p = _scan_float(out, _P_VALUE_KEYS)
         if p is not None:
             stat_test_ran = True
+            n_p_comparisons += 1
             if p_value is None or p < p_value:
                 p_value = p
         es = _scan_float(out, _EFFECT_KEYS)
@@ -76,9 +78,15 @@ def check_significance(results: list[dict[str, Any]]) -> SignificanceResult:
 
     gate_passed = False
     method = None
-    if p_value is not None and p_value < 0.05:
+    # C3 fix — the p-value we hold is the MINIMUM across all outputs. Passing it at a flat
+    # 0.05 lets an adaptive run cherry-pick the smallest p from N attempts, inflating the
+    # false-positive rate as exploration grows. Bonferroni-correct by the number of
+    # p-bearing comparisons: a no-op when a single test ran (0.05/1), and appropriately
+    # stricter when several did. (Conservative by design — better to under-confirm.)
+    p_alpha = 0.05 / max(1, n_p_comparisons)
+    if p_value is not None and p_value < p_alpha:
         gate_passed = True
-        method = "p_value"
+        method = "p_value" if n_p_comparisons <= 1 else f"p_value (Bonferroni α=0.05/{n_p_comparisons})"
     if effect_size is not None and abs(effect_size) > 0.2:
         gate_passed = True
         method = method or "effect_size"

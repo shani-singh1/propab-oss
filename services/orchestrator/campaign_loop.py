@@ -2127,6 +2127,17 @@ async def _iter_campaign_pipelined_results(
             pass  # deliberately best-effort: connection teardown errors are irrelevant
 
     for item in pending:
+        # C1 — revoke the still-running task at the batch deadline (the idle-eviction path
+        # already does this at :2074). Without it the worker keeps running and can persist
+        # tool/experiment evidence AFTER its node was marked inconclusive here, diverging
+        # the tree/DB/paper/lifetime state from the recorded verdict.
+        try:
+            await asyncio.to_thread(lambda ar_=item["ar"]: ar_.revoke(terminate=True))
+        except Exception as exc:  # noqa: BLE001 — best-effort; never block finalization
+            logger.warning(
+                "[campaign %s] batch-deadline revoke failed for %s: %s",
+                campaign.id, item["nid"], exc,
+            )
         yield {
             "hypothesis_id": item["db_hid"],
             "campaign_node_id": item["nid"],
@@ -2928,10 +2939,20 @@ async def run_campaign_loop(
                                 str(o_reason)[:200],
                             )
                     except Exception as exc:  # noqa: BLE001 — never crash the loop on a recompute
+                        # C2 fix — FAIL CLOSED. A crash in the authoritative recompute must
+                        # NOT let a worker-reported verdict (possibly "confirmed") stand
+                        # unreviewed: a serialization/plugin/type regression in adjudication
+                        # would otherwise promote an unverified confirmation. Demote to
+                        # inconclusive and record the adjudication error.
+                        verdict, confidence = "inconclusive", 0.0
+                        evidence = (
+                            f"{evidence}\nadjudication_error={type(exc).__name__}: {exc}"
+                            if isinstance(evidence, str) else evidence
+                        )
                         logger.warning(
-                            "[campaign %s] authoritative verdict recompute failed for node %s "
-                            "(%s); falling back to worker-reported verdict.",
-                            campaign.id, node_id, exc,
+                            "[campaign %s] authoritative verdict recompute RAISED for node %s "
+                            "(%s); failing CLOSED to inconclusive (was worker-reported %r).",
+                            campaign.id, node_id, exc, worker_verdict,
                         )
 
                 if not campaign.hypothesis_tree.update_node(

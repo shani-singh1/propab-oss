@@ -98,13 +98,19 @@ def run_sandboxed_python(
             return ""
 
     def _is_timeout_exc(exc: Exception) -> bool:
+        # A genuine wall-clock timeout: container.wait's HTTP read exceeded `wall` (the
+        # sandboxed code ran too long). NOT a daemon connection loss — see below.
         if isinstance(exc, TimeoutError):
             return True
-        if requests is not None and isinstance(
-            exc, (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError)
-        ):
+        if requests is not None and isinstance(exc, requests.exceptions.ReadTimeout):
             return True
         return "timed out" in str(exc).lower() or "read timed out" in str(exc).lower()
+
+    def _is_connection_exc(exc: Exception) -> bool:
+        # C4 — a Docker daemon/socket TRANSPORT fault, not the model's code timing out.
+        # Misclassifying it as docker_timeout makes the worker "shrink/rewrite" perfectly
+        # good code in response to an infrastructure hiccup, and needlessly kills containers.
+        return requests is not None and isinstance(exc, requests.exceptions.ConnectionError)
 
     try:
         try:
@@ -121,6 +127,14 @@ def run_sandboxed_python(
                     "error_type": "docker_timeout",
                     "message": f"sandbox_wall_timeout: exceeded {wall}s",
                     "stdout": stdout,
+                    "stderr": "",
+                }
+            if _is_connection_exc(exc):
+                return {
+                    "ok": False,
+                    "error_type": "docker_transport",
+                    "message": f"docker daemon/socket transport fault (infrastructure, not model code): {exc}",
+                    "stdout": _logs(),
                     "stderr": "",
                 }
             return {"ok": False, "error_type": "execution_error", "message": str(exc), "stdout": _logs(), "stderr": ""}

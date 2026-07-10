@@ -156,6 +156,10 @@ def _is_sandbox_wall_timeout(sandbox_out: dict[str, Any]) -> bool:
     if not isinstance(sandbox_out, dict):
         return False
     et = str(sandbox_out.get("error_type", "") or "").lower()
+    # C4 — a Docker daemon/socket transport fault is infrastructure, NOT a code wall
+    # timeout; never route it into the "shrink/rewrite the code" remediation.
+    if et == "docker_transport":
+        return False
     if "timeout" in et or et in {"docker_read_timeout", "docker_timeout"}:
         return True
     msg = str(sandbox_out.get("message", "") or "").lower()

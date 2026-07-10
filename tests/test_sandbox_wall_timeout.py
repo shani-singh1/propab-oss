@@ -39,3 +39,19 @@ def test_docker_sdk_timeout_kwarg_mismatch_not_wall_timeout() -> None:
         )
         is False
     )
+
+
+def test_docker_transport_fault_is_not_wall_timeout() -> None:
+    # C4 — a Docker daemon/socket transport fault is infrastructure, NOT the model's
+    # code timing out. It must not route into the shrink/rewrite remediation, even though
+    # its message mentions "code" — the error_type gate short-circuits first.
+    assert (
+        _is_sandbox_wall_timeout(
+            {
+                "ok": False,
+                "error_type": "docker_transport",
+                "message": "docker daemon/socket transport fault (infrastructure, not model code): connection reset",
+            }
+        )
+        is False
+    )
