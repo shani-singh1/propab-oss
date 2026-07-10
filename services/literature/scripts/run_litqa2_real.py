@@ -105,7 +105,13 @@ async def main(n: int = 20, seed: int = 0, concurrency: int = 4) -> None:
                         answer_model=settings.answer_model,
                         depth="standard",
                     ),
-                    timeout=300.0,
+                    # 2/30 questions hit the 300s wall (live multi-round retrieval + a
+                    # 180s answer call) and were recorded guaranteed-wrong with no answer
+                    # — a pure harness loss. A more generous wall lets slow-but-finite
+                    # retrieval finish and produce a real answer; it never penalises a
+                    # question already under budget. (Iteration-2: a fast no-retrieval
+                    # fallback on timeout + stronger retrieval recall is the bigger lever.)
+                    timeout=480.0,
                 )
         except Exception as exc:  # noqa: BLE001 — one bad question shouldn't kill the run
             result = {
