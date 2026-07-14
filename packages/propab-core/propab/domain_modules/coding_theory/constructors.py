@@ -192,21 +192,36 @@ def compute_min_distance(matrix: Any) -> dict[str, Any]:
         return result
 
     g_int = g.astype(np.int64)
-    min_w = n + 1
+    # VECTORIZED exhaustive enumeration: build every message at once, one matmul, one weight sum.
+    #
+    # This is the search's throughput ceiling, so the old Python loop over 2^k messages (one tiny
+    # numpy call each) *was* the wall: measured 469 ms/candidate at k=14, i.e. ~2 candidates/sec, and
+    # a live campaign ran at 1.7/sec — ~80% of that ceiling. Vectorizing is therefore a direct
+    # search-budget multiplier, not a micro-optimisation.
+    #
+    # Bit-identical by construction: row i holds the binary digits of i MSB-first, which is exactly
+    # `itertools.product((0, 1), repeat=k)` order, and `argmin` returns the FIRST minimum — matching
+    # the loop's strict `w < min_w` (first message to achieve the minimum wins). Same distance, same
+    # witness codeword, same witness message.
+    num = 1 << k
+    shifts = np.arange(k - 1, -1, -1, dtype=np.int64)
+    messages = ((np.arange(num, dtype=np.int64)[:, None] >> shifts[None, :]) & 1)
+    codewords = (messages @ g_int) % 2
+    weights = codewords.sum(axis=1)
+
+    # The all-zero message is not a codeword we may certify; a full-rank G admits no other
+    # zero-weight codeword, but guard anyway rather than trust it.
+    weights = np.where(weights > 0, weights, n + 1)
+
+    best = int(np.argmin(weights))
+    min_w = int(weights[best])
     witness_cw: list[int] | None = None
     witness_msg: list[int] | None = None
-    # Enumerate nonzero messages. 2^k rows; feasible for small k.
-    for msg in itertools.product((0, 1), repeat=k):
-        if not any(msg):
-            continue
-        cw = (np.array(msg, dtype=np.int64) @ g_int) % 2
-        w = int(cw.sum())
-        if 0 < w < min_w:
-            min_w = w
-            witness_cw = cw.astype(int).tolist()
-            witness_msg = list(msg)
-            if min_w == 1:  # cannot do better for a nonzero codeword
-                break
+    if min_w <= n:
+        witness_cw = codewords[best].astype(int).tolist()
+        witness_msg = messages[best].astype(int).tolist()
+    else:
+        min_w = n + 1
 
     result.update(
         min_distance=min_w if witness_cw is not None else None,

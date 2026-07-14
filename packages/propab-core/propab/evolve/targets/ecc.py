@@ -425,6 +425,7 @@ THE VIEW THAT MAKES THIS TRACTABLE
         return [
             _PRELUDE.format(n=self.n, k=self.k) + body
             for body in (
+                _SEED_FAMILY_SWEEP,          # first: it is the SHAPE every descendant should copy
                 _SEED_NAMED_CONSTRUCTIONS,
                 _SEED_COLUMN_MULTISET,
                 _SEED_QUASI_CYCLIC,
@@ -550,6 +551,46 @@ def int_to_vec(c, k=K):
     return [(c >> b) & 1 for b in range(k)]
 
 
+'''
+
+_SEED_FAMILY_SWEEP = '''\
+def build():
+    """FAMILY SWEEP -- yields HUNDREDS of candidates from one call. This is the shape to copy.
+
+    Do not guess one matrix. Parameterise a construction and yield the whole sweep: the verifier
+    checks ~20 codes/sec, and a program that emits one object wastes the machine. Point-search also
+    simply does not work on these landscapes -- the neighbourhood of the best-known code is a
+    deceptive local optimum. Sweeping a family's PARAMETERS is what crosses the valley.
+
+    Here: systematic G = [I_K | A], A a K x R matrix built from a cyclic seed row. Sweep the seed
+    polynomial and the per-row rotation step -- a 2-parameter family; every member is a different
+    code.
+
+    BUDGET, and it is not optional. Two hard limits bound how much one program may emit:
+      * generation must finish well inside the sandbox timeout (~10s), and
+      * the verifier costs ~46 ms per code, so ~300 candidates is already ~14s of checking.
+    Exhausting this family would emit ~49,000 codes and take ~94s just to BUILD -- the sandbox would
+    kill it and the whole program would score nothing. Emitting many BAD candidates is also worse
+    than emitting a few good ones. So: sweep widely, but stride the space and stop at the budget.
+    """
+    r = N - K
+    if r <= 0:
+        return
+    budget = 400
+    emitted = 0
+    # High-weight seed rows first: a dense A-block spreads the parity checks, which is where the
+    # distance comes from. Stride the polynomial space rather than exhaust it.
+    polys = sorted(range(1, 1 << min(14, r)), key=lambda p: (-bin(p).count("1"), p))
+    for poly in polys:
+        row = [(poly >> b) & 1 for b in range(r)]
+        for step in (1, 2, 3, 5):                  # how far each successive row rotates
+            a = np.array([np.roll(row, (i * step) % r) for i in range(K)], dtype=np.int64) % 2
+            g = np.hstack([np.eye(K, dtype=np.int64), a]) % 2
+            if gf2_rank(g) == K:
+                yield g.astype(np.uint8)
+                emitted += 1
+                if emitted >= budget:
+                    return
 '''
 
 _SEED_NAMED_CONSTRUCTIONS = '''\

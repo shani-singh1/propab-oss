@@ -4,6 +4,7 @@ No network. The whole point of this target is a verifier that is exact, total, a
 """
 from __future__ import annotations
 
+import types
 import numpy as np
 import pytest
 
@@ -325,8 +326,14 @@ def test_every_seed_program_runs_and_emits_verifiable_candidates():
         exec(compile(source, f"<seed{i}>", "exec"), namespace)   # noqa: S102 — our own source
         assert "build" in namespace, f"seed {i} defines no build()"
 
+        # Materialize exactly as the real runner does. `build()` is a GENERATOR under the current
+        # PROGRAM_CONTRACT (sweep a family, yield the members) — treating one as a single candidate
+        # would silently verify a generator object and call the seed broken.
         out = namespace["build"]()
-        candidates = out if isinstance(out, list) else [out]
+        if isinstance(out, types.GeneratorType):
+            candidates = list(out)
+        else:
+            candidates = out if isinstance(out, list) else [out]
         assert candidates, f"seed {i} emitted nothing"
 
         verdicts = [problem.verify(c) for c in candidates]
