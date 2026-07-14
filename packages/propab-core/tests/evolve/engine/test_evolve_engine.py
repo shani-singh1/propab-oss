@@ -6,11 +6,14 @@ import random
 from conftest import (
     SEED_CODE,
     BrokenLedger,
+    CrashingAuditor,
     CrashingLLM,
     CrashingProgramLLM,
     ExplodingRunner,
     HillClimbLLM,
     InProcRunner,
+    KillingAuditor,
+    PassingAuditor,
     RecordingLedger,
     ScriptedLLM,
     SumProblem,
@@ -23,6 +26,8 @@ from propab.evolve.island import FAMILY_KEY, REDISCOVERY_KEY, NEG_INF
 from propab.evolve.mutator import NOOP_CODE, LLMMutator
 from propab.evolve.program import Program
 
+_UNSET = object()
+
 
 def make_engine(
     problem=None,
@@ -32,8 +37,11 @@ def make_engine(
     *,
     config=None,
     seed=7,
+    auditor=_UNSET,
     **kwargs,
 ) -> EvolutionEngine:
+    # Default to a passing auditor: these tests are about the loop and the record path. The audit
+    # GATE itself (no auditor => bank nothing) is asserted explicitly below.
     return EvolutionEngine(
         problem or SumProblem(),
         LLMMutator(llm or HillClimbLLM()),
@@ -41,6 +49,7 @@ def make_engine(
         ledger,
         config or EngineConfig(islands=1, max_steps=60),
         rng=random.Random(seed),
+        auditor=PassingAuditor() if auditor is _UNSET else auditor,
         **kwargs,
     )
 
@@ -148,6 +157,62 @@ def test_a_rejected_record_is_not_counted_as_an_improvement(tmp_path):
     engine.run()
     assert ledger.records
     assert engine.improvements == 0
+
+
+# --------------------------------------------------------------------------- the audit gate
+# An auditor nobody is forced to call is decoration. These three prove it is forced.
+
+
+def test_with_no_auditor_nothing_is_banked(tmp_path):
+    """Default to REJECT. The run still beats the record — and still banks nothing, because no
+    adversarial layer cleared it."""
+    ledger = RecordingLedger(tmp_path)
+    engine = make_engine(ledger=ledger, config=improving(), auditor=None)
+
+    engine.run()
+
+    assert engine.best_score() > SumProblem.BEST_KNOWN, "precondition: it did beat the record"
+    assert not ledger.records, "banked a result that no auditor ever cleared"
+    assert engine.improvements == 0
+    assert engine.audit_kills > 0
+
+
+def test_a_killed_audit_blocks_the_record(tmp_path):
+    ledger = RecordingLedger(tmp_path)
+    engine = make_engine(ledger=ledger, config=improving(), auditor=KillingAuditor())
+
+    engine.run()
+
+    assert engine.best_score() > SumProblem.BEST_KNOWN
+    assert not ledger.records
+    assert engine.improvements == 0
+    assert engine.audit_kills > 0
+
+
+def test_a_crashing_auditor_is_a_kill_not_a_pass(tmp_path):
+    """If the thing whose job is to catch our mistakes is itself broken, we have learned NOTHING
+    about the claim. Silence from a broken checker must never read as approval."""
+    ledger = RecordingLedger(tmp_path)
+    engine = make_engine(ledger=ledger, config=improving(), auditor=CrashingAuditor())
+
+    engine.run()
+
+    assert not ledger.records
+    assert engine.improvements == 0
+    assert engine.audit_kills > 0
+
+
+def test_a_passing_audit_is_attached_to_the_record(tmp_path):
+    """Every published result must carry the audit that cleared it."""
+    ledger = RecordingLedger(tmp_path)
+    engine = make_engine(ledger=ledger, config=improving())
+
+    engine.run()
+
+    assert ledger.records
+    rec = ledger.records[-1]
+    assert rec.audit_passed
+    assert rec.audit["passed"] is True
 
 
 def test_a_verified_improvement_is_never_lost_to_a_broken_ledger(tmp_path):

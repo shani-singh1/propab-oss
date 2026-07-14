@@ -248,13 +248,27 @@ class FileLedger(Ledger):
         any of the ledger's own independent checks. Every False is logged to `rejected.jsonl`.
 
         The checks, in order:
+          0. the Record must carry a PASSING adversarial audit (see `evolve.auditor`);
           1. dedupe on (problem, candidate content hash);
           2. the shipped verifier source must hash to `verifier_fingerprint`;
           3. the ledger re-runs that verifier on the candidate and must reproduce `valid` and `score`;
           4. the score must strictly beat `best_known_at_time`.
+
+        Check 0 is what makes the auditor mandatory. This ledger is the sole chokepoint to
+        persistence, so enforcing it here means no code path can bank a result that the adversarial
+        layer never cleared — and the default is REJECT. (Test fakes deliberately bypass this by
+        overriding `record()`; that is the point of the seam.)
         """
         with self._lock:
             chash = content_hash(rec.problem, rec.candidate)
+
+            # 0. no passing audit => not a result. Default to reject.
+            if rec.audit is None:
+                return self._reject(rec, "no_audit")
+            if not rec.audit_passed:
+                return self._reject(
+                    rec, "audit_failed", kills=list(rec.audit.get("kills") or [])
+                )
 
             # 1. duplicate / rediscovery
             if any(row.get("content_hash") == chash for row in self._rows(rec.problem)):

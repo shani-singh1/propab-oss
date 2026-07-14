@@ -38,9 +38,11 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 import logging
 import math
 import random
+from typing import Any
 
 from .engine import Engine, EngineConfig, Mutator
 from .island import (
@@ -88,8 +90,14 @@ class EvolutionEngine(Engine):
         parents_per_step: int = DEFAULT_PARENTS_PER_STEP,
         migrate_warmup_steps: int | None = None,
         reseed_from_global_best: bool = False,
+        auditor: Any = None,
     ) -> None:
         super().__init__(problem, mutator, runner, ledger, config)
+        # The adversarial layer. If it is None, every Record we build carries `audit=None`, and the
+        # real Ledger refuses it ("no_audit") — i.e. the default is to bank NOTHING. That is
+        # deliberate: an auditor nobody is forced to call is decoration.
+        self.auditor = auditor
+        self.audit_kills = 0
         self._rng = rng or random.Random()
         self.islands: list[ProgramIsland] = [
             ProgramIsland(
@@ -339,6 +347,20 @@ class EvolutionEngine(Engine):
             return
 
         record = self._build_record(program, verdict, candidate)
+
+        # Adversarial audit BEFORE anything is banked. A kill here is a normal, expected event —
+        # most "discoveries" a search produces are artifacts, and this is the layer that says so.
+        record.audit = self._run_audit(program, verdict, candidate)
+        if not record.audit_passed:
+            self.audit_kills += 1
+            logger.warning(
+                "evolve: AUDIT KILLED a claimed improvement from %s (score=%s). kills=%s",
+                program.id,
+                verdict.score,
+                (record.audit or {}).get("kills"),
+            )
+            return
+
         try:
             accepted = self.ledger.record(record)
         except Exception:  # noqa: BLE001
@@ -357,6 +379,33 @@ class EvolutionEngine(Engine):
             self.improvements += 1
         else:
             logger.info("evolve: ledger rejected %s as a duplicate/rediscovery", program.id)
+
+    def _run_audit(
+        self, program: Program, verdict: Verdict, candidate: object | None
+    ) -> dict[str, Any] | None:
+        """Run the adversarial layer. Never raises.
+
+        Returns the AuditReport as a dict, or None when no auditor is wired (in which case the real
+        Ledger refuses the Record). A CRASHING auditor is a KILL, never a pass: if the thing whose
+        job is to catch our mistakes is itself broken, we have learned nothing about the claim.
+        """
+        if self.auditor is None:
+            return None
+        try:
+            report = self.auditor.audit(self.problem, verdict, candidate, program)
+        except Exception as exc:  # noqa: BLE001 — a broken auditor certifies nothing
+            logger.exception("evolve: auditor.audit raised; treating as a KILL")
+            return {"passed": False, "kills": [f"auditor_crashed: {type(exc).__name__}: {exc}"]}
+        to_json = getattr(report, "to_json", None)
+        if callable(to_json):
+            try:
+                raw = to_json()
+                return json.loads(raw) if isinstance(raw, str) else dict(raw)
+            except Exception:  # noqa: BLE001
+                logger.exception("evolve: AuditReport.to_json() failed; treating as a KILL")
+                return {"passed": False, "kills": ["audit_report_unserializable"]}
+        return {"passed": bool(getattr(report, "passed", False)),
+                "kills": list(getattr(report, "kills", []) or [])}
 
     def _build_record(
         self, program: Program, verdict: Verdict, candidate: object | None

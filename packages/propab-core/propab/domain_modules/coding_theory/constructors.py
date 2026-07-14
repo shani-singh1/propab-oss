@@ -83,7 +83,10 @@ BEST_KNOWN_TABLE: dict[tuple[int, int], int] = {
     (15, 8): 4, (15, 9): 4, (15, 10): 4, (15, 11): 3, (15, 12): 2, (15, 13): 2,
     # n = 16: [16,5,8] RM(1,4); [16,11,4] extended Hamming; other Grassl entries.
     (16, 2): 10, (16, 3): 8, (16, 4): 8, (16, 5): 8, (16, 6): 6, (16, 7): 6,
-    (16, 8): 5, (16, 9): 4, (16, 10): 4, (16, 11): 4, (16, 12): 4, (16, 13): 2,
+    # (16, 12) was 4 — provably wrong. r = n-k = 4 parity checks, so H has 4 rows and 16 columns;
+    # d >= 3 needs all columns nonzero and pairwise distinct, but GF(2)^4 has only 15 nonzero
+    # vectors < 16. So d <= 2, and codetables.de reports lower = upper = 2.
+    (16, 8): 5, (16, 9): 4, (16, 10): 4, (16, 11): 4, (16, 12): 2, (16, 13): 2,
     (16, 14): 2,
     # Longer well-established anchors (BCH / Golay families).
     (23, 12): 7,               # binary Golay [23,12,7]

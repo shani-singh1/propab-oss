@@ -40,6 +40,12 @@ def verify(candidate):
 TOY_PROGRAM = "def build():\n    return [10, 20, 30]\n"
 
 
+#: A Record only reaches the ledger if the adversarial layer cleared it. These tests are about the
+#: ledger's OWN checks, so they hand it a record that has already passed audit; the two tests below
+#: cover the audit gate itself.
+PASSING_AUDIT = {"passed": True, "kills": [], "warnings": [], "checks": []}
+
+
 def toy_record(**over: object) -> Record:
     base = dict(
         problem="toy",
@@ -50,9 +56,25 @@ def toy_record(**over: object) -> Record:
         program_code=TOY_PROGRAM,
         program_id="toyprog",
         verifier_fingerprint=verifier_fingerprint(TOY_VERIFIER),
+        audit=dict(PASSING_AUDIT),
     )
     base.update(over)
     return Record(**base)  # type: ignore[arg-type]
+
+
+def test_a_record_with_no_audit_is_refused(tmp_path):
+    """The auditor is mandatory. An unenforced check is indistinguishable from a passed one — which
+    is precisely how our earlier 'wins' survived long enough to be reported."""
+    ledger = FileLedger(root=tmp_path)
+    assert ledger.record(toy_record(audit=None)) is False
+    assert ledger.best("toy") is None
+
+
+def test_a_record_whose_audit_failed_is_refused(tmp_path):
+    ledger = FileLedger(root=tmp_path)
+    killed = {"passed": False, "kills": ["baseline_realness: best_known() has no source"]}
+    assert ledger.record(toy_record(audit=killed)) is False
+    assert ledger.best("toy") is None
 
 
 @pytest.fixture()
@@ -309,6 +331,7 @@ def test_erdos143_record_exports_a_bundle_that_rechecks(ledger: FileLedger, tmp_
         best_known=half_interval_baseline,
         notes="TEST FIXTURE: baseline is the weak (N/2, N] construction, not the primes baseline.",
     )
+    rec.audit = dict(PASSING_AUDIT)  # the adversarial layer is mandatory; stand in for it here
     assert ledger.record(rec) is True
 
     bundle = ledger.export_publishable(p.name, tmp_path / "e143")
@@ -336,6 +359,7 @@ def test_erdos143_bundle_verifier_is_standalone(ledger: FileLedger, tmp_path: Pa
     exec(compile(p.seed_programs()[0], "<primes>", "exec"), ns)
     cand = ns["build"]()
     rec = p.make_record(cand, p.verify(cand), Program(code=p.seed_programs()[0]), best_known=0.0)
+    rec.audit = dict(PASSING_AUDIT)  # the adversarial layer is mandatory; stand in for it here
     assert ledger.record(rec) is True
     bundle = ledger.export_publishable(p.name, tmp_path / "e143")
 

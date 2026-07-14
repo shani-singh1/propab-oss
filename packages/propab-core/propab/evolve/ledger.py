@@ -38,6 +38,15 @@ class Record:
     generation: int = 0
     created_at: float = field(default_factory=time.time)
     notes: str = ""
+    # The adversarial audit that cleared this result (AuditReport.to_json()). A Record with no
+    # passing audit is NOT a result: `Ledger.record()` refuses it. This field is what makes the
+    # auditor mandatory rather than decorative — an unenforced check is indistinguishable from a
+    # passed one, which is exactly how our earlier "wins" survived long enough to be reported.
+    audit: dict[str, Any] | None = None
+
+    @property
+    def audit_passed(self) -> bool:
+        return bool(self.audit) and bool(self.audit.get("passed"))
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2, default=str)

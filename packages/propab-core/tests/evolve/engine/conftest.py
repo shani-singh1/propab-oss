@@ -180,6 +180,48 @@ class BrokenLedger(Ledger):
         raise OSError("no space left on device")
 
 
+# --------------------------------------------------------------------------- auditor
+
+
+class _Report:
+    """Minimal stand-in for auditor.AuditReport (the engine only reads `passed`/`kills`/`to_json`)."""
+
+    def __init__(self, passed: bool, kills: list[str] | None = None) -> None:
+        self.passed = passed
+        self.kills = kills or []
+
+    def to_json(self) -> str:
+        import json
+
+        return json.dumps({"passed": self.passed, "kills": self.kills, "warnings": []})
+
+
+class PassingAuditor:
+    """Clears everything. These tests exercise the RECORD path, not the audit layer itself —
+    the auditor's own kills are covered in tests/evolve/audit/."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def audit(self, problem, verdict, candidate, program) -> _Report:  # noqa: ANN001
+        self.calls += 1
+        return _Report(True)
+
+
+class KillingAuditor:
+    """Kills everything — nothing may be banked."""
+
+    def audit(self, problem, verdict, candidate, program) -> _Report:  # noqa: ANN001
+        return _Report(False, ["synthetic_kill"])
+
+
+class CrashingAuditor:
+    """A broken auditor certifies NOTHING. It must be treated as a kill, never as a pass."""
+
+    def audit(self, problem, verdict, candidate, program):  # noqa: ANN001, ANN201
+        raise RuntimeError("auditor is on fire")
+
+
 # --------------------------------------------------------------------------- fixtures
 
 
