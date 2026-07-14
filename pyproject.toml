@@ -76,6 +76,8 @@ packages = [
   "propab.domain_modules.epitope",
   "propab.domain_modules.proteomics",
   "propab.domain_modules.transcriptomics",
+  "propab.evolve",
+  "propab.evolve.targets",
   "propab.skills",
   "propab.tools",
   "propab.tools.mandrake",
