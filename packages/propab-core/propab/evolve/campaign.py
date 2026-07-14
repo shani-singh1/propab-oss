@@ -89,34 +89,42 @@ def run_campaign(
         )
 
         def on_progress(_: Any = None) -> None:
-            best = engine.best_score()
+            elapsed = max(1e-9, time.time() - started)
+            cands = engine.candidates_evaluated
             logger.info(
-                "[evolve] steps=%d best=%.6f best_known=%.6f improvements=%d audit_kills=%d "
-                "llm=%s elapsed=%.0fs",
-                engine.steps, best, _safe_best_known(problem), engine.improvements,
-                engine.audit_kills, llm.stats(), time.time() - started,
+                "[evolve] steps=%d cands=%d (%.0f/s, %.0f per program) best=%.6f best_known=%.6f "
+                "improvements=%d audit_kills=%d llm_calls=%d elapsed=%.0fs",
+                engine.steps, cands, cands / elapsed,
+                cands / max(1, engine.programs_evaluated),
+                engine.best_score(), _safe_best_known(problem), engine.improvements,
+                engine.audit_kills, llm.stats()["calls"], elapsed,
             )
 
         executor = ParallelExecutor(engine, workers=workers, on_progress=on_progress,
                                     progress_interval_s=20.0)
         try:
-            stats = executor.run_steps(max_steps=steps)
+            executor.run_steps(max_steps=steps)
         except KeyboardInterrupt:
             logger.warning("[evolve] interrupted — stopping workers")
             executor.stop()
-            stats = None
 
+    elapsed = max(1e-9, time.time() - started)
     summary = {
         "problem": getattr(problem, "name", type(problem).__name__),
         "steps": engine.steps,
+        # The search budget. A run is a SEARCH or a SAMPLE depending on this number, not on `steps`.
+        "candidates_evaluated": engine.candidates_evaluated,
+        "candidates_per_program": round(
+            engine.candidates_evaluated / max(1, engine.programs_evaluated), 1
+        ),
+        "candidates_per_sec": round(engine.candidates_evaluated / elapsed, 1),
         "best_score": engine.best_score(),
         "best_known": _safe_best_known(problem),
         "improvements": engine.improvements,
         "audit_kills": engine.audit_kills,
         "pending_records": len(engine.pending_records),
         "llm": llm.stats(),
-        "elapsed_s": round(time.time() - started, 1),
-        "executor": getattr(stats, "__dict__", {}) if stats else {},
+        "elapsed_s": round(elapsed, 1),
     }
     llm.close()
 

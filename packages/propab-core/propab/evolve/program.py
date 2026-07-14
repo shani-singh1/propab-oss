@@ -16,17 +16,43 @@ from typing import Any
 
 # Every program is Python source defining exactly this entry point:
 ENTRYPOINT = "build"
+
+#: Candidates one program should aim to emit. The sandbox verifies ~430/sec while a model call costs
+#: ~1s, so a program that emits ONE object wastes ~99.7% of the machine. Sweep, don't point.
+TARGET_CANDIDATES_PER_PROGRAM = 300
+
 PROGRAM_CONTRACT = f"""\
-Write Python source defining:
+Write Python source defining a GENERATOR:
 
     def {ENTRYPOINT}():
-        # return a candidate, or a list of candidates
-        ...
+        for <parameters of a construction family>:
+            yield <candidate>
+
+DO NOT emit a single object. Emit a FAMILY — sweep the parameters of a construction and yield every
+member. Aim for ~{TARGET_CANDIDATES_PER_PROGRAM} candidates per call (a few thousand is fine if each
+is cheap to build).
+
+Why this is the whole game, measured on this system:
+- The verifier checks ~430 candidates/second; asking the model for a new program costs ~1 second.
+  A program that yields one object therefore uses ~0.3% of the machine. A program that yields a
+  family uses all of it, at identical model cost.
+- Searching one object at a time DOES NOT WORK on these landscapes. On a conjecture with a known
+  counterexample, point-search (hill-climbing, simulated annealing, cross-entropy) failed 0/55 —
+  the neighbourhood of the best-known object is a deceptive local optimum and the target sits
+  across a valley. Sweeping a family's PARAMETERS crosses it immediately.
+
+So: your job is to invent or vary a *construction*, not to guess an *object*. Parameterize it
+(sizes, shifts, generator polynomials, block structure, symmetry group, seeds) and yield the sweep.
 
 Rules:
+- `yield` (a generator) is preferred and unambiguous. A bare `return <list>` is ambiguous when the
+  candidate is itself a list, so avoid it.
 - Deterministic unless the spec says otherwise (seed any RNG explicitly).
 - No network, no file I/O, no imports outside the allowed list.
-- Must return quickly; the verifier runs on whatever you emit.
+- Cheap per candidate: the sweep must finish inside the time budget, so prefer many cheap members
+  over a few expensive ones.
+- Never print, return, or claim a score. The verifier is the sole authority on how good a candidate
+  is; anything a program says about itself is ignored.
 """
 
 

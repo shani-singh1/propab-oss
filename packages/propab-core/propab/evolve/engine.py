@@ -18,6 +18,7 @@ accrues to the engine rather than to whoever's model we rent.
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -73,11 +74,20 @@ class Engine:
         self.runner = runner
         self.ledger = ledger
         self.config = config or EngineConfig()
+        # THE number that decides whether a run was a search or a sample. A model call costs ~1s and
+        # buys one program; the sandbox verifies ~430 candidates/sec. So the search budget is
+        # candidates-evaluated, NOT steps — and a program that emits one object wastes the machine.
+        self._eval_lock = threading.Lock()
+        self.candidates_evaluated = 0
+        self.programs_evaluated = 0
 
     def evaluate(self, program: Program) -> tuple[Verdict, ExecResult]:
-        """Run a program and score the best candidate it emitted. Pure, no population side-effects —
-        so WS-2 can call it from many workers in parallel."""
+        """Run a program and score the best candidate it emitted. Pure w.r.t. the population (no
+        island/ledger side-effects), so it is safe to call from every worker at once."""
         result = self.runner.run(program, timeout_s=self.config.program_timeout_s)
+        with self._eval_lock:
+            self.programs_evaluated += 1
+            self.candidates_evaluated += len(result.candidates)
         if not result.ok or not result.candidates:
             from .problem import INVALID
 
