@@ -12,7 +12,7 @@ from propab.evolve.mutator import (
     extract_program,
     normalize_family,
 )
-from propab.evolve.program import ENTRYPOINT, Program
+from propab.evolve.program import ENTRYPOINT, PROGRAM_CONTRACT, Program
 
 
 def parent(code: str, score: float, *, family: str = "algebraic") -> Program:
@@ -92,10 +92,12 @@ def test_long_parents_are_clipped_but_build_always_survives():
 
     prompt = mutator.build_prompt([parent(long_prelude + body, 1.0)], SumProblem())
 
-    assert len(prompt) < 2000                 # still bounded
+    # The property is that the prompt does NOT grow with the parent — not an absolute size, which
+    # tracks the length of PROGRAM_CONTRACT and would make this test a tripwire on prose edits.
+    assert "x" * 200 not in prompt            # the 5k prelude is what got dropped
+    assert len(prompt) < len(PROGRAM_CONTRACT) + 1_500
     assert "def build()" in prompt            # ...and the entrypoint survived
     assert "yield 1" in prompt                # ...along with what it actually does
-    assert "x" * 5000 not in prompt           # the prelude is what got dropped
 
 
 def test_a_parent_with_no_entrypoint_still_clips():
@@ -103,7 +105,8 @@ def test_a_parent_with_no_entrypoint_still_clips():
     mutator = LLMMutator(ScriptedLLM(""), max_parent_chars=50)
     prompt = mutator.build_prompt([parent("# " + "x" * 5000 + "\n", 1.0)], SumProblem())
     assert "truncated" in prompt
-    assert len(prompt) < 2000
+    assert "x" * 200 not in prompt
+    assert len(prompt) < len(PROGRAM_CONTRACT) + 1_500
 
 
 def test_exploration_hint_is_injected():
