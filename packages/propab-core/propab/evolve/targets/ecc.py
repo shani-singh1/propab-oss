@@ -14,12 +14,24 @@ WHY THIS FILE CARRIES ITS OWN RECORD TABLE
 ------------------------------------------
 ``coding_theory.BEST_KNOWN_TABLE`` is NOT usable as the baseline for a discovery claim:
 
-  1. It is WRONG in at least one cell. It lists [16,12] -> d=4. The true value is d=2, and that is
-     provable in one line without consulting any table: a [16,12] code has r = n - k = 4 parity
-     checks, so its parity-check matrix H has 4 rows and 16 columns; d >= 3 requires all columns to
-     be nonzero and pairwise distinct, but GF(2)^4 contains only 15 nonzero vectors < 16. Hence
-     d <= 2. (Equivalently, sphere-packing: 2^12 * (1 + 16) = 69632 > 65536 = 2^16.) codetables.de
-     independently reports lower = upper = 2 for [16,12].
+  1. It is WRONG in at least two cells.
+
+     [16,12] -> it lists d=4. The true value is d=2, and that is provable in one line without
+     consulting any table: a [16,12] code has r = n - k = 4 parity checks, so its parity-check
+     matrix H has 4 rows and 16 columns; d >= 3 requires all columns to be nonzero and pairwise
+     distinct, but GF(2)^4 contains only 15 nonzero vectors < 16. Hence d <= 2. (Equivalently,
+     sphere-packing: 2^12 * (1 + 16) = 69632 > 65536 = 2^16.) codetables.de independently reports
+     lower = upper = 2 for [16,12].
+
+     [31,16] -> it lists d=7, commented "BCH [31,16,7]; optimal". The BCH code at [31,16] does have
+     d=7, but it is NOT optimal: codetables.de reports lower = upper = 8, achieved by shortening the
+     [32,17,8] Cheng-Sloane code at one coordinate. The comment conflated "the distance of the BCH
+     code" with "the best distance at this cell". This is the DANGEROUS direction of error: a
+     baseline that is too LOW would let the engine bank a [31,16,8] code -- which is merely the
+     known optimum -- as a novel discovery. This file previously copied that same 7 into its own
+     _CLOSED_ANCHORS; it is corrected to 8 below. ``ECCProblem._baseline`` takes the MAX over both
+     sources, so the corrected value here now governs even though constructors.py still says 7.
+
   2. Every one of its cells is CLOSED (lower bound == upper bound == proven optimum). It contains no
      open cell, so a campaign run against it can only ever produce a rediscovery.
 
@@ -28,9 +40,29 @@ result above a *proven* upper bound is our bug, not a discovery), and carries a 
 An [n,k] cell with no sourced record is NOT ready to run: ``ECCProblem`` refuses to construct for it
 rather than silently defaulting to a baseline of zero.
 
+HOW THE OPEN CELLS BELOW WERE SOURCED
+-------------------------------------
 Source: M. Grassl, "Bounds on the minimum distance of linear codes and quantum codes",
-https://codetables.de — the per-cell BKLC pages, accessed 2026-07-14. Each open cell below was
-looked up individually, not read off a summary grid.
+https://codetables.de -- the per-cell BKLC pages, accessed 2026-07-15.
+
+The procedure is spelled out because "an LLM read the numbers off a grid" is exactly how a fake
+record gets shipped:
+
+  1. The bounds GRID (n <= 64, k <= 16) was fetched once as raw HTML and parsed by regex. It was
+     used ONLY to shortlist which cells are open. No bound in this file is taken from it.
+  2. Each shortlisted cell's OWN BKLC page was then fetched individually (122 requests) and its
+     ``lower bound:`` / ``upper bound:`` fields read by regex out of the raw HTML. Both numbers, and
+     the derivation chain and literature keys recorded with them, come from that per-cell page.
+     Nothing here is recalled from memory, summarised, or inferred.
+  3. Grid and per-cell page were cross-checked against each other; all 122 agree.
+  4. Every cell was then put through an elementary-bound battery that consults no table at all:
+     Singleton, Griesmer (against the ACHIEVED distance), sphere-packing/Hamming, and the GF(2)^r
+     distinct-column argument that kills [16,12,4]. All 122 pass. The battery is re-run as a test --
+     see tests/evolve/targets/test_ecc_records.py, which is what keeps this table honest.
+
+The registry therefore holds ONLY cells with lower < upper (a real gap) and k <= MAX_EXHAUSTIVE_K
+(so the verifier can actually certify a witness by full 2^k enumeration). A cell that could not be
+sourced to this standard was left out.
 """
 from __future__ import annotations
 
@@ -108,10 +140,1424 @@ _OPTIMAL_SMALL_N: dict[int, list[int]] = {
 _CLOSED_ANCHORS: dict[tuple[int, int], tuple[int, str]] = {
     (23, 12): (7, "binary Golay code [23,12,7]; optimal"),
     (24, 12): (8, "extended binary Golay code [24,12,8]; optimal"),
-    (31, 16): (7, "BCH [31,16,7]; optimal"),
+    # NOT 7. The BCH code at [31,16] has d=7, but the OPTIMUM is 8: shorten the [32,17,8]
+    # Cheng-Sloane code at one coordinate. codetables.de reports lower = upper = 8, and the upper
+    # bound follows by a one-step Griesmer bound from Ub(22,15)=4. constructors.py still says 7 --
+    # see the module docstring; _baseline() takes the max, so this value is the one that governs.
+    (31, 16): (8, "shortening of the [32,17,8] Cheng-Sloane code; optimal (lower = upper = 8)"),
     (31, 21): (5, "BCH [31,21,5]; optimal"),
     (31, 26): (3, "Hamming [31,26,3]; optimal"),
 }
+
+
+_REFERENCES: dict[str, str] = {
+    "B2x": (
+        "See A.E. Brouwer & T. Verhoeff, An updated table of minimum-distance bounds for binary linear "
+        "codes, IEEE Trans. Inform. Th. 39 (1993) 662-677."
+    ),
+    "BCH": (
+        "T. Kasami & N. Tokura, Some remarks on BCH bounds and minimum weights of binary primitive BCH "
+        "codes, IEEE Trans. Inform. Theory IT-15 (May 1969) 408-413. Or: a BCH code."
+    ),
+    "BE": (
+        "J. Bierbrauer & Y. Edel, New code parameters from Reed-Solomon subfield subcodes, IEEE Trans. "
+        "Inf. Th. 43 (1997) 953-968."
+    ),
+    "BZ": (
+        "E. L. Blokh & V. V. Zyablov, Coding of generalized concatenated codes, Probl. Inform. Transm. "
+        "10 (1974) 218-222."
+    ),
+    "Bo0": "I Boukliev, private comm. 1995-1997.",
+    "Bou": (
+        "I. Boukliev, Some new bounds on minimum length for quaternary codes of dimension five, "
+        "preprint, July 1994."
+    ),
+    "Bro": (
+        "A.E. Brouwer, The linear programming bound for binary linear codes, IEEE Trans. Inform. Th. 39 "
+        "(1993) 677-680."
+    ),
+    "CDJ": (
+        "Huy T. Cao, Randall L. Dougherty & Heeralal Janwa, A [55,16,19] binary Goppa code and related "
+        "codes, having large minimum distance, IEEE Trans. Inform. Theory 37 (Sep. 1991) 1432."
+    ),
+    "CS": "Y. Cheng & N.J.A. Sloane, Codes from symmetry groups, SIAM J. Discrete Math. 2 (1989) 28-37.",
+    "Ch": (
+        "Y. Cheng, New linear codes constructed by concatenating, extending, and shortening methods, "
+        "IEEE Trans. Inform. Theory IT-33 (Sept. 1987) 719-721."
+    ),
+    "DJ": (
+        "R. Dougherty & H. Janwa, Covering radius computations for binary cyclic codes, Math. Comput. "
+        "57 (July 1991) 415-434."
+    ),
+    "DM": (
+        "S.M. Dodunekov & N.L. Manev, An improvement of the Griesmer bound for some small minimum "
+        "distances, Discr. Appl. Math. 12 (Oct. 1985) 103-114."
+    ),
+    "FB": (
+        "P. Farkavs & K. Brühl, Three best binary linear block codes of minimum distance fifteen, IEEE "
+        "Trans. Inf. Th. 40 (1994) 949-951."
+    ),
+    "GB5": (
+        "T. A. Gulliver & V. K. Bhargava, New optimal binary linear codes of dimensions 9 and 10, IEEE "
+        "Trans. Inform. Theory 43 (1997) 314-316."
+    ),
+    "GG": "B. Groneick & S. Grosse, New binary codes, IEEE Trans. Inform. Theory 40 (1994) 510-512.",
+    "Gu9": "T. A. Gulliver, personal communications 1993-1998.",
+    "He": "P.W. Heijnen, Er bestaat geen binaire [33,9,13] code, Afstudeerverslag, T.U. Delft, Oct. 1993.",
+    "Ja": "D.B. Jaffe, Binary linear codes: new results on nonexistence, 1996, code.ps.gz.",
+    "LC": (
+        "M. Loeloeian & J. Conan, A [55,16,19] binary Goppa code, IEEE Trans. Inform. Theory IT-30 "
+        "(Sep. 1984) 773."
+    ),
+    "Mo": "M. Morii, email comm., Sept. 1993.",
+    "Pu": (
+        "C.L.M. van Pul, On bounds on codes, Master's Thesis, Dept. of Math. and Comp. Sc., Eindhoven "
+        "Univ. of Techn., The Netherlands, Aug. 1982."
+    ),
+    "Pu2": "C.L.M. van Pul, [26,13,8] does not exist, priv. comm. 1985.",
+    "QR": "A quadratic residue code.",
+    "SRC": (
+        "N.J.A. Sloane, S.M. Reddy & C.L. Chen, New binary codes, IEEE Trans. Inform. Theory IT-18 "
+        "(July 1972) 503-510."
+    ),
+    # UNEXPANDED UPSTREAM REFERENCE. codetables.de names this key for the lower bound of 5 cells,
+    # but its own reference list renders "Sh1:" with no text on every one of those pages. We refuse
+    # to guess what it stands for. The BOUND is unaffected: the value is stated on the cell's own
+    # page and carries a full derivation chain -- only the bibliographic expansion is missing
+    # upstream. See _UNEXPANDED_UPSTREAM_KEYS and the tests.
+    "Sh1": (
+        "UNEXPANDED: codetables.de cites key 'Sh1' for this bound but gives no bibliographic entry "
+        "for it on any cell page. The bound value and its derivation chain are still taken from the "
+        "cell's own codetables.de page; only this reference is missing upstream."
+    ),
+    "Si": (
+        "J. Simonis, Binary even [25,15,6] codes do not exist, IEEE Trans. Inform. Theory IT-33 (Jan. "
+        "1987) 151-153."
+    ),
+    "XBC": "Extended BCH code.",
+    "YH1": (
+        "Oyvind Ytrehus & Tor Helleseth, There is no binary [25,8,10] code, IEEE Trans. Inform. Theory "
+        "36 (May 1990) 695-696."
+    ),
+    # UNEXPANDED UPSTREAM REFERENCE (11 cells). Same situation as "Sh1". Neighbouring construction
+    # keys in this list ("XBC": Extended BCH code, "QR": A quadratic residue code) suggest "cy"
+    # denotes a cyclic code, but codetables.de gives no text for it and we do not guess.
+    "cy": (
+        "UNEXPANDED: codetables.de cites key 'cy' for this bound but gives no bibliographic entry "
+        "for it on any cell page. The bound value and its derivation chain are still taken from the "
+        "cell's own codetables.de page; only this reference is missing upstream."
+    ),
+    "vT3": (
+        "H.C.A. van Tilborg, The smallest length of binary 7-dimensional linear codes with prescribed "
+        "minimum distance, Discr. Math. 33 (1981) 197-207."
+    ),
+}
+
+
+# Every genuinely OPEN cell (lower < upper) with k <= MAX_EXHAUSTIVE_K and n <= 64.
+# (n, k, lower, upper, lower derivation, lower refs, upper derivation, upper refs)
+# Derivations are quoted verbatim from that cell's own codetables.de page; the ref tuples
+# are the literature keys that page cites for each bound, resolved via _REFERENCES.
+_OPEN_CELLS: tuple[tuple[int, int, int, int, str, tuple[str, ...], str, tuple[str, ...]], ...] = (
+    (35, 10, 12, 13,
+     (
+         "Lb(35,10) = 12 is found by taking a subcode of: | Lb(35,12) = 12 is found by "
+         "shortening of: | Lb(37,14) = 12 is found by adding a parity check bit to: | Lb(36,14) "
+         "= 11 Mo"
+     ),
+     ("Mo",),
+     (
+         "Ub(35,10) = 13 is found by considering shortening to: | Ub(34,9) = 13 is found by "
+         "considering truncation to: | Ub(33,9) = 12 He"
+     ),
+     ("He",),
+    ),
+    (36, 10, 13, 14,
+     (
+         "Lb(36,10) = 13 is found by shortening of: | Lb(38,12) = 13 is found by truncation of: "
+         "| Lb(39,12) = 14 BE"
+     ),
+     ("BE",),
+     (
+         "Ub(36,10) = 14 is found by considering shortening to: | Ub(33,7) = 14 otherwise adding "
+         "a parity check bit would contradict: | Ub(34,7) = 15 vT3"
+     ),
+     ("vT3",),
+    ),
+    (43, 10, 16, 17,
+     (
+         "Lb(43,10) = 16 is found by taking a subcode of: | Lb(43,12) = 16 is found by "
+         "shortening of: | Lb(45,14) = 16 Bo0"
+     ),
+     ("Bo0",),
+     (
+         "Ub(43,10) = 17 follows by a one-step Griesmer bound from: | Ub(25,9) = 8 is found by "
+         "considering shortening to: | Ub(24,8) = 8 otherwise adding a parity check bit would "
+         "contradict: | Ub(25,8) = 9 YH1"
+     ),
+     ("YH1",),
+    ),
+    (44, 10, 17, 18,
+     "Lb(44,10) = 17 is found by truncation of: | Lb(45,10) = 18 Gu9",
+     ("Gu9",),
+     (
+         "Ub(44,10) = 18 follows by a one-step Griesmer bound from: | Ub(25,9) = 8 is found by "
+         "considering shortening to: | Ub(24,8) = 8 otherwise adding a parity check bit would "
+         "contradict: | Ub(25,8) = 9 YH1"
+     ),
+     ("YH1",),
+    ),
+    (46, 10, 18, 19,
+     (
+         "Lb(46,10) = 18 is found by shortening of: | Lb(47,11) = 18 is found by adding a parity "
+         "check bit to: | Lb(46,11) = 17 GG"
+     ),
+     ("GG",),
+     (
+         "Ub(46,10) = 19 follows by a one-step Griesmer bound from: | Ub(26,9) = 9 is found by "
+         "considering shortening to: | Ub(25,8) = 9 YH1"
+     ),
+     ("YH1",),
+    ),
+    (47, 10, 19, 20,
+     "Lb(47,10) = 19 is found by truncation of: | Lb(48,10) = 20 GB5",
+     ("GB5",),
+     "Ub(47,10) = 20 follows by the Griesmer bound.",
+     (),
+    ),
+    (51, 10, 20, 21,
+     (
+         "Lb(51,10) = 20 is found by taking a subcode of: | Lb(51,11) = 20 is found by "
+         "shortening of: | Lb(56,16) = 20 is found by adding a parity check bit to: | Lb(55,16) "
+         "= 19 LC"
+     ),
+     ("LC",),
+     (
+         "Ub(51,10) = 21 is found by considering shortening to: | Ub(50,9) = 21 is found by "
+         "considering truncation to: | Ub(49,9) = 20 Ja"
+     ),
+     ("Ja",),
+    ),
+    (52, 10, 21, 22,
+     "Lb(52,10) = 21 Pu",
+     ("Pu",),
+     (
+         "Ub(52,10) = 22 follows by a one-step Griesmer bound from: | Ub(29,9) = 11 is found by "
+         "considering shortening to: | Ub(28,8) = 11 DM"
+     ),
+     ("DM",),
+    ),
+    (54, 10, 22, 23,
+     (
+         "Lb(54,10) = 22 is found by shortening of: | Lb(55,11) = 22 is found by adding a parity "
+         "check bit to: | Lb(54,11) = 21 GG"
+     ),
+     ("GG",),
+     "Ub(54,10) = 23 is found by considering shortening to: | Ub(53,9) = 23 Bro",
+     ("Bro",),
+    ),
+    (55, 10, 23, 24,
+     "Lb(55,10) = 23 is found by truncation of: | Lb(56,10) = 24 BZ",
+     ("BZ",),
+     "Ub(55,10) = 24 follows by the Griesmer bound.",
+     (),
+    ),
+    (59, 10, 24, 25,
+     (
+         "Lb(59,10) = 24 is found by taking a subcode of: | Lb(59,11) = 24 is found by "
+         "shortening of: | Lb(64,16) = 24 XBC"
+     ),
+     ("XBC",),
+     "Ub(59,10) = 25 follows by a one-step Griesmer bound from: | Ub(33,9) = 12 He",
+     ("He",),
+    ),
+    (60, 10, 25, 26,
+     "Lb(60,10) = 25 Ch",
+     ("Ch",),
+     "Ub(60,10) = 26 follows by a one-step Griesmer bound from: | Ub(33,9) = 12 He",
+     ("He",),
+    ),
+    (62, 10, 26, 27,
+     "Lb(62,10) = 26 is found by shortening of: | Lb(63,11) = 26 BCH",
+     ("BCH",),
+     (
+         "Ub(62,10) = 27 follows by a one-step Griesmer bound from: | Ub(34,9) = 13 is found by "
+         "considering truncation to: | Ub(33,9) = 12 He"
+     ),
+     ("He",),
+    ),
+    (63, 10, 27, 28,
+     "Lb(63,10) = 27 is found by truncation of: | Lb(64,10) = 28 XBC",
+     ("XBC",),
+     (
+         "Ub(63,10) = 28 follows by a one-step Griesmer bound from: | Ub(34,9) = 13 is found by "
+         "considering truncation to: | Ub(33,9) = 12 He"
+     ),
+     ("He",),
+    ),
+    (36, 11, 12, 13,
+     (
+         "Lb(36,11) = 12 is found by taking a subcode of: | Lb(36,13) = 12 is found by "
+         "shortening of: | Lb(37,14) = 12 is found by adding a parity check bit to: | Lb(36,14) "
+         "= 11 Mo"
+     ),
+     ("Mo",),
+     (
+         "Ub(36,11) = 13 is found by considering shortening to: | Ub(34,9) = 13 is found by "
+         "considering truncation to: | Ub(33,9) = 12 He"
+     ),
+     ("He",),
+    ),
+    (37, 11, 13, 14,
+     (
+         "Lb(37,11) = 13 is found by shortening of: | Lb(38,12) = 13 is found by truncation of: "
+         "| Lb(39,12) = 14 BE"
+     ),
+     ("BE",),
+     (
+         "Ub(37,11) = 14 is found by considering shortening to: | Ub(33,7) = 14 otherwise adding "
+         "a parity check bit would contradict: | Ub(34,7) = 15 vT3"
+     ),
+     ("vT3",),
+    ),
+    (44, 11, 16, 17,
+     (
+         "Lb(44,11) = 16 is found by taking a subcode of: | Lb(44,13) = 16 is found by "
+         "shortening of: | Lb(45,14) = 16 Bo0"
+     ),
+     ("Bo0",),
+     (
+         "Ub(44,11) = 17 follows by a one-step Griesmer bound from: | Ub(26,10) = 8 is found by "
+         "considering shortening to: | Ub(24,8) = 8 otherwise adding a parity check bit would "
+         "contradict: | Ub(25,8) = 9 YH1"
+     ),
+     ("YH1",),
+    ),
+    (45, 11, 16, 18,
+     "Lb(45,11) = 16 is found by taking a subcode of: | Lb(45,14) = 16 Bo0",
+     ("Bo0",),
+     (
+         "Ub(45,11) = 18 follows by a one-step Griesmer bound from: | Ub(26,10) = 8 is found by "
+         "considering shortening to: | Ub(24,8) = 8 otherwise adding a parity check bit would "
+         "contradict: | Ub(25,8) = 9 YH1"
+     ),
+     ("YH1",),
+    ),
+    (46, 11, 17, 18,
+     "Lb(46,11) = 17 GG",
+     ("GG",),
+     (
+         "Ub(46,11) = 18 follows by a one-step Griesmer bound from: | Ub(27,10) = 9 is found by "
+         "considering shortening to: | Ub(25,8) = 9 YH1"
+     ),
+     ("YH1",),
+    ),
+    (48, 11, 18, 19,
+     (
+         "Lb(48,11) = 18 is found by shortening of: | Lb(50,13) = 18 is found by adding a parity "
+         "check bit to: | Lb(49,13) = 17 B2x"
+     ),
+     ("B2x",),
+     "Ub(48,11) = 19 Ja",
+     ("Ja",),
+    ),
+    (49, 11, 19, 20,
+     "Lb(49,11) = 19 B2x",
+     ("B2x",),
+     (
+         "Ub(49,11) = 20 follows by a one-step Griesmer bound from: | Ub(28,10) = 10 follows by "
+         "a one-step Griesmer bound from: | Ub(17,9) = 5 follows by a one-step Griesmer bound "
+         "from: | Ub(11,8) = 2 is found by considering shortening to: | Ub(8,5) = 2 is found by "
+         "construction B:"
+     ),
+     (),
+    ),
+    (52, 11, 20, 21,
+     (
+         "Lb(52,11) = 20 is found by taking a subcode of: | Lb(52,12) = 20 is found by "
+         "shortening of: | Lb(56,16) = 20 is found by adding a parity check bit to: | Lb(55,16) "
+         "= 19 LC"
+     ),
+     ("LC",),
+     (
+         "Ub(52,11) = 21 is found by considering shortening to: | Ub(50,9) = 21 is found by "
+         "considering truncation to: | Ub(49,9) = 20 Ja"
+     ),
+     ("Ja",),
+    ),
+    (53, 11, 20, 22,
+     (
+         "Lb(53,11) = 20 is found by taking a subcode of: | Lb(53,13) = 20 is found by "
+         "shortening of: | Lb(56,16) = 20 is found by adding a parity check bit to: | Lb(55,16) "
+         "= 19 LC"
+     ),
+     ("LC",),
+     (
+         "Ub(53,11) = 22 follows by a one-step Griesmer bound from: | Ub(30,10) = 11 is found by "
+         "considering shortening to: | Ub(28,8) = 11 DM"
+     ),
+     ("DM",),
+    ),
+    (54, 11, 21, 22,
+     "Lb(54,11) = 21 GG",
+     ("GG",),
+     (
+         "Ub(54,11) = 22 is found by considering shortening to: | Ub(52,9) = 22 otherwise adding "
+         "a parity check bit would contradict: | Ub(53,9) = 23 Bro"
+     ),
+     ("Bro",),
+    ),
+    (55, 11, 22, 23,
+     "Lb(55,11) = 22 is found by adding a parity check bit to: | Lb(54,11) = 21 GG",
+     ("GG",),
+     "Ub(55,11) = 23 is found by considering shortening to: | Ub(53,9) = 23 Bro",
+     ("Bro",),
+    ),
+    (56, 11, 22, 24,
+     "Lb(56,11) = 22 is found by shortening of: | Lb(58,13) = 22 GG",
+     ("GG",),
+     "Ub(56,11) = 24 follows by the Griesmer bound.",
+     (),
+    ),
+    (57, 11, 23, 24,
+     "Lb(57,11) = 23 SRC",
+     ("SRC",),
+     (
+         "Ub(57,11) = 24 follows by a one-step Griesmer bound from: | Ub(32,10) = 12 follows by "
+         "a one-step Griesmer bound from: | Ub(19,9) = 6 follows by a one-step Griesmer bound "
+         "from: | Ub(12,8) = 3 is found by considering shortening to: | Ub(9,5) = 3 is found by "
+         "considering truncation to: | Ub(8,5) = 2 is found by construction B:"
+     ),
+     (),
+    ),
+    (61, 11, 24, 25,
+     (
+         "Lb(61,11) = 24 is found by taking a subcode of: | Lb(61,13) = 24 is found by "
+         "shortening of: | Lb(64,16) = 24 XBC"
+     ),
+     ("XBC",),
+     "Ub(61,11) = 25 is found by construction B:",
+     (),
+    ),
+    (62, 11, 25, 26,
+     "Lb(62,11) = 25 is found by truncation of: | Lb(63,11) = 26 BCH",
+     ("BCH",),
+     (
+         "Ub(62,11) = 26 follows by a one-step Griesmer bound from: | Ub(35,10) = 13 is found by "
+         "considering shortening to: | Ub(34,9) = 13 is found by considering truncation to: | "
+         "Ub(33,9) = 12 He"
+     ),
+     ("He",),
+    ),
+    (64, 11, 26, 27,
+     (
+         "Lb(64,11) = 26 is found by shortening of: | Lb(66,13) = 26 is found by adding a parity "
+         "check bit to: | Lb(65,13) = 25 cy"
+     ),
+     ("cy",),
+     "Ub(64,11) = 27 is found by considering truncation to: | Ub(63,11) = 26 Ja",
+     ("Ja",),
+    ),
+    (37, 12, 12, 13,
+     (
+         "Lb(37,12) = 12 is found by taking a subcode of: | Lb(37,14) = 12 is found by adding a "
+         "parity check bit to: | Lb(36,14) = 11 Mo"
+     ),
+     ("Mo",),
+     (
+         "Ub(37,12) = 13 is found by considering shortening to: | Ub(34,9) = 13 is found by "
+         "considering truncation to: | Ub(33,9) = 12 He"
+     ),
+     ("He",),
+    ),
+    (38, 12, 13, 14,
+     "Lb(38,12) = 13 is found by truncation of: | Lb(39,12) = 14 BE",
+     ("BE",),
+     (
+         "Ub(38,12) = 14 is found by considering shortening to: | Ub(33,7) = 14 otherwise adding "
+         "a parity check bit would contradict: | Ub(34,7) = 15 vT3"
+     ),
+     ("vT3",),
+    ),
+    (41, 12, 14, 15,
+     (
+         "Lb(41,12) = 14 is found by shortening of: | Lb(44,15) = 14 is found by adding a parity "
+         "check bit to: | Lb(43,15) = 13 cy"
+     ),
+     ("cy",),
+     "Ub(41,12) = 15 is found by considering shortening to: | Ub(39,10) = 15 Bou",
+     ("Bou",),
+    ),
+    (42, 12, 15, 16,
+     (
+         "Lb(42,12) = 15 is found by shortening of: | Lb(44,14) = 15 is found by truncation of: "
+         "| Lb(45,14) = 16 Bo0"
+     ),
+     ("Bo0",),
+     "Ub(42,12) = 16 follows by the Griesmer bound.",
+     (),
+    ),
+    (46, 12, 16, 17,
+     (
+         "Lb(46,12) = 16 is found by taking a subcode of: | Lb(46,14) = 16 is found by "
+         "lengthening of: | Lb(45,14) = 16 Bo0"
+     ),
+     ("Bo0",),
+     (
+         "Ub(46,12) = 17 follows by a one-step Griesmer bound from: | Ub(28,11) = 8 otherwise "
+         "adding a parity check bit would contradict: | Ub(29,11) = 9 Ja"
+     ),
+     ("Ja",),
+    ),
+    (47, 12, 16, 18,
+     (
+         "Lb(47,12) = 16 is found by taking a subcode of: | Lb(47,14) = 16 is found by "
+         "shortening of: | Lb(49,16) = 16 is found by adding a parity check bit to: | Lb(48,16) "
+         "= 15 FB"
+     ),
+     ("FB",),
+     (
+         "Ub(47,12) = 18 follows by a one-step Griesmer bound from: | Ub(28,11) = 8 otherwise "
+         "adding a parity check bit would contradict: | Ub(29,11) = 9 Ja"
+     ),
+     ("Ja",),
+    ),
+    (48, 12, 17, 18,
+     "Lb(48,12) = 17 is found by shortening of: | Lb(49,13) = 17 B2x",
+     ("B2x",),
+     "Ub(48,12) = 18 follows by a one-step Griesmer bound from: | Ub(29,11) = 9 Ja",
+     ("Ja",),
+    ),
+    (49, 12, 18, 19,
+     (
+         "Lb(49,12) = 18 is found by shortening of: | Lb(50,13) = 18 is found by adding a parity "
+         "check bit to: | Lb(49,13) = 17 B2x"
+     ),
+     ("B2x",),
+     "Ub(49,12) = 19 follows by a one-step Griesmer bound from: | Ub(29,11) = 9 Ja",
+     ("Ja",),
+    ),
+    (50, 12, 18, 20,
+     (
+         "Lb(50,12) = 18 is found by taking a subcode of: | Lb(50,13) = 18 is found by adding a "
+         "parity check bit to: | Lb(49,13) = 17 B2x"
+     ),
+     ("B2x",),
+     "Ub(50,12) = 20 follows by a one-step Griesmer bound from: | Ub(29,11) = 9 Ja",
+     ("Ja",),
+    ),
+    (51, 12, 19, 20,
+     "Lb(51,12) = 19 is found by shortening of: | Lb(55,16) = 19 LC",
+     ("LC",),
+     (
+         "Ub(51,12) = 20 follows by a one-step Griesmer bound from: | Ub(30,11) = 10 follows by "
+         "a one-step Griesmer bound from: | Ub(19,10) = 5 is found by construction B:"
+     ),
+     (),
+    ),
+    (53, 12, 20, 21,
+     (
+         "Lb(53,12) = 20 is found by taking a subcode of: | Lb(53,13) = 20 is found by "
+         "shortening of: | Lb(56,16) = 20 is found by adding a parity check bit to: | Lb(55,16) "
+         "= 19 LC"
+     ),
+     ("LC",),
+     (
+         "Ub(53,12) = 21 is found by considering shortening to: | Ub(50,9) = 21 is found by "
+         "considering truncation to: | Ub(49,9) = 20 Ja"
+     ),
+     ("Ja",),
+    ),
+    (54, 12, 20, 22,
+     (
+         "Lb(54,12) = 20 is found by taking a subcode of: | Lb(54,14) = 20 is found by "
+         "shortening of: | Lb(56,16) = 20 is found by adding a parity check bit to: | Lb(55,16) "
+         "= 19 LC"
+     ),
+     ("LC",),
+     (
+         "Ub(54,12) = 22 follows by a one-step Griesmer bound from: | Ub(31,11) = 11 follows by "
+         "a one-step Griesmer bound from: | Ub(19,10) = 5 is found by construction B:"
+     ),
+     (),
+    ),
+    (55, 12, 21, 22,
+     (
+         "Lb(55,12) = 20 is found by taking a subcode of: | Lb(55,15) = 20 is found by "
+         "shortening of: | Lb(56,16) = 20 is found by adding a parity check bit to: | Lb(55,16) "
+         "= 19 LC"
+     ),
+     ("LC",),
+     (
+         "Ub(55,12) = 22 is found by considering shortening to: | Ub(52,9) = 22 otherwise adding "
+         "a parity check bit would contradict: | Ub(53,9) = 23 Bro"
+     ),
+     ("Bro",),
+    ),
+    (57, 12, 22, 23,
+     "Lb(57,12) = 22 is found by shortening of: | Lb(58,13) = 22 GG",
+     ("GG",),
+     "Ub(57,12) = 23 Ja",
+     ("Ja",),
+    ),
+    (58, 12, 23, 24,
+     "Lb(58,12) = 22 is found by taking a subcode of: | Lb(58,13) = 22 GG",
+     ("GG",),
+     (
+         "Ub(58,12) = 24 follows by a one-step Griesmer bound from: | Ub(33,11) = 12 follows by "
+         "a one-step Griesmer bound from: | Ub(20,10) = 6 follows by a one-step Griesmer bound "
+         "from: | Ub(13,9) = 3 is found by considering shortening to: | Ub(9,5) = 3 is found by "
+         "considering truncation to: | Ub(8,5) = 2 is found by construction B:"
+     ),
+     (),
+    ),
+    (62, 12, 24, 25,
+     (
+         "Lb(62,12) = 24 is found by taking a subcode of: | Lb(62,14) = 24 is found by "
+         "shortening of: | Lb(64,16) = 24 XBC"
+     ),
+     ("XBC",),
+     (
+         "Ub(62,12) = 25 is found by considering shortening to: | Ub(61,11) = 25 is found by "
+         "construction B:"
+     ),
+     (),
+    ),
+    (63, 12, 24, 26,
+     (
+         "Lb(63,12) = 24 is found by taking a subcode of: | Lb(63,15) = 24 is found by "
+         "shortening of: | Lb(64,16) = 24 XBC"
+     ),
+     ("XBC",),
+     (
+         "Ub(63,12) = 26 follows by a one-step Griesmer bound from: | Ub(36,11) = 13 is found by "
+         "considering shortening to: | Ub(34,9) = 13 is found by considering truncation to: | "
+         "Ub(33,9) = 12 He"
+     ),
+     ("He",),
+    ),
+    (64, 12, 25, 26,
+     "Lb(64,12) = 25 is found by shortening of: | Lb(65,13) = 25 cy",
+     ("cy",),
+     "Ub(64,12) = 26 is found by considering shortening to: | Ub(63,11) = 26 Ja",
+     ("Ja",),
+    ),
+    (39, 13, 12, 13,
+     (
+         "Lb(39,13) = 12 is found by taking a subcode of: | Lb(39,15) = 12 is found by "
+         "shortening of: | Lb(48,24) = 12 QR"
+     ),
+     ("QR",),
+     "Ub(39,13) = 13 Ja",
+     ("Ja",),
+    ),
+    (40, 13, 13, 14,
+     (
+         "Lb(40,13) = 12 is found by taking a subcode of: | Lb(40,16) = 12 is found by "
+         "shortening of: | Lb(48,24) = 12 QR"
+     ),
+     ("QR",),
+     "Ub(40,13) = 14 is found by considering shortening to: | Ub(36,9) = 14 Ja",
+     ("Ja",),
+    ),
+    (47, 13, 16, 17,
+     (
+         "Lb(47,13) = 16 is found by taking a subcode of: | Lb(47,14) = 16 is found by "
+         "shortening of: | Lb(49,16) = 16 is found by adding a parity check bit to: | Lb(48,16) "
+         "= 15 FB"
+     ),
+     ("FB",),
+     (
+         "Ub(47,13) = 17 follows by a one-step Griesmer bound from: | Ub(29,12) = 8 is found by "
+         "considering shortening to: | Ub(28,11) = 8 otherwise adding a parity check bit would "
+         "contradict: | Ub(29,11) = 9 Ja"
+     ),
+     ("Ja",),
+    ),
+    (48, 13, 16, 18,
+     (
+         "Lb(48,13) = 16 is found by taking a subcode of: | Lb(48,15) = 16 is found by "
+         "shortening of: | Lb(49,16) = 16 is found by adding a parity check bit to: | Lb(48,16) "
+         "= 15 FB"
+     ),
+     ("FB",),
+     (
+         "Ub(48,13) = 18 follows by a one-step Griesmer bound from: | Ub(29,12) = 8 is found by "
+         "considering shortening to: | Ub(28,11) = 8 otherwise adding a parity check bit would "
+         "contradict: | Ub(29,11) = 9 Ja"
+     ),
+     ("Ja",),
+    ),
+    (49, 13, 17, 18,
+     "Lb(49,13) = 17 B2x",
+     ("B2x",),
+     (
+         "Ub(49,13) = 18 follows by a one-step Griesmer bound from: | Ub(30,12) = 9 is found by "
+         "considering shortening to: | Ub(29,11) = 9 Ja"
+     ),
+     ("Ja",),
+    ),
+    (50, 13, 18, 19,
+     "Lb(50,13) = 18 is found by adding a parity check bit to: | Lb(49,13) = 17 B2x",
+     ("B2x",),
+     (
+         "Ub(50,13) = 19 follows by a one-step Griesmer bound from: | Ub(30,12) = 9 is found by "
+         "considering shortening to: | Ub(29,11) = 9 Ja"
+     ),
+     ("Ja",),
+    ),
+    (51, 13, 18, 20,
+     (
+         "Lb(51,13) = 18 is found by shortening of: | Lb(54,16) = 18 is found by truncation of: "
+         "| Lb(56,16) = 20 is found by adding a parity check bit to: | Lb(55,16) = 19 LC"
+     ),
+     ("LC",),
+     (
+         "Ub(51,13) = 20 follows by a one-step Griesmer bound from: | Ub(30,12) = 9 is found by "
+         "considering shortening to: | Ub(29,11) = 9 Ja"
+     ),
+     ("Ja",),
+    ),
+    (52, 13, 19, 20,
+     "Lb(52,13) = 19 is found by shortening of: | Lb(55,16) = 19 LC",
+     ("LC",),
+     (
+         "Ub(52,13) = 20 follows by a one-step Griesmer bound from: | Ub(31,12) = 10 follows by "
+         "a one-step Griesmer bound from: | Ub(20,11) = 5 is found by considering shortening to: "
+         "| Ub(19,10) = 5 is found by construction B:"
+     ),
+     (),
+    ),
+    (55, 13, 20, 21,
+     (
+         "Lb(55,13) = 20 is found by taking a subcode of: | Lb(55,15) = 20 is found by "
+         "shortening of: | Lb(56,16) = 20 is found by adding a parity check bit to: | Lb(55,16) "
+         "= 19 LC"
+     ),
+     ("LC",),
+     "Ub(55,13) = 21 Ja",
+     ("Ja",),
+    ),
+    (56, 13, 20, 22,
+     (
+         "Lb(56,13) = 20 is found by taking a subcode of: | Lb(56,16) = 20 is found by adding a "
+         "parity check bit to: | Lb(55,16) = 19 LC"
+     ),
+     ("LC",),
+     "Ub(56,13) = 22 follows by a one-step Griesmer bound from: | Ub(33,12) = 11 Ja",
+     ("Ja",),
+    ),
+    (57, 13, 21, 22,
+     "Lb(57,13) = 21 is found by truncation of: | Lb(58,13) = 22 GG",
+     ("GG",),
+     (
+         "Ub(57,13) = 22 is found by considering shortening to: | Ub(56,12) = 22 otherwise "
+         "adding a parity check bit would contradict: | Ub(57,12) = 23 Ja"
+     ),
+     ("Ja",),
+    ),
+    (58, 13, 22, 23,
+     "Lb(58,13) = 22 GG",
+     ("GG",),
+     "Ub(58,13) = 23 is found by considering shortening to: | Ub(57,12) = 23 Ja",
+     ("Ja",),
+    ),
+    (59, 13, 23, 24,
+     "Lb(59,13) = 22 is found by shortening of: | Lb(64,18) = 22 XBC",
+     ("XBC",),
+     (
+         "Ub(59,13) = 24 follows by a one-step Griesmer bound from: | Ub(34,12) = 12 follows by "
+         "a one-step Griesmer bound from: | Ub(21,11) = 6 follows by a one-step Griesmer bound "
+         "from: | Ub(14,10) = 3 is found by considering shortening to: | Ub(9,5) = 3 is found by "
+         "considering truncation to: | Ub(8,5) = 2 is found by construction B:"
+     ),
+     (),
+    ),
+    (63, 13, 24, 25,
+     (
+         "Lb(63,13) = 24 is found by taking a subcode of: | Lb(63,15) = 24 is found by "
+         "shortening of: | Lb(64,16) = 24 XBC"
+     ),
+     ("XBC",),
+     (
+         "Ub(63,13) = 25 is found by considering shortening to: | Ub(61,11) = 25 is found by "
+         "construction B:"
+     ),
+     (),
+    ),
+    (64, 13, 24, 26,
+     "Lb(64,13) = 24 is found by taking a subcode of: | Lb(64,16) = 24 XBC",
+     ("XBC",),
+     (
+         "Ub(64,13) = 26 follows by a one-step Griesmer bound from: | Ub(37,12) = 13 is found by "
+         "considering shortening to: | Ub(34,9) = 13 is found by considering truncation to: | "
+         "Ub(33,9) = 12 He"
+     ),
+     ("He",),
+    ),
+    (32, 14, 8, 9,
+     "Lb(32,14) = 8 is found by taking a subcode of: | Lb(32,17) = 8 CS",
+     ("CS",),
+     "Ub(32,14) = 9 is found by considering shortening to: | Ub(29,11) = 9 Ja",
+     ("Ja",),
+    ),
+    (33, 14, 9, 10,
+     (
+         "Lb(33,14) = 9 is found by shortening of: | Lb(35,16) = 9 is found by truncation of: | "
+         "Lb(36,16) = 10 Sh1"
+     ),
+     ("Sh1",),
+     (
+         "Ub(33,14) = 10 follows by a one-step Griesmer bound from: | Ub(22,13) = 5 follows by a "
+         "one-step Griesmer bound from: | Ub(16,12) = 2 is found by construction B:"
+     ),
+     (),
+    ),
+    (40, 14, 12, 13,
+     (
+         "Lb(40,14) = 12 is found by taking a subcode of: | Lb(40,16) = 12 is found by "
+         "shortening of: | Lb(48,24) = 12 QR"
+     ),
+     ("QR",),
+     "Ub(40,14) = 13 is found by considering shortening to: | Ub(39,13) = 13 Ja",
+     ("Ja",),
+    ),
+    (41, 14, 12, 14,
+     (
+         "Lb(41,14) = 12 is found by taking a subcode of: | Lb(41,17) = 12 is found by "
+         "shortening of: | Lb(48,24) = 12 QR"
+     ),
+     ("QR",),
+     "Ub(41,14) = 14 follows by a one-step Griesmer bound from: | Ub(26,13) = 7 Pu2",
+     ("Pu2",),
+    ),
+    (42, 14, 13, 14,
+     "Lb(42,14) = 13 is found by shortening of: | Lb(43,15) = 13 cy",
+     ("cy",),
+     (
+         "Ub(42,14) = 14 is found by considering shortening to: | Ub(38,10) = 14 otherwise "
+         "adding a parity check bit would contradict: | Ub(39,10) = 15 Bou"
+     ),
+     ("Bou",),
+    ),
+    (48, 14, 16, 17,
+     (
+         "Lb(48,14) = 16 is found by taking a subcode of: | Lb(48,15) = 16 is found by "
+         "shortening of: | Lb(49,16) = 16 is found by adding a parity check bit to: | Lb(48,16) "
+         "= 15 FB"
+     ),
+     ("FB",),
+     (
+         "Ub(48,14) = 17 follows by a one-step Griesmer bound from: | Ub(30,13) = 8 is found by "
+         "considering shortening to: | Ub(28,11) = 8 otherwise adding a parity check bit would "
+         "contradict: | Ub(29,11) = 9 Ja"
+     ),
+     ("Ja",),
+    ),
+    (49, 14, 16, 18,
+     (
+         "Lb(49,14) = 16 is found by taking a subcode of: | Lb(49,16) = 16 is found by adding a "
+         "parity check bit to: | Lb(48,16) = 15 FB"
+     ),
+     ("FB",),
+     (
+         "Ub(49,14) = 18 follows by a one-step Griesmer bound from: | Ub(30,13) = 8 is found by "
+         "considering shortening to: | Ub(28,11) = 8 otherwise adding a parity check bit would "
+         "contradict: | Ub(29,11) = 9 Ja"
+     ),
+     ("Ja",),
+    ),
+    (50, 14, 17, 18,
+     (
+         "Lb(50,14) = 16 is found by taking a subcode of: | Lb(50,16) = 16 is found by "
+         "shortening of: | Lb(51,17) = 16 cy"
+     ),
+     ("cy",),
+     (
+         "Ub(50,14) = 18 follows by a one-step Griesmer bound from: | Ub(31,13) = 9 is found by "
+         "considering shortening to: | Ub(29,11) = 9 Ja"
+     ),
+     ("Ja",),
+    ),
+    (52, 14, 18, 19,
+     (
+         "Lb(52,14) = 18 is found by shortening of: | Lb(54,16) = 18 is found by truncation of: "
+         "| Lb(56,16) = 20 is found by adding a parity check bit to: | Lb(55,16) = 19 LC"
+     ),
+     ("LC",),
+     "Ub(52,14) = 19 is found by considering truncation to: | Ub(51,14) = 18 Ja",
+     ("Ja",),
+    ),
+    (53, 14, 19, 20,
+     "Lb(53,14) = 19 is found by shortening of: | Lb(55,16) = 19 LC",
+     ("LC",),
+     (
+         "Ub(53,14) = 20 follows by a one-step Griesmer bound from: | Ub(32,13) = 10 follows by "
+         "a one-step Griesmer bound from: | Ub(21,12) = 5 is found by considering shortening to: "
+         "| Ub(19,10) = 5 is found by construction B:"
+     ),
+     (),
+    ),
+    (56, 14, 20, 21,
+     (
+         "Lb(56,14) = 20 is found by taking a subcode of: | Lb(56,16) = 20 is found by adding a "
+         "parity check bit to: | Lb(55,16) = 19 LC"
+     ),
+     ("LC",),
+     (
+         "Ub(56,14) = 21 follows by a one-step Griesmer bound from: | Ub(34,13) = 10 otherwise "
+         "adding a parity check bit would contradict: | Ub(35,13) = 11 Ja"
+     ),
+     ("Ja",),
+    ),
+    (57, 14, 20, 22,
+     (
+         "Lb(57,14) = 20 is found by taking a subcode of: | Lb(57,16) = 20 is found by "
+         "lengthening of: | Lb(56,16) = 20 is found by adding a parity check bit to: | Lb(55,16) "
+         "= 19 LC"
+     ),
+     ("LC",),
+     (
+         "Ub(57,14) = 22 follows by a one-step Griesmer bound from: | Ub(34,13) = 10 otherwise "
+         "adding a parity check bit would contradict: | Ub(35,13) = 11 Ja"
+     ),
+     ("Ja",),
+    ),
+    (58, 14, 20, 22,
+     (
+         "Lb(58,14) = 20 is found by taking a subcode of: | Lb(58,16) = 20 is found by "
+         "lengthening of: | Lb(56,16) = 20 is found by adding a parity check bit to: | Lb(55,16) "
+         "= 19 LC"
+     ),
+     ("LC",),
+     "Ub(58,14) = 22 follows by a one-step Griesmer bound from: | Ub(35,13) = 11 Ja",
+     ("Ja",),
+    ),
+    (59, 14, 21, 22,
+     (
+         "Lb(59,14) = 21 is found by shortening of: | Lb(63,18) = 21 is found by truncation of: "
+         "| Lb(64,18) = 22 XBC"
+     ),
+     ("XBC",),
+     "Ub(59,14) = 22 Ja",
+     ("Ja",),
+    ),
+    (60, 14, 22, 23,
+     "Lb(60,14) = 22 is found by shortening of: | Lb(64,18) = 22 XBC",
+     ("XBC",),
+     "Ub(60,14) = 23 is found by considering truncation to: | Ub(59,14) = 22 Ja",
+     ("Ja",),
+    ),
+    (61, 14, 23, 24,
+     (
+         "Lb(61,14) = 23 is found by shortening of: | Lb(63,16) = 23 is found by truncation of: "
+         "| Lb(64,16) = 24 XBC"
+     ),
+     ("XBC",),
+     (
+         "Ub(61,14) = 24 follows by a one-step Griesmer bound from: | Ub(36,13) = 12 is found by "
+         "considering shortening to: | Ub(30,7) = 12 otherwise adding a parity check bit would "
+         "contradict: | Ub(31,7) = 13 vT3"
+     ),
+     ("vT3",),
+    ),
+    (64, 14, 24, 25,
+     "Lb(64,14) = 24 is found by taking a subcode of: | Lb(64,16) = 24 XBC",
+     ("XBC",),
+     (
+         "Ub(64,14) = 25 follows by a one-step Griesmer bound from: | Ub(38,13) = 12 otherwise "
+         "adding a parity check bit would contradict: | Ub(39,13) = 13 Ja"
+     ),
+     ("Ja",),
+    ),
+    (33, 15, 8, 9,
+     (
+         "Lb(33,15) = 8 is found by taking a subcode of: | Lb(33,17) = 8 is found by shortening "
+         "of: | Lb(38,22) = 8 Sh1"
+     ),
+     ("Sh1",),
+     "Ub(33,15) = 9 is found by considering shortening to: | Ub(29,11) = 9 Ja",
+     ("Ja",),
+    ),
+    (34, 15, 9, 10,
+     (
+         "Lb(34,15) = 9 is found by shortening of: | Lb(35,16) = 9 is found by truncation of: | "
+         "Lb(36,16) = 10 Sh1"
+     ),
+     ("Sh1",),
+     (
+         "Ub(34,15) = 10 follows by a one-step Griesmer bound from: | Ub(23,14) = 5 follows by a "
+         "one-step Griesmer bound from: | Ub(17,13) = 2 is found by considering shortening to: | "
+         "Ub(16,12) = 2 is found by construction B:"
+     ),
+     (),
+    ),
+    (37, 15, 10, 11,
+     (
+         "Lb(37,15) = 10 is found by taking a subcode of: | Lb(37,16) = 10 is found by "
+         "shortening of: | Lb(42,21) = 10 QR"
+     ),
+     ("QR",),
+     "Ub(37,15) = 11 is found by considering shortening to: | Ub(35,13) = 11 Ja",
+     ("Ja",),
+    ),
+    (38, 15, 11, 12,
+     (
+         "Lb(38,15) = 11 is found by shortening of: | Lb(47,24) = 11 is found by truncation of: "
+         "| Lb(48,24) = 12 QR"
+     ),
+     ("QR",),
+     (
+         "Ub(38,15) = 12 follows by a one-step Griesmer bound from: | Ub(25,14) = 6 follows by a "
+         "one-step Griesmer bound from: | Ub(18,13) = 3 is found by considering shortening to: | "
+         "Ub(17,12) = 3 is found by considering truncation to: | Ub(16,12) = 2 is found by "
+         "construction B:"
+     ),
+     (),
+    ),
+    (41, 15, 12, 13,
+     (
+         "Lb(41,15) = 12 is found by taking a subcode of: | Lb(41,17) = 12 is found by "
+         "shortening of: | Lb(48,24) = 12 QR"
+     ),
+     ("QR",),
+     "Ub(41,15) = 13 is found by considering shortening to: | Ub(39,13) = 13 Ja",
+     ("Ja",),
+    ),
+    (42, 15, 12, 14,
+     (
+         "Lb(42,15) = 12 is found by taking a subcode of: | Lb(42,18) = 12 is found by "
+         "shortening of: | Lb(48,24) = 12 QR"
+     ),
+     ("QR",),
+     (
+         "Ub(42,15) = 14 follows by a one-step Griesmer bound from: | Ub(27,14) = 7 is found by "
+         "considering shortening to: | Ub(26,13) = 7 Pu2"
+     ),
+     ("Pu2",),
+    ),
+    (43, 15, 13, 14,
+     "Lb(43,15) = 13 cy",
+     ("cy",),
+     (
+         "Ub(43,15) = 14 is found by considering shortening to: | Ub(38,10) = 14 otherwise "
+         "adding a parity check bit would contradict: | Ub(39,10) = 15 Bou"
+     ),
+     ("Bou",),
+    ),
+    (45, 15, 14, 15,
+     (
+         "Lb(45,15) = 14 is found by shortening of: | Lb(46,16) = 14 is found by adding a parity "
+         "check bit to: | Lb(45,16) = 13 DJ"
+     ),
+     ("DJ",),
+     "Ub(45,15) = 15 is found by considering shortening to: | Ub(43,13) = 15 Ja",
+     ("Ja",),
+    ),
+    (46, 15, 15, 16,
+     (
+         "Lb(46,15) = 14 is found by taking a subcode of: | Lb(46,16) = 14 is found by adding a "
+         "parity check bit to: | Lb(45,16) = 13 DJ"
+     ),
+     ("DJ",),
+     (
+         "Ub(46,15) = 16 follows by a one-step Griesmer bound from: | Ub(29,14) = 8 follows by a "
+         "one-step Griesmer bound from: | Ub(20,13) = 4 follows by a one-step Griesmer bound "
+         "from: | Ub(15,12) = 2 is found by considering shortening to: | Ub(8,5) = 2 is found by "
+         "construction B:"
+     ),
+     (),
+    ),
+    (49, 15, 16, 17,
+     (
+         "Lb(49,15) = 16 is found by taking a subcode of: | Lb(49,16) = 16 is found by adding a "
+         "parity check bit to: | Lb(48,16) = 15 FB"
+     ),
+     ("FB",),
+     (
+         "Ub(49,15) = 17 follows by a one-step Griesmer bound from: | Ub(31,14) = 8 is found by "
+         "considering shortening to: | Ub(28,11) = 8 otherwise adding a parity check bit would "
+         "contradict: | Ub(29,11) = 9 Ja"
+     ),
+     ("Ja",),
+    ),
+    (50, 15, 16, 18,
+     (
+         "Lb(50,15) = 16 is found by taking a subcode of: | Lb(50,16) = 16 is found by "
+         "shortening of: | Lb(51,17) = 16 cy"
+     ),
+     ("cy",),
+     (
+         "Ub(50,15) = 18 follows by a one-step Griesmer bound from: | Ub(31,14) = 8 is found by "
+         "considering shortening to: | Ub(28,11) = 8 otherwise adding a parity check bit would "
+         "contradict: | Ub(29,11) = 9 Ja"
+     ),
+     ("Ja",),
+    ),
+    (51, 15, 16, 18,
+     "Lb(51,15) = 16 is found by taking a subcode of: | Lb(51,17) = 16 cy",
+     ("cy",),
+     (
+         "Ub(51,15) = 18 follows by a one-step Griesmer bound from: | Ub(32,14) = 9 is found by "
+         "considering shortening to: | Ub(29,11) = 9 Ja"
+     ),
+     ("Ja",),
+    ),
+    (52, 15, 17, 18,
+     (
+         "Lb(52,15) = 17 is found by shortening of: | Lb(53,16) = 17 is found by truncation of: "
+         "| Lb(56,16) = 20 is found by adding a parity check bit to: | Lb(55,16) = 19 LC"
+     ),
+     ("LC",),
+     "Ub(52,15) = 18 is found by considering shortening to: | Ub(51,14) = 18 Ja",
+     ("Ja",),
+    ),
+    (53, 15, 18, 19,
+     (
+         "Lb(53,15) = 18 is found by shortening of: | Lb(54,16) = 18 is found by truncation of: "
+         "| Lb(56,16) = 20 is found by adding a parity check bit to: | Lb(55,16) = 19 LC"
+     ),
+     ("LC",),
+     (
+         "Ub(53,15) = 19 is found by considering shortening to: | Ub(52,14) = 19 is found by "
+         "considering truncation to: | Ub(51,14) = 18 Ja"
+     ),
+     ("Ja",),
+    ),
+    (54, 15, 19, 20,
+     "Lb(54,15) = 19 is found by shortening of: | Lb(55,16) = 19 LC",
+     ("LC",),
+     (
+         "Ub(54,15) = 20 follows by a one-step Griesmer bound from: | Ub(33,14) = 10 follows by "
+         "a one-step Griesmer bound from: | Ub(22,13) = 5 follows by a one-step Griesmer bound "
+         "from: | Ub(16,12) = 2 is found by construction B:"
+     ),
+     (),
+    ),
+    (57, 15, 20, 21,
+     (
+         "Lb(57,15) = 20 is found by taking a subcode of: | Lb(57,16) = 20 is found by "
+         "lengthening of: | Lb(56,16) = 20 is found by adding a parity check bit to: | Lb(55,16) "
+         "= 19 LC"
+     ),
+     ("LC",),
+     (
+         "Ub(57,15) = 21 follows by a one-step Griesmer bound from: | Ub(35,14) = 10 is found by "
+         "considering shortening to: | Ub(34,13) = 10 otherwise adding a parity check bit would "
+         "contradict: | Ub(35,13) = 11 Ja"
+     ),
+     ("Ja",),
+    ),
+    (58, 15, 20, 22,
+     (
+         "Lb(58,15) = 20 is found by taking a subcode of: | Lb(58,16) = 20 is found by "
+         "lengthening of: | Lb(56,16) = 20 is found by adding a parity check bit to: | Lb(55,16) "
+         "= 19 LC"
+     ),
+     ("LC",),
+     (
+         "Ub(58,15) = 22 follows by a one-step Griesmer bound from: | Ub(35,14) = 10 is found by "
+         "considering shortening to: | Ub(34,13) = 10 otherwise adding a parity check bit would "
+         "contradict: | Ub(35,13) = 11 Ja"
+     ),
+     ("Ja",),
+    ),
+    (59, 15, 20, 22,
+     (
+         "Lb(59,15) = 20 is found by taking a subcode of: | Lb(59,16) = 20 is found by "
+         "shortening of: | Lb(60,17) = 20 CDJ"
+     ),
+     ("CDJ",),
+     (
+         "Ub(59,15) = 22 follows by a one-step Griesmer bound from: | Ub(36,14) = 11 is found by "
+         "considering shortening to: | Ub(35,13) = 11 Ja"
+     ),
+     ("Ja",),
+    ),
+    (60, 15, 21, 22,
+     (
+         "Lb(60,15) = 21 is found by shortening of: | Lb(63,18) = 21 is found by truncation of: "
+         "| Lb(64,18) = 22 XBC"
+     ),
+     ("XBC",),
+     "Ub(60,15) = 22 is found by considering shortening to: | Ub(59,14) = 22 Ja",
+     ("Ja",),
+    ),
+    (61, 15, 22, 23,
+     "Lb(61,15) = 22 is found by shortening of: | Lb(64,18) = 22 XBC",
+     ("XBC",),
+     (
+         "Ub(61,15) = 23 is found by considering shortening to: | Ub(60,14) = 23 is found by "
+         "considering truncation to: | Ub(59,14) = 22 Ja"
+     ),
+     ("Ja",),
+    ),
+    (62, 15, 23, 24,
+     (
+         "Lb(62,15) = 23 is found by shortening of: | Lb(63,16) = 23 is found by truncation of: "
+         "| Lb(64,16) = 24 XBC"
+     ),
+     ("XBC",),
+     (
+         "Ub(62,15) = 24 follows by a one-step Griesmer bound from: | Ub(37,14) = 12 follows by "
+         "a one-step Griesmer bound from: | Ub(24,13) = 6 follows by a one-step Griesmer bound "
+         "from: | Ub(17,12) = 3 is found by considering truncation to: | Ub(16,12) = 2 is found "
+         "by construction B:"
+     ),
+     (),
+    ),
+    (34, 16, 8, 9,
+     (
+         "Lb(34,16) = 8 is found by taking a subcode of: | Lb(34,18) = 8 is found by shortening "
+         "of: | Lb(38,22) = 8 Sh1"
+     ),
+     ("Sh1",),
+     (
+         "Ub(34,16) = 9 follows by a one-step Griesmer bound from: | Ub(24,15) = 4 otherwise "
+         "adding a parity check bit would contradict: | Ub(25,15) = 5 Si"
+     ),
+     ("Si",),
+    ),
+    (35, 16, 9, 10,
+     "Lb(35,16) = 9 is found by truncation of: | Lb(36,16) = 10 Sh1",
+     ("Sh1",),
+     (
+         "Ub(35,16) = 10 follows by a one-step Griesmer bound from: | Ub(24,15) = 4 otherwise "
+         "adding a parity check bit would contradict: | Ub(25,15) = 5 Si"
+     ),
+     ("Si",),
+    ),
+    (38, 16, 10, 11,
+     (
+         "Lb(38,16) = 10 is found by taking a subcode of: | Lb(38,17) = 10 is found by "
+         "shortening of: | Lb(42,21) = 10 QR"
+     ),
+     ("QR",),
+     "Ub(38,16) = 11 is found by considering shortening to: | Ub(35,13) = 11 Ja",
+     ("Ja",),
+    ),
+    (39, 16, 11, 12,
+     (
+         "Lb(39,16) = 11 is found by shortening of: | Lb(47,24) = 11 is found by truncation of: "
+         "| Lb(48,24) = 12 QR"
+     ),
+     ("QR",),
+     (
+         "Ub(39,16) = 12 follows by a one-step Griesmer bound from: | Ub(26,15) = 6 follows by a "
+         "one-step Griesmer bound from: | Ub(19,14) = 3 is found by considering shortening to: | "
+         "Ub(17,12) = 3 is found by considering truncation to: | Ub(16,12) = 2 is found by "
+         "construction B:"
+     ),
+     (),
+    ),
+    (42, 16, 12, 13,
+     (
+         "Lb(42,16) = 12 is found by taking a subcode of: | Lb(42,18) = 12 is found by "
+         "shortening of: | Lb(48,24) = 12 QR"
+     ),
+     ("QR",),
+     (
+         "Ub(42,16) = 13 follows by a one-step Griesmer bound from: | Ub(28,15) = 6 otherwise "
+         "adding a parity check bit would contradict: | Ub(29,15) = 7 Ja"
+     ),
+     ("Ja",),
+    ),
+    (43, 16, 12, 14,
+     (
+         "Lb(43,16) = 12 is found by taking a subcode of: | Lb(43,19) = 12 is found by "
+         "shortening of: | Lb(48,24) = 12 QR"
+     ),
+     ("QR",),
+     (
+         "Ub(43,16) = 14 follows by a one-step Griesmer bound from: | Ub(28,15) = 6 otherwise "
+         "adding a parity check bit would contradict: | Ub(29,15) = 7 Ja"
+     ),
+     ("Ja",),
+    ),
+    (44, 16, 13, 14,
+     (
+         "Lb(44,16) = 12 is found by taking a subcode of: | Lb(44,20) = 12 is found by "
+         "shortening of: | Lb(48,24) = 12 QR"
+     ),
+     ("QR",),
+     "Ub(44,16) = 14 follows by a one-step Griesmer bound from: | Ub(29,15) = 7 Ja",
+     ("Ja",),
+    ),
+    (46, 16, 14, 15,
+     "Lb(46,16) = 14 is found by adding a parity check bit to: | Lb(45,16) = 13 DJ",
+     ("DJ",),
+     "Ub(46,16) = 15 is found by considering shortening to: | Ub(43,13) = 15 Ja",
+     ("Ja",),
+    ),
+    (47, 16, 15, 16,
+     "Lb(47,16) = 14 is found by shortening of: | Lb(48,17) = 14 BZ",
+     ("BZ",),
+     (
+         "Ub(47,16) = 16 follows by a one-step Griesmer bound from: | Ub(30,15) = 8 follows by a "
+         "one-step Griesmer bound from: | Ub(21,14) = 4 follows by a one-step Griesmer bound "
+         "from: | Ub(16,13) = 2 is found by considering shortening to: | Ub(8,5) = 2 is found by "
+         "construction B:"
+     ),
+     (),
+    ),
+    (50, 16, 16, 17,
+     "Lb(50,16) = 16 is found by shortening of: | Lb(51,17) = 16 cy",
+     ("cy",),
+     (
+         "Ub(50,16) = 17 follows by a one-step Griesmer bound from: | Ub(32,15) = 8 is found by "
+         "considering shortening to: | Ub(28,11) = 8 otherwise adding a parity check bit would "
+         "contradict: | Ub(29,11) = 9 Ja"
+     ),
+     ("Ja",),
+    ),
+    (51, 16, 16, 18,
+     "Lb(51,16) = 16 is found by taking a subcode of: | Lb(51,17) = 16 cy",
+     ("cy",),
+     (
+         "Ub(51,16) = 18 follows by a one-step Griesmer bound from: | Ub(32,15) = 8 is found by "
+         "considering shortening to: | Ub(28,11) = 8 otherwise adding a parity check bit would "
+         "contradict: | Ub(29,11) = 9 Ja"
+     ),
+     ("Ja",),
+    ),
+    (52, 16, 16, 18,
+     (
+         "Lb(52,16) = 16 is found by taking a subcode of: | Lb(52,17) = 16 is found by "
+         "shortening of: | Lb(56,21) = 16 is found by adding a parity check bit to: | Lb(55,21) "
+         "= 15 cy"
+     ),
+     ("cy",),
+     (
+         "Ub(52,16) = 18 follows by a one-step Griesmer bound from: | Ub(33,15) = 9 is found by "
+         "considering shortening to: | Ub(29,11) = 9 Ja"
+     ),
+     ("Ja",),
+    ),
+    (53, 16, 17, 18,
+     (
+         "Lb(53,16) = 17 is found by truncation of: | Lb(56,16) = 20 is found by adding a parity "
+         "check bit to: | Lb(55,16) = 19 LC"
+     ),
+     ("LC",),
+     "Ub(53,16) = 18 is found by considering shortening to: | Ub(51,14) = 18 Ja",
+     ("Ja",),
+    ),
+    (54, 16, 18, 19,
+     (
+         "Lb(54,16) = 18 is found by truncation of: | Lb(56,16) = 20 is found by adding a parity "
+         "check bit to: | Lb(55,16) = 19 LC"
+     ),
+     ("LC",),
+     (
+         "Ub(54,16) = 19 is found by considering shortening to: | Ub(52,14) = 19 is found by "
+         "considering truncation to: | Ub(51,14) = 18 Ja"
+     ),
+     ("Ja",),
+    ),
+    (55, 16, 19, 20,
+     "Lb(55,16) = 19 LC",
+     ("LC",),
+     (
+         "Ub(55,16) = 20 follows by a one-step Griesmer bound from: | Ub(34,15) = 10 follows by "
+         "a one-step Griesmer bound from: | Ub(23,14) = 5 follows by a one-step Griesmer bound "
+         "from: | Ub(17,13) = 2 is found by considering shortening to: | Ub(16,12) = 2 is found "
+         "by construction B:"
+     ),
+     (),
+    ),
+    (58, 16, 20, 21,
+     (
+         "Lb(58,16) = 20 is found by lengthening of: | Lb(56,16) = 20 is found by adding a "
+         "parity check bit to: | Lb(55,16) = 19 LC"
+     ),
+     ("LC",),
+     (
+         "Ub(58,16) = 21 follows by a one-step Griesmer bound from: | Ub(36,15) = 10 is found by "
+         "considering shortening to: | Ub(34,13) = 10 otherwise adding a parity check bit would "
+         "contradict: | Ub(35,13) = 11 Ja"
+     ),
+     ("Ja",),
+    ),
+    (59, 16, 20, 22,
+     "Lb(59,16) = 20 is found by shortening of: | Lb(60,17) = 20 CDJ",
+     ("CDJ",),
+     (
+         "Ub(59,16) = 22 follows by a one-step Griesmer bound from: | Ub(36,15) = 10 is found by "
+         "considering shortening to: | Ub(34,13) = 10 otherwise adding a parity check bit would "
+         "contradict: | Ub(35,13) = 11 Ja"
+     ),
+     ("Ja",),
+    ),
+    (60, 16, 20, 22,
+     "Lb(60,16) = 20 is found by taking a subcode of: | Lb(60,17) = 20 CDJ",
+     ("CDJ",),
+     (
+         "Ub(60,16) = 22 follows by a one-step Griesmer bound from: | Ub(37,15) = 11 is found by "
+         "considering shortening to: | Ub(35,13) = 11 Ja"
+     ),
+     ("Ja",),
+    ),
+    (61, 16, 21, 22,
+     (
+         "Lb(61,16) = 21 is found by shortening of: | Lb(63,18) = 21 is found by truncation of: "
+         "| Lb(64,18) = 22 XBC"
+     ),
+     ("XBC",),
+     "Ub(61,16) = 22 is found by considering shortening to: | Ub(59,14) = 22 Ja",
+     ("Ja",),
+    ),
+    (62, 16, 22, 23,
+     "Lb(62,16) = 22 is found by shortening of: | Lb(64,18) = 22 XBC",
+     ("XBC",),
+     (
+         "Ub(62,16) = 23 is found by considering shortening to: | Ub(60,14) = 23 is found by "
+         "considering truncation to: | Ub(59,14) = 22 Ja"
+     ),
+     ("Ja",),
+    ),
+    (63, 16, 23, 24,
+     "Lb(63,16) = 23 is found by truncation of: | Lb(64,16) = 24 XBC",
+     ("XBC",),
+     (
+         "Ub(63,16) = 24 follows by a one-step Griesmer bound from: | Ub(38,15) = 12 follows by "
+         "a one-step Griesmer bound from: | Ub(25,14) = 6 follows by a one-step Griesmer bound "
+         "from: | Ub(18,13) = 3 is found by considering shortening to: | Ub(17,12) = 3 is found "
+         "by considering truncation to: | Ub(16,12) = 2 is found by construction B:"
+     ),
+     (),
+    ),
+)
+
+
+# Reference keys that codetables.de CITES but never EXPANDS: its own reference list renders them
+# with an empty body on every page that uses them. 16 cells (all on the lower bound) are affected.
+# They are kept, not dropped, because the thing that matters for an honest baseline -- the bound
+# VALUE -- is stated on the cell's own authoritative page and carries a full derivation chain; it is
+# only the bibliography that is missing, and it is missing UPSTREAM. Anything that wants to hold the
+# stricter "every bound traces to a named paper" line can filter on this set rather than trusting a
+# citation string that we would otherwise have had to invent.
+_UNEXPANDED_UPSTREAM_KEYS: frozenset[str] = frozenset({"Sh1", "cy"})
+
+
+def cells_with_unexpanded_reference() -> list[BestKnown]:
+    """The registry cells whose bound cites a key codetables.de never expands (see above)."""
+    return [
+        BEST_KNOWN[(n, k)]
+        for n, k, _lo, _up, _ld, lk, _ud, uk in _OPEN_CELLS
+        if _UNEXPANDED_UPSTREAM_KEYS & set(lk + uk)
+    ]
+
+
+def _cite(derivation: str, keys: tuple[str, ...]) -> str:
+    """A bound's full provenance: how codetables.de derives it, plus the papers it cites.
+
+    ``keys`` are the literature keys that the cell's own page lists for this bound, so a missing
+    key is a parse bug, not something to paper over -- resolve it strictly.
+    """
+    if not keys:
+        return derivation
+    cites = "; ".join(f"[{key}] {_REFERENCES[key]}" for key in keys)
+    return f"{derivation} -- {cites}"
 
 
 def _build_registry() -> dict[tuple[int, int], BestKnown]:
@@ -124,30 +1570,11 @@ def _build_registry() -> dict[tuple[int, int], BestKnown]:
     for (n, k), (d, note) in _CLOSED_ANCHORS.items():
         reg[(n, k)] = BestKnown(n, k, d, d, note, note)
 
-    # ---- GENUINELY OPEN CELLS (lower < upper). Each looked up individually on codetables.de. ----
-    for rec in (
-        BestKnown(
-            32, 14, 8, 9,
-            "subcode of a [32,17,8] code — Y. Cheng & N.J.A. Sloane, 'Codes from symmetry "
-            "groups', SIAM J. Discrete Math. 2 (1989) 28-37",
-            "shortening to a [29,11,9] code — D.B. Jaffe, 'Binary linear codes: new results "
-            "on nonexistence' (1996)",
-        ),
-        BestKnown(
-            35, 10, 12, 13,
-            "subcode of a [35,12,12] code — M. Morii, email communication, September 1993",
-            "shortening to a [34,9,13] code — P.W. Heijnen, dissertation, T.U. Delft, "
-            "October 1993 (no binary [33,9,13] code exists)",
-        ),
-        BestKnown(
-            36, 10, 13, 14,
-            "shortening of [38,12,13], itself a truncation of [39,12,14] — J. Bierbrauer & "
-            "Y. Edel, IEEE Trans. Inf. Th. 43 (1997) 953-968",
-            "shortening to a [33,7,14] code — H.C.A. van Tilborg, Discr. Math. 33 (1981) "
-            "197-207",
-        ),
-    ):
-        reg[(rec.n, rec.k)] = rec
+    # ---- GENUINELY OPEN CELLS (lower < upper), each read off its own codetables.de page. ----
+    for n, k, lower, upper, lo_deriv, lo_keys, up_deriv, up_keys in _OPEN_CELLS:
+        reg[(n, k)] = BestKnown(
+            n, k, lower, upper, _cite(lo_deriv, lo_keys), _cite(up_deriv, up_keys)
+        )
     return reg
 
 
@@ -843,26 +2270,45 @@ def build():
 
 
 # --------------------------------------------------------------------------- #
-# The recommended first cell.
+# The recommended first cell — chosen by MEASUREMENT, not by table-reading.
 #
-# [32,14]: record d=8 (Cheng & Sloane 1989), proven upper bound d=9. Measured on the seed pool:
-#   [32,14]  seeds already reach d=8 == the record.  One more unit closes the cell.
-#   [35,10]  seeds reach d=11; record 12; a beat needs 13.  Two units to climb.
-#   [36,10]  seeds reach d=11; record 13; a beat needs 14.  Three units to climb.
-# So on [32,14] the search STARTS at the frontier — every candidate spent goes at the open
-# question itself rather than at re-climbing to the record. It is also the only cell whose gap the
-# quasi-cyclic seed already brackets.
+# There are 122 open cells now. Two axes decide which to attack first, and they PULL APART:
+#   * gap size    -- a gap of exactly 1 means any single-unit improvement CLOSES the cell.
+#   * verifier cost -- verification is 2^k per candidate, independent of n. k=10 is ~16x cheaper
+#                     than k=14, ~64x cheaper than k=16.
+#   * distance from the frontier -- where the EXISTING seed pool lands vs the record. A cell whose
+#                     seeds already tie the record starts the search at the open question itself; a
+#                     cell whose seeds sit 3-6 below it spends the whole campaign just RE-climbing
+#                     to known territory before it can even attempt the open part. And point-search
+#                     on these landscapes is deceptive (see the seed docstrings), so that re-climb
+#                     is not free.
 #
-# The cost: verification is 2^k, so [32,14] runs ~1 candidate/sec against the current
-# coding_theory.compute_min_distance (which loops in Python over the 2^k codewords), versus ~10-20
-# /sec at k=10. Vectorising that enumeration is worth 16x here and returns bit-identical values.
+# The naive read of "cheap verifier" points at the k=10 cells. But the seed pool was actually run on
+# every gap-1 cell (2^k enumeration, family_sweep/greedy/quasi_cyclic/...), and the cheap cells are
+# NOT close to the frontier:
+#     k=10:  [35,10] seeds 10 vs record 12 (climb 3);  [36,10] 11 vs 13 (climb 3); ... climb 3-6.
+#     k=11:  [36,11] 10 vs 12 (climb 3);  rest climb 3-6.
+#     k=12:  [37,12] 10 vs 12 (climb 3);  rest climb 3-6.
+# whereas exactly three cells have the seeds ALREADY TIED to the record (climb 1), all with gap 1:
+#     [32,14]  seeds reach d=8 == record 8, upper 9.   k=14.
+#     [33,15]  seeds reach d=8 == record 8, upper 9.   k=15.
+#     [34,16]  seeds reach d=8 == record 8, upper 9.   k=16.
+# On any of these the very first generation is at the frontier; a single +1 (d=9) closes the cell.
+# Among them [32,14] has the cheapest verifier (k=14), so it is the single best first target: it is
+# simultaneously gap-1, climb-1, and the least expensive of the climb-1 set. (Measurements come from
+# the wall-clock-budgeted seeds, so the exact seed distances wobble a little run to run; the climb-1
+# vs climb-3+ SEPARATION is stable and is the thing that matters.)
 #
-# HONESTY: an open cell means NOBODY KNOWS — it does NOT mean a better code exists. The true
-# optimum may well equal the lower bound, with the upper bound merely not yet tightened. If the
-# [32,14,9] code does not exist, no amount of search will find it, and the engine cannot produce
-# the nonexistence proof that would close the cell the other way (that is an argument, not an
-# object). Expected yield on any single cell is genuinely uncertain; the case for this target is
-# the BASE RATE across many cells, not a bet on one.
+# If instead you want to exploit raw throughput (~460 cand/sec sustained) rather than a warm start,
+# the cheapest-verifier gap-1 cells are [35,10] and [36,10]: 16x more candidates/sec than [32,14],
+# at the cost of a 3-unit climb before the open question is even in reach. That is a different bet,
+# not a better one.
+#
+# HONESTY: an open cell means NOBODY KNOWS — it does NOT mean a better code exists. The true optimum
+# may equal the lower bound, with the upper bound merely not yet tightened. If the [32,14,9] code
+# does not exist, no amount of search finds it, and the engine cannot emit the nonexistence proof
+# that would close the cell the other way (that is an argument, not an object). Expected yield on any
+# ONE cell is genuinely uncertain; the case for this target is the BASE RATE across many cells.
 # --------------------------------------------------------------------------- #
 RECOMMENDED_CELL = (32, 14)
 
