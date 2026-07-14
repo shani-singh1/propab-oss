@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 NOOP_CODE = f"def {ENTRYPOINT}():\n    return []\n"
 
 #: Keep the prompt bounded: one runaway parent must not blow the context window.
-MAX_PARENT_CHARS = 4_000
+MAX_PARENT_CHARS = 12_000   # a family-sweep parent runs ~5k chars; 4k silently decapitated build()
 #: A "program" larger than this is not a program, it is a data dump.
 MAX_CODE_CHARS = 200_000
 #: How many parents to show. Few-shot on winners; more than a handful just dilutes the signal.
@@ -226,9 +226,35 @@ class LLMMutator:
         return viable[-self.max_parents :]
 
     def _clip(self, code: str) -> str:
+        """Clip a parent to fit the prompt — but NEVER at the cost of `build()`.
+
+        Clipping from the front silently decapitates the program: our targets put a long prelude of
+        shared helpers first and `build()` last, so a head-clip removes the one thing the model is
+        supposed to imitate. That is not hypothetical — it happened. The family-sweep seed is ~5.2k
+        chars against a 4k cap, so the model was shown a pile of helpers with the sweep cut off, and
+        duly wrote short point-constructions (measured: 4 candidates/program from a 400-candidate
+        parent). In program evolution the parent IS the instruction; truncating it truncates the
+        instruction.
+
+        So: keep the TAIL (which contains `build()`), and drop from the middle instead.
+        """
         if len(code) <= self.max_parent_chars:
             return code
-        return code[: self.max_parent_chars] + "\n# ... truncated ...\n"
+
+        marker = f"def {ENTRYPOINT}("
+        cut = code.rfind(marker)
+        if cut == -1:
+            # No entrypoint to protect — fall back to a head clip.
+            return code[: self.max_parent_chars] + "\n# ... truncated ...\n"
+
+        tail = code[cut:]
+        if len(tail) >= self.max_parent_chars:
+            # build() alone overflows: keep its head, and say so.
+            return tail[: self.max_parent_chars] + "\n# ... truncated ...\n"
+
+        head_budget = self.max_parent_chars - len(tail) - 40
+        head = code[:head_budget] if head_budget > 0 else ""
+        return f"{head}\n# ... helper definitions elided ...\n\n{tail}"
 
     # ---------------------------------------------------------------- mutation
 

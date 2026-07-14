@@ -77,9 +77,31 @@ def test_only_the_best_parents_are_shown():
     assert "# p0" not in prompt
 
 
-def test_long_parents_are_clipped():
+def test_long_parents_are_clipped_but_build_always_survives():
+    """Clipping must bound the prompt WITHOUT decapitating the program.
+
+    Our targets put a long prelude of shared helpers first and `build()` last, so a head-clip
+    removes the one thing the model is supposed to imitate. That is not hypothetical: a 4k cap
+    against a ~5.2k family-sweep seed silently cut off the sweep, and the model — shown helpers and
+    a chopped-off program — dutifully wrote short point-constructions (4 candidates/program from a
+    400-candidate parent). In program evolution the parent IS the instruction.
+    """
+    long_prelude = "# " + "x" * 5000 + "\n"
+    body = "def build():\n    yield 1\n    yield 2\n"
+    mutator = LLMMutator(ScriptedLLM(""), max_parent_chars=120)
+
+    prompt = mutator.build_prompt([parent(long_prelude + body, 1.0)], SumProblem())
+
+    assert len(prompt) < 2000                 # still bounded
+    assert "def build()" in prompt            # ...and the entrypoint survived
+    assert "yield 1" in prompt                # ...along with what it actually does
+    assert "x" * 5000 not in prompt           # the prelude is what got dropped
+
+
+def test_a_parent_with_no_entrypoint_still_clips():
+    """No `build()` to protect — fall back to a plain head clip rather than blow the context."""
     mutator = LLMMutator(ScriptedLLM(""), max_parent_chars=50)
-    prompt = mutator.build_prompt([parent("# " + "x" * 5000 + "\ndef build(): pass\n", 1.0)], SumProblem())
+    prompt = mutator.build_prompt([parent("# " + "x" * 5000 + "\n", 1.0)], SumProblem())
     assert "truncated" in prompt
     assert len(prompt) < 2000
 

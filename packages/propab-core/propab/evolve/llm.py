@@ -52,7 +52,7 @@ class GeminiMutationClient:
         temperature: float = 0.9,
         timeout_s: float = 120.0,
         max_retries: int = 4,
-        max_output_tokens: int | None = 2048,
+        max_output_tokens: int | None = 4096,   # a family sweep is longer than a point construction
     ) -> None:
         key = (api_key or os.getenv("GOOGLE_API_KEY") or _settings_value("google_api_key")).strip()
         if not key:
