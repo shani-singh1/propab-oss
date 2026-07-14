@@ -52,7 +52,8 @@ class GeminiMutationClient:
         temperature: float = 0.9,
         timeout_s: float = 120.0,
         max_retries: int = 4,
-        max_output_tokens: int | None = 4096,   # a family sweep is longer than a point construction
+        max_output_tokens: int | None = 8192,
+        thinking_budget: int | None = 0,
     ) -> None:
         key = (api_key or os.getenv("GOOGLE_API_KEY") or _settings_value("google_api_key")).strip()
         if not key:
@@ -73,6 +74,14 @@ class GeminiMutationClient:
         self.timeout_s = timeout_s
         self.max_retries = max_retries
         self.max_output_tokens = max_output_tokens
+        # THINKING OFF, and this is load-bearing. Gemini 3.x flash reasons by default and bills those
+        # thought tokens against maxOutputTokens. On our ~9.6k-char mutation prompt it spent 3,928 of
+        # 4,096 tokens thinking, left 164 for code, and returned a function truncated mid-body
+        # (finishReason=MAX_TOKENS). extract_program() then found nothing runnable and fell back to
+        # the no-op — so nearly every child emitted ZERO candidates and the search was mostly empty.
+        # Measured on the real prompt: thinking on -> 0 candidates; thinking off -> 350.
+        # A mutation operator does not need to reason. It needs to write code.
+        self.thinking_budget = thinking_budget
 
         # Auth goes in a HEADER, never a query param. httpx logs the request URL at INFO, so
         # `?key=...` would print the secret into every campaign log (it did — caught in the first
@@ -99,6 +108,8 @@ class GeminiMutationClient:
         gen: dict[str, Any] = {"temperature": self.temperature}
         if self.max_output_tokens:
             gen["maxOutputTokens"] = int(self.max_output_tokens)
+        if self.thinking_budget is not None:
+            gen["thinkingConfig"] = {"thinkingBudget": int(self.thinking_budget)}
         payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": gen}
 
         last: Exception | None = None
